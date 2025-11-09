@@ -9,6 +9,9 @@ from typing import Optional
 import duckdb
 import pandas as pd
 import requests
+from src.import_job_store import ImportJobStore
+from pathlib import Path
+import hashlib
 
 LOG = logging.getLogger("import_gex_history_safe")
 
@@ -62,10 +65,27 @@ def safe_import(file_path: Path | str, duckdb_path: Path | str = Path("data/gex_
     if not file_path.exists():
         raise FileNotFoundError(file_path)
 
-    job_id = uuid.uuid4().hex[:8]
+    job_id = None
+    staging_table = None
+
+    # compute checksum and check job store for dedupe/resume
+    job_store = ImportJobStore(db_path=Path("data/gex_history.db"))
+    checksum = job_store.compute_checksum(file_path)
+    existing = job_store.find_by_checksum(checksum)
+    if existing and existing.get("status") == "completed":
+        # skip re-import
+        return {"job_id": existing.get("id"), "staging_table": None, "records": existing.get("records_processed"), "skipped": True}
+
+    if existing:
+        job_id = existing.get("id")
+    else:
+        job_id = job_store.create_job(None, checksum, None)
+
     staging_table = f"staging_strikes_{job_id}"
 
     LOG.info("Starting safe import job=%s file=%s db=%s", job_id, file_path, duckdb_path)
+
+    job_store.mark_started(job_id)
 
     # Load JSON into pandas (assume array of objects)
     df = pd.read_json(file_path, orient="records")
@@ -103,6 +123,7 @@ def safe_import(file_path: Path | str, duckdb_path: Path | str = Path("data/gex_
             con.execute("CREATE TABLE IF NOT EXISTS strikes AS SELECT * FROM (SELECT * FROM (SELECT NULL AS timestamp) LIMIT 0)")
             con.execute(f"INSERT INTO strikes SELECT * FROM {staging_table}")
             con.commit()
+            job_store.mark_completed(job_id, count)
 
         return result
     finally:
