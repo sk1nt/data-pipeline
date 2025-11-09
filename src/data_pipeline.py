@@ -5,6 +5,13 @@ FastAPI implementation of the migrated data-pipeline.py functionality.
 Provides endpoints for GEX data capture, historical imports, and webhook handling.
 """
 
+import sys
+from pathlib import Path
+
+# Add parent directory to sys.path for relative imports when run as script
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -176,7 +183,7 @@ async def universal_webhook_endpoint(request: Request):
 
 if __name__ == "__main__":
     uvicorn.run(
-        "data_pipeline:app",
+        "src.data_pipeline:app",
         host="0.0.0.0",
         port=8877,
         reload=True,
