@@ -1,0 +1,28 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "graph",
+      "title": "Imported Records (per ticker)",
+      "targets": [
+        {
+          "expr": "gex_import_records_total",
+          "legendFormat": "{{ticker}}"
+        }
+      ],
+      "id": 1
+    },
+    {
+      "type": "gauge",
+      "title": "Last Import Duration (s)",
+      "targets": [
+        { "expr": "gex_import_duration_seconds_bucket" }
+      ],
+      "id": 2
+    }
+  ],
+  "title": "GEX Pipeline Overview",
+  "version": 1
+}
