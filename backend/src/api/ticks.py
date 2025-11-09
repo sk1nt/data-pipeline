@@ -50,7 +50,7 @@ async def get_historical_ticks(
     symbols: List[str] = Query(..., description="Comma-separated list of financial symbols"),
     start_time: datetime = Query(..., description="Start of time range (ISO 8601)"),
     end_time: datetime = Query(..., description="End of time range (ISO 8601)"),
-    interval: str = Query("1h", regex="^(1s|1m|1h|4h)$", description="Aggregation interval"),
+    interval: str = Query("1h", pattern="^(1s|1m|1h|4h)$", description="Aggregation interval"),
     model_id: str = Depends(verify_api_key)
 ):
     """Get historical tick data for backtesting."""

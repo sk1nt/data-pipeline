@@ -1,5 +1,6 @@
 import pytest
 from backend.src.models.tick_data import TickData
+from pydantic import ValidationError
 from decimal import Decimal
 from datetime import datetime
 
@@ -28,7 +29,7 @@ def test_tick_data_validation():
     )
 
     # Invalid: negative price
-    with pytest.raises(ValueError):
+    with pytest.raises(ValidationError):
         TickData(
             symbol="AAPL",
             timestamp=datetime.now(),

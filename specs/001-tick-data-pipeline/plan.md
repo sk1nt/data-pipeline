@@ -1,42 +1,42 @@
 # Implementation Plan: Financial Tick Data Pipeline
 
-**Branch**: `001-tick-data-pipeline` | **Date**: 2025-11-07 | **Spec**: specs/001-tick-data-pipeline/spec.md
+**Branch**: `001-tick-data-pipeline` | **Date**: 2025-11-07 | **Spec**: /specs/001-tick-data-pipeline/spec.md
 **Input**: Feature specification from `/specs/001-tick-data-pipeline/spec.md`
 
 **Note**: This template is filled in by the `/speckit.plan` command. See `.specify/templates/commands/plan.md` for the execution workflow.
 
 ## Summary
 
-Build a high-performance data pipeline platform for financial tick data, ensuring data quality and continuity through filtering, in-memory storage with periodic compression to disk, accuracy testing, and secure querying by AI models for real-time trading and backtesting. Includes a monitoring UI for service status and data samples. Technical approach uses Python with Polars for data processing, DuckDB for storage, Redis for caching, and vanilla web technologies for the UI.
+Build a high-performance financial tick data pipeline that ingests real-time market data from multiple sources (TastyTrade, GEXBot, Sierra Chart), stores it in memory for 1 hour then compresses to disk using DuckDB with Parquet, provides secure API access for AI models, and includes a monitoring UI. The system must handle 10,000 ticks/second with sub-10ms query response times.
 
 ## Technical Context
 
 **Language/Version**: Python 3.11  
-**Primary Dependencies**: Polars, DuckDB, Redis, minimal libraries for API (e.g., FastAPI or similar lightweight)  
-**Storage**: DuckDB with Parquet files, Redis for in-memory cache  
-**Testing**: pytest  
-**Target Platform**: Linux (WSL2)  
-**Project Type**: Web application (backend + frontend)  
-**Performance Goals**: Ingest 10,000 ticks/second, query latency <10ms, UI load <1s  
-**Constraints**: Configurable in-memory retention (default 1 hour), daily gap detection scans, subsecond ticks sampled to 1s-4h intervals, hydrate from multiple sources at 1s intervals  
-**Scale/Scope**: Multiple real-time data sources (Sierra Chart, gexbot API, TastyTrade DXClient), enriched data sampling, secure AI model access
+**Primary Dependencies**: Polars, DuckDB, Redis, FastAPI, Pydantic, TastyTrade SDK  
+**Storage**: DuckDB with Parquet for historical data, Redis for real-time caching  
+**Testing**: pytest with async support  
+**Target Platform**: Linux (WSL2 environment)  
+**Project Type**: Web application with backend API and frontend UI  
+**Performance Goals**: 10,000 ticks/second ingestion, <10ms query response times, 1 second UI load  
+**Constraints**: 1 hour memory retention, 1 year historical data retention, 99.9% data accuracy  
+**Scale/Scope**: Real-time financial data processing, AI model integration, monitoring dashboard
 
 ## Constitution Check
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-- Code Quality: Project must include linting and formatting tools; Code reviews mandatory
-- Accuracy: Implement data validation and error checking mechanisms
-- Consistency: Use consistent coding style and naming conventions; Enforce with linters
-- Testing: Adopt TDD; Comprehensive unit, integration, and end-to-end tests required
-- Performance: Define and monitor performance goals; Optimize critical paths
+- Code Quality: Project must include linting and formatting tools (ruff); Code reviews mandatory
+- Accuracy: Implement data validation and error checking mechanisms for financial data integrity
+- Consistency: Use consistent coding style and naming conventions; Enforce with ruff linter
+- Testing: Adopt TDD; Comprehensive unit, integration, and end-to-end tests required (pytest)
+- Performance: Define and monitor performance goals (10k ticks/sec, <10ms queries); Optimize critical paths
 
 ## Project Structure
 
 ### Documentation (this feature)
 
 ```text
-specs/001-tick-data-pipeline/
+specs/[###-feature]/
 ├── plan.md              # This file (/speckit.plan command output)
 ├── research.md          # Phase 0 output (/speckit.plan command)
 ├── data-model.md        # Phase 1 output (/speckit.plan command)
@@ -50,35 +50,45 @@ specs/001-tick-data-pipeline/
 ```text
 backend/
 ├── src/
+│   ├── api/
+│   │   ├── endpoints.py
+│   │   ├── main.py
+│   │   └── middleware.py
 │   ├── models/
-│   ├── services/
-│   └── api/
+│   │   └── tick_data.py
+│   └── services/
+│       ├── duckdb_service.py
+│       ├── ingestion_tastyttrade.py
+│       └── redis_service.py
 └── tests/
+    ├── contract/
+    ├── integration/
+    └── unit/
 
 frontend/
-├── src/
-│   ├── components/
-│   ├── pages/
-│   └── services/
+├── static/
+│   ├── css/
+│   ├── js/
+│   └── index.html
 └── tests/
 
-data/
-├── source/
-│   ├── sierra_chart/
-│   ├── gexbot/
-│   └── tastyttrade/
-├── enriched/
-├── tick_data.db
-└── my_trades.db
+examples/
+└── data-pipeline.py
 
-redis/
-└── [Redis configuration and data]
+specs/
+└── 001-tick-data-pipeline/
+    ├── contracts/
+    ├── checklists/
+    └── [other spec files]
 ```
 
-**Structure Decision**: Web application with separate backend (Python) and frontend (vanilla HTML/CSS/JS) directories. Data storage follows specified structure with source subdirectories for each data provider, enriched data folder, DuckDB files, and Redis directory. No additional directories created without agreement.
+**Structure Decision**: Web application with separate backend (FastAPI) and frontend (vanilla HTML/CSS/JS) components. Backend handles data ingestion, storage, and API serving. Frontend provides monitoring UI. Examples directory contains reference implementations like the GEXBot webhook bridge.
 
 ## Complexity Tracking
 
 > **Fill ONLY if Constitution Check has violations that must be justified**
 
-No violations identified.
+| Violation | Why Needed | Simpler Alternative Rejected Because |
+|-----------|------------|-------------------------------------|
+| [e.g., 4th project] | [current need] | [why 3 projects insufficient] |
+| [e.g., Repository pattern] | [specific problem] | [why direct DB access insufficient] |

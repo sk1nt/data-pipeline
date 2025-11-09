@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Add the parent directory to sys.path for relative imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import json
 import uuid
 import logging
@@ -118,33 +124,120 @@ def safe_import(file_path: Path | str, duckdb_path: Path | str = Path("data/gex_
         if publish:
             LOG.info("Publishing staging table %s into `strikes`", staging_table)
             # Insert into final table in a transaction to avoid partial writes
-            con.begin()
-            # Ensure target table exists; create with same schema as staging if not present
-            con.execute(f"CREATE TABLE IF NOT EXISTS strikes AS SELECT * FROM {staging_table} LIMIT 0")
-            con.execute(f"INSERT INTO strikes SELECT * FROM {staging_table}")
-            con.commit()
-            job_store.mark_completed(job_id, count)
+            try:
+                con.begin()
+                # Ensure target table exists; create with same schema as staging if not present
+                con.execute(f"CREATE TABLE IF NOT EXISTS strikes AS SELECT * FROM {staging_table} LIMIT 0")
+                con.execute(f"INSERT INTO strikes SELECT * FROM {staging_table}")
+                con.commit()
+
+                # Determine canonical parquet path using earliest timestamp in the batch
+                try:
+                    min_ts = con.execute(f"SELECT MIN(timestamp) FROM {staging_table}").fetchone()[0]
+                except Exception:
+                    min_ts = None
+
+                # Fallback to current time if we couldn't determine timestamp
+                from datetime import datetime
+
+                if min_ts is None:
+                    now = datetime.utcnow()
+                    year = now.year
+                    month = now.month
+                else:
+                    try:
+                        # assume epoch seconds
+                        dt = datetime.utcfromtimestamp(float(min_ts))
+                    except Exception:
+                        # if it's already a date-like string, parse via pandas
+                        try:
+                            import pandas as _pd
+
+                            dt = _pd.to_datetime(min_ts).to_pydatetime()
+                        except Exception:
+                            dt = datetime.utcnow()
+                    year = dt.year
+                    month = dt.month
+
+                # Try to infer ticker and endpoint from filename or job metadata
+                ticker = None
+                endpoint = None
+                try:
+                    if existing:
+                        ticker = existing.get("ticker")
+                        endpoint = existing.get("endpoint")
+                except Exception:
+                    pass
+
+                if not ticker or not endpoint:
+                    # filename pattern: <ticker>_<endpoint>_history_<id>.json
+                    stem = file_path.stem
+                    if "_history_" in stem:
+                        prefix = stem.split("_history_")[0]
+                        if "_" in prefix:
+                            ticker, endpoint = prefix.rsplit("_", 1)
+                        else:
+                            ticker = prefix
+                            endpoint = "gex_zero"
+                    else:
+                        ticker = ticker or "UNKNOWN"
+                        endpoint = endpoint or "gex_zero"
+
+                dest_dir = Path(f"data/parquet/gex/year={year}/month={month:02d}/{ticker}/{endpoint}")
+                dest_dir.mkdir(parents=True, exist_ok=True)
+
+                target = dest_dir / "strikes.parquet"
+                # If a file already exists for this slot, avoid overwriting: write with job_id suffix
+                if target.exists():
+                    target = dest_dir / f"strikes_{job_id}.parquet"
+
+                # Use DuckDB to write Parquet for schema stability
+                con.execute(f"COPY (SELECT * FROM {staging_table}) TO '{str(target)}' (FORMAT PARQUET)")
+
+                # Mark job completed only after successful Parquet write
+                job_store.mark_completed(job_id, count)
+            except Exception as e:
+                try:
+                    con.rollback()
+                except Exception:
+                    pass
+                job_store.mark_failed(job_id, str(e))
+                raise
 
         return result
     finally:
         con.close()
 
 
+def process_latest_job(duckdb_path: Path | str = Path("data/gex_data.db"), history_db_path: Path | str = Path("data/gex_history.db")):
+    """Fetch the latest pending job from the database, download the file, and import it."""
+    job_store = ImportJobStore(db_path=history_db_path)
+    con = job_store._connect()
+
+    try:
+        # Fetch the latest pending job
+        job = con.execute("SELECT id, url, ticker FROM import_jobs WHERE status = 'pending' ORDER BY created_at LIMIT 1").fetchone()
+        if not job:
+            LOG.info("No pending jobs found.")
+            return
+
+        job_id, url, ticker = job
+        LOG.info("Processing job %s for ticker %s from URL %s", job_id, ticker, url)
+
+        # Mark job as started
+        job_store.mark_started(job_id)
+
+        # Download and import
+        staged_file = download_to_staging(url, ticker)
+        result = safe_import(staged_file, duckdb_path=duckdb_path)
+
+        LOG.info("Job %s completed: %d records imported.", job_id, result.get("records", 0))
+    except Exception as e:
+        LOG.error("Failed to process job: %s", e)
+        job_store.mark_failed(job_id, str(e))
+    finally:
+        con.close()
+
+
 if __name__ == "__main__":
-    import argparse
-
-    p = argparse.ArgumentParser(description="Safe import historical GEX JSON into DuckDB staging and publish")
-    p.add_argument("url_or_path", help="HTTP URL or file:// path to JSON file")
-    p.add_argument("--ticker", required=False, help="ticker for file naming (optional)")
-    p.add_argument("--duckdb", default="data/gex_data.db", help="path to duckdb database")
-    p.add_argument("--no-publish", dest="publish", action="store_false", help="Do not publish, only stage")
-    args = p.parse_args()
-
-    path = args.url_or_path
-    if path.startswith("http://") or path.startswith("https://") or path.startswith("file://"):
-        staged = download_to_staging(path, args.ticker or "UNKNOWN")
-    else:
-        staged = Path(path)
-
-    out = safe_import(staged, duckdb_path=args.duckdb, publish=args.publish)
-    print(out)
+    process_latest_job()

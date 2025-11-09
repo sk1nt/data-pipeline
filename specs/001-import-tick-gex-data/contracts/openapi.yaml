@@ -1,0 +1,280 @@
+openapi: 3.0.3
+info:
+  title: Data Pipeline API
+  version: 1.0.0
+  description: API for importing and querying GEX data
+servers:
+  - url: http://localhost:8000
+    description: Local development server
+paths:
+  /import:
+    post:
+      summary: Import data from legacy-source outputs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImportRequest'
+      responses:
+        '200':
+          description: Import completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportResponse'
+        '400':
+          description: Invalid request or import failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /gex:
+    get:
+      summary: Query GEX snapshots
+      parameters:
+        - name: symbol
+          in: query
+          schema:
+            type: string
+            example: "NQ_NDX"
+          required: true
+          description: Futures contract symbol
+        - name: start
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Start timestamp (inclusive)
+        - name: end
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: End timestamp (inclusive)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+            default: 1000
+          description: Maximum number of records to return
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GEXSnapshot'
+  /lineage:
+    get:
+      summary: Query data lineage records
+      parameters:
+        - name: record_type
+          in: query
+          schema:
+            type: string
+            enum: [gex]
+          description: Filter by record type
+        - name: start
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Start timestamp (inclusive)
+        - name: end
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: End timestamp (inclusive)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+          description: Maximum number of records to return
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DataLineage'
+components:
+  schemas:
+    ImportRequest:
+      type: object
+      properties:
+        source_path:
+          type: string
+          description: Path to legacy-source output directory
+          example: "/data/legacy-source/outputs"
+        data_types:
+          type: array
+          items:
+            type: string
+            enum: [gex]
+          description: Types of data to import
+          default: ["gex"]
+        validate_only:
+          type: boolean
+          description: Only validate data without importing
+          default: false
+      required: [source_path]
+    ImportResponse:
+      type: object
+      properties:
+        import_id:
+          type: string
+          description: Unique identifier for this import operation
+        status:
+          type: string
+          enum: [success, partial, failed]
+        records_imported:
+          type: object
+          properties:
+            gex:
+              type: integer
+              description: Number of GEX snapshots imported
+        errors:
+          type: array
+          items:
+            type: string
+          description: List of error messages if any
+        duration_seconds:
+          type: number
+          description: Time taken for import operation
+      required: [import_id, status, records_imported]
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+        details:
+          type: object
+          description: Additional error details
+      required: [error]
+    GEXSnapshot:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          description: When the snapshot was taken
+        ticker:
+          type: string
+          description: Futures contract symbol
+          example: "NQ_NDX"
+        spot_price:
+          type: number
+          description: Underlying spot price
+          minimum: 0
+        zero_gamma:
+          type: number
+          description: Zero gamma value
+        net_gex:
+          type: number
+          description: Net gamma exposure
+        min_dte:
+          type: integer
+          description: Minimum days to expiration
+          minimum: 0
+        sec_min_dte:
+          type: integer
+          description: Secondary minimum days to expiration
+          minimum: 0
+        major_pos_vol:
+          type: number
+          description: Major positive volume gamma
+        major_pos_oi:
+          type: number
+          description: Major positive open interest gamma
+        major_neg_vol:
+          type: number
+          description: Major negative volume gamma
+        major_neg_oi:
+          type: number
+          description: Major negative open interest gamma
+        sum_gex_vol:
+          type: number
+          description: Sum of volume-based gamma exposure
+        sum_gex_oi:
+          type: number
+          description: Sum of open interest gamma exposure
+        delta_risk_reversal:
+          type: number
+          description: Delta risk reversal metric
+        max_priors:
+          type: array
+          items:
+            type: number
+          description: Maximum prior values by expiration bucket
+        strike_data:
+          type: array
+          items:
+            $ref: '#/components/schemas/StrikeData'
+          description: Array of strike information
+          minItems: 1
+      required: [timestamp, ticker, spot_price, zero_gamma, net_gex, strike_data]
+    StrikeData:
+      type: object
+      properties:
+        strike:
+          type: number
+          description: Strike price
+          minimum: 0
+        gamma:
+          type: number
+          description: Volume-based gamma exposure at this strike
+        oi_gamma:
+          type: number
+          description: Open interest gamma exposure at this strike
+        priors:
+          type: array
+          items:
+            type: number
+          description: Prior values for this strike
+          minItems: 5
+          maxItems: 5
+      required: [strike, gamma, oi_gamma]
+    DataLineage:
+      type: object
+      properties:
+        import_id:
+          type: string
+          description: Unique identifier for the import operation
+        source_file:
+          type: string
+          description: Path to the source file
+        record_type:
+          type: string
+          description: Type of data imported
+          enum: [gex]
+        records_imported:
+          type: integer
+          description: Number of records successfully imported
+          minimum: 0
+        import_timestamp:
+          type: string
+          format: date-time
+          description: When the import occurred
+        status:
+          type: string
+          description: Import status
+          enum: [success, partial, failed]
+        errors:
+          type: array
+          items:
+            type: string
+          description: List of error messages if any
+      required: [import_id, source_file, record_type, records_imported, import_timestamp, status]</content>
+<parameter name="filePath">/home/rwest/projects/data-pipeline/specs/001-import-tick-gex-data/contracts/openapi.yaml
