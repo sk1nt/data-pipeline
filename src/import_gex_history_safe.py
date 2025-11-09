@@ -54,7 +54,7 @@ def download_to_staging(url: str, ticker: str, endpoint: str = "gex_zero") -> Pa
     return final_path
 
 
-def safe_import(file_path: Path | str, duckdb_path: Path | str = Path("data/gex_data.db"), publish: bool = True) -> dict:
+def safe_import(file_path: Path | str, duckdb_path: Path | str = Path("data/gex_data.db"), publish: bool = True, history_db_path: Path | str = Path("data/gex_history.db")) -> dict:
     """Safely import historical GEX JSON into a staging table, validate, then publish.
 
     If `publish` is False the staging table is left in place for inspection.
@@ -69,7 +69,7 @@ def safe_import(file_path: Path | str, duckdb_path: Path | str = Path("data/gex_
     staging_table = None
 
     # compute checksum and check job store for dedupe/resume
-    job_store = ImportJobStore(db_path=Path("data/gex_history.db"))
+    job_store = ImportJobStore(db_path=Path(history_db_path))
     checksum = job_store.compute_checksum(file_path)
     existing = job_store.find_by_checksum(checksum)
     if existing and existing.get("status") == "completed":
@@ -119,8 +119,8 @@ def safe_import(file_path: Path | str, duckdb_path: Path | str = Path("data/gex_
             LOG.info("Publishing staging table %s into `strikes`", staging_table)
             # Insert into final table in a transaction to avoid partial writes
             con.begin()
-            # Ensure target table exists; create if not
-            con.execute("CREATE TABLE IF NOT EXISTS strikes AS SELECT * FROM (SELECT * FROM (SELECT NULL AS timestamp) LIMIT 0)")
+            # Ensure target table exists; create with same schema as staging if not present
+            con.execute(f"CREATE TABLE IF NOT EXISTS strikes AS SELECT * FROM {staging_table} LIMIT 0")
             con.execute(f"INSERT INTO strikes SELECT * FROM {staging_table}")
             con.commit()
             job_store.mark_completed(job_id, count)

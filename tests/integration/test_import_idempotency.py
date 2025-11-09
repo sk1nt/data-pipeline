@@ -1,7 +1,11 @@
 import json
+import sys
 from pathlib import Path
 
 import duckdb
+
+# ensure project src/ is on path for imports
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.import_gex_history_safe import safe_import
 from src.import_job_store import ImportJobStore
@@ -31,7 +35,7 @@ def test_idempotent_import(tmp_path):
     make_sample_json(src_file)
 
     # first import
-    res1 = safe_import(src_file, duckdb_path=db_path, publish=True)
+    res1 = safe_import(src_file, duckdb_path=db_path, publish=True, history_db_path=history_db)
     assert res1.get("records") == 1
 
     # second import (same file) should be skipped due to checksum
@@ -43,7 +47,7 @@ def test_idempotent_import(tmp_path):
     job_store.mark_started(jid)
     job_store.mark_completed(jid, 1)
 
-    res2 = safe_import(src_file, duckdb_path=db_path, publish=True)
+    res2 = safe_import(src_file, duckdb_path=db_path, publish=True, history_db_path=history_db)
     assert res2.get("skipped") is True
 
     con = duckdb.connect(str(db_path))
