@@ -60,9 +60,13 @@ class GEXPayload(BaseModel):
 class GEXHistoryRequest(BaseModel):
     """Model for historical data import request via /gex_history_url."""
 
+    model_config = {"extra": "allow"}
+
     url: str = Field(..., description="Source URL for historical data download")
-    ticker: str = Field(..., min_length=1, description="Associated ticker symbol")
-    endpoint: str = Field(..., min_length=1, description="Data endpoint")
+    ticker: Optional[str] = Field(None, description="Associated ticker symbol")
+    endpoint: Optional[str] = Field(None, description="Data endpoint label (defaults to gex_zero)")
+    feed: Optional[str] = Field(None, description="Legacy endpoint alias: feed")
+    kind: Optional[str] = Field(None, description="Legacy endpoint alias: kind")
 
     @field_validator('url')
     @classmethod
@@ -71,6 +75,37 @@ class GEXHistoryRequest(BaseModel):
         if not v.startswith(('http://', 'https://')):
             raise ValueError("URL must start with http:// or https://")
         return v
+
+    @field_validator('ticker', mode='after')
+    @classmethod
+    def normalize_ticker(cls, v, info):
+        """Allow ticker to be inferred from the URL if omitted."""
+        if v and v.strip():
+            return v.strip()
+
+        data = info.data
+        url = data.get('url', '')
+        if url:
+            import re
+            match = re.search(r'/(\d{4}-\d{2}-\d{2})_([^_]+)_classic', url)
+            if match:
+                inferred = match.group(2)
+                return inferred
+
+        raise ValueError("Ticker must be provided or parsable from URL")
+
+    @field_validator('endpoint', mode='after')
+    @classmethod
+    def normalize_endpoint(cls, v, info):
+        """Support legacy payloads that use feed/kind fields."""
+        if v:
+            return v
+        data = info.data  # contains raw input data
+        for legacy_field in ('feed', 'kind'):
+            legacy_val = data.get(legacy_field)
+            if isinstance(legacy_val, str) and legacy_val.strip():
+                return legacy_val.strip()
+        return "gex_zero"
 
 
 class GEXHistoryResponse(BaseModel):

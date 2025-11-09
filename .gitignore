@@ -112,6 +112,7 @@ dmypy.json
 # Data and logs
 *.log
 logs/
-data/*.log
+#data/*.log
 redis/dump.rdb
 redis/*.log
+data/

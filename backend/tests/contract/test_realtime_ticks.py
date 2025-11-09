@@ -11,7 +11,7 @@ def test_realtime_ticks_contract():
     # For now, test that endpoint exists and returns proper error for missing auth
 
     response = client.get("/api/v1/ticks/realtime?symbols=AAPL")
-    assert response.status_code == 401  # Unauthorized without API key
+    assert response.status_code == 403  # Forbidden without API key
 
     # Test with invalid API key
     response = client.get("/api/v1/ticks/realtime?symbols=AAPL", headers={"Authorization": "Bearer invalid"})

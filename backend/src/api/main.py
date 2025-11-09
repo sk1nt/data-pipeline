@@ -44,10 +44,11 @@ app.add_middleware(
 )
 
 # Include routers
-from .api import ticks, status
+from .ticks import router as ticks_router
+from .status import router as status_router
 
-app.include_router(ticks.router, prefix="/api/v1", tags=["ticks"])
-app.include_router(status.router, prefix="/api/v1", tags=["status"])
+app.include_router(ticks_router, prefix="/api/v1", tags=["ticks"])
+app.include_router(status_router, prefix="/api/v1", tags=["status"])
 
 @app.get("/")
 async def root():
@@ -64,6 +65,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=int(os.getenv("PORT", 8000)),
+        port=int(os.getenv("PORT", 8877)),
         reload=True
     )

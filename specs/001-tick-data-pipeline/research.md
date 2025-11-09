@@ -52,9 +52,9 @@
 
 ### UI Implementation
 
-**Decision**: Vanilla HTML, CSS, and JavaScript for monitoring UI.  
-**Rationale**: Ensures high performance, minimal dependencies, and broad compatibility. Suitable for dashboard-style monitoring.  
-**Alternatives Considered**: React/Vue (adds build complexity), server-side rendering (slower updates).
+**Decision**: Vanilla HTML, CSS, and JavaScript for monitoring UI with sleek modern dark mode design.  
+**Rationale**: Ensures high performance, minimal dependencies, and broad compatibility. Dark mode provides better readability for financial data monitoring. Suitable for dashboard-style monitoring.  
+**Alternatives Considered**: React/Vue (adds build complexity), server-side rendering (slower updates), light mode (less suitable for prolonged data viewing).
 
 ### Directory Structure
 
@@ -73,6 +73,24 @@
 **Decision**: API key-based authentication for AI models.  
 **Rationale**: Simple, secure, and scalable for programmatic access.  
 **Alternatives Considered**: OAuth2 (overkill for AI models), no authentication (insecure).
+
+### Data Source Integration
+
+**Decision**: Use .env file for loading gexbot API and tastytrade connection information.  
+**Rationale**: Standard practice for sensitive configuration, allows environment-specific settings.  
+**Alternatives Considered**: Hardcoded values (insecure), config files (less standard).
+
+**Decision**: Store market depth information in Data/MarketDepthData directory.  
+**Rationale**: Organizes market depth data separately from tick data for easier access and management.  
+**Alternatives Considered**: Mixed with tick data (less organized), database storage (unnecessary for raw data).
+
+**Decision**: Initial implementation focuses on MES, MNQ, NQ futures contracts with SPY, QQQ, VIX equities tracking.  
+**Rationale**: Allows phased rollout starting with key futures and equities while preparing for expansion.  
+**Alternatives Considered**: All contracts simultaneously (complex), single contract only (limited scope).
+
+**Decision**: Gex data uses 1-second intervals with NQ_NDX mapping to either NQ or MNQ.  
+**Rationale**: Provides fine-grained data for gamma exposure calculations while maintaining mapping flexibility.  
+**Alternatives Considered**: Fixed contract mapping (less flexible), lower frequency (insufficient granularity).
 
 ## Resolved Clarifications
 

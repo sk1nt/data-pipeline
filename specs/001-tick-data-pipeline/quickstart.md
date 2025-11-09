@@ -24,8 +24,8 @@
 
 2. **Configure environment**:
    ```bash
-   cp backend/config.example.yaml backend/config.yaml
-   # Edit config.yaml with your API keys and settings
+   cp .env.example .env
+   # Edit .env with your gexbot API and tastytrade connection information
    ```
 
 3. **Start Redis**:
@@ -94,8 +94,15 @@
 
 - **Raw tick data**: `./data/source/{source}/`
 - **Enriched data**: `./data/enriched/`
+- **Market depth data**: `./Data/MarketDepthData/`
 - **Database files**: `./data/tick_data.db`, `./data/my_trades.db`
 - **Redis cache**: `./redis/`
+
+## Contract Information
+
+- **Initial implementation**: MES, MNQ, NQ futures contracts
+- **Also tracked**: SPY, QQQ, VIX equities
+- **Gex data**: 1-second intervals using NQ_NDX mapping
 
 ## Troubleshooting
 
