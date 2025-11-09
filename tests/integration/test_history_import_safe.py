@@ -27,13 +27,15 @@ def make_sample_json(path: Path):
 
 def test_safe_import_stages_and_inserts(tmp_path, monkeypatch):
     db_path = tmp_path / "gex_data.db"
+    history_db_path = tmp_path / "gex_history.db"
     # create empty duckdb
     duckdb.connect(str(db_path)).close()
+    duckdb.connect(str(history_db_path)).close()
 
     src_file = tmp_path / "sample_history.json"
     make_sample_json(src_file)
 
-    result = safe_import(src_file, duckdb_path=db_path, publish=True)
+    result = safe_import(src_file, duckdb_path=db_path, publish=True, history_db_path=history_db_path)
     assert "job_id" in result
     assert result["records"] == 2
 

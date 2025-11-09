@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import duckdb
 
 
 def _now() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
 class ImportJobStore:
