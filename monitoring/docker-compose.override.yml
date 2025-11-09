@@ -1,0 +1,7 @@
+services:
+  metrics_exporter:
+    image: hashicorp/http-echo:0.2.3
+    container_name: metrics_exporter
+    # Serve a tiny Prometheus-style metric on port 8000 so Prometheus can scrape it.
+    command: ["-text", "# HELP dummy_metric A placeholder metric\n# TYPE dummy_metric gauge\ndummy_metric 1", "-listen=:8000"]
+    restart: unless-stopped
