@@ -18,6 +18,8 @@ import requests
 from src.import_job_store import ImportJobStore
 from pathlib import Path
 import hashlib
+import traceback
+from datetime import datetime
 
 LOG = logging.getLogger("import_gex_history_safe")
 
@@ -119,6 +121,38 @@ def safe_import(file_path: Path | str, duckdb_path: Path | str = Path("data/gex_
         if null_ts > 0:
             raise ValueError("Staging table contains null timestamps")
 
+        # Timestamp range validation: compute min/max and ensure they are within reasonable bounds
+        try:
+            min_ts = con.execute(f"SELECT MIN(timestamp) FROM {staging_table}").fetchone()[0]
+            max_ts = con.execute(f"SELECT MAX(timestamp) FROM {staging_table}").fetchone()[0]
+        except Exception:
+            min_ts = None
+            max_ts = None
+
+        def _to_year(val):
+            if val is None:
+                return None
+            try:
+                # numeric epoch seconds
+                return datetime.utcfromtimestamp(float(val)).year
+            except Exception:
+                try:
+                    return pd.to_datetime(val, errors='coerce').year
+                except Exception:
+                    return None
+
+        min_year = _to_year(min_ts)
+        max_year = _to_year(max_ts)
+
+        current_year = datetime.utcnow().year
+        # Acceptable range: 2000..(current_year+1)
+        if min_year is not None and (min_year < 2000 or min_year > current_year + 1):
+            raise ValueError(f"Min timestamp year {min_year} out of acceptable range")
+        if max_year is not None and (max_year < 2000 or max_year > current_year + 1):
+            raise ValueError(f"Max timestamp year {max_year} out of acceptable range")
+
+        LOG.info("Staging timestamps range: min=%s max=%s (years %s-%s)", min_ts, max_ts, min_year, max_year)
+
         result = {"job_id": job_id, "staging_table": staging_table, "records": count}
 
         if publish:
@@ -183,7 +217,7 @@ def safe_import(file_path: Path | str, duckdb_path: Path | str = Path("data/gex_
                         ticker = ticker or "UNKNOWN"
                         endpoint = endpoint or "gex_zero"
 
-                dest_dir = Path(f"data/parquet/gex/year={year}/month={month:02d}/{ticker}/{endpoint}")
+                dest_dir = Path(f"data/parquet/gex/{year}/{month:02d}/{ticker}/{endpoint}")
                 dest_dir.mkdir(parents=True, exist_ok=True)
 
                 target = dest_dir / "strikes.parquet"
@@ -196,6 +230,19 @@ def safe_import(file_path: Path | str, duckdb_path: Path | str = Path("data/gex_
 
                 # Mark job completed only after successful Parquet write
                 job_store.mark_completed(job_id, count)
+
+                # Remove staged JSON to save space if it's under the canonical staging directory
+                # Prune staged JSON files older than retention (keep for 14 days)
+                try:
+                    prune_staged_files(staged_root=Path("data/source/gexbot"), retention_days=14)
+                except Exception:
+                    LOG.exception("Failed to prune staged JSON files")
+
+                # Update the reconciliation report after successful import
+                try:
+                    generate_reconciliation_report(history_db_path=history_db_path, parquet_root=Path("data/parquet/gex"))
+                except Exception:
+                    LOG.exception("Failed to update reconciliation report")
             except Exception as e:
                 try:
                     con.rollback()
@@ -241,3 +288,197 @@ def process_latest_job(duckdb_path: Path | str = Path("data/gex_data.db"), histo
 
 if __name__ == "__main__":
     process_latest_job()
+
+
+def generate_reconciliation_report(history_db_path: Path | str = Path("data/gex_history.db"), parquet_root: Path | str = Path("data/parquet/gex")) -> Path:
+    """Generate a reconciliation report comparing completed jobs and Parquet coverage.
+
+    Writes `docs/RECONCILE_JOBSTORE_VS_PARQUET.md` and returns the Path.
+    """
+    history_db_path = Path(history_db_path)
+    parquet_root = Path(parquet_root)
+    report = []
+    report.append("# Reconciliation: job-store vs Parquet")
+    report.append("")
+    report.append(f"Generated: {datetime.utcnow().isoformat()}Z")
+    report.append("")
+
+    # collect completed jobs
+    try:
+        con = duckdb.connect(str(history_db_path))
+        rows = con.execute("SELECT id, url, ticker, status, created_at FROM import_jobs WHERE status = 'completed' ORDER BY created_at").fetchall()
+    except Exception:
+        rows = []
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+    report.append('## Completed jobs (local-file inspected where available)')
+    report.append('')
+    job_dates = {}
+    jobs_no_local = []
+    jobs_failed = []
+    for job in rows:
+        job_id, url, ticker, status, created_at = job
+        report.append(f'- Job `{job_id}` ticker=`{ticker}` url=`{url}` created_at=`{created_at}`')
+        if url and str(url).startswith('file://'):
+            fp = Path(url[7:])
+            if fp.exists():
+                try:
+                    df = pd.read_json(fp, orient='records')
+                    if 'timestamp' in df.columns:
+                        ts = df['timestamp']
+                        try:
+                            dates = pd.to_datetime(ts, unit='s', errors='coerce').dt.date.dropna().unique().tolist()
+                        except Exception:
+                            dates = pd.to_datetime(ts, errors='coerce').dt.date.dropna().unique().tolist()
+                    else:
+                        dates = []
+                    job_dates[job_id] = sorted([str(d) for d in dates])
+                    if dates:
+                        report.append(f'  - Dates in file: {job_dates[job_id]}')
+                    else:
+                        report.append('  - Dates in file: [] (no timestamp column or empty)')
+                except Exception as e:
+                    report.append('  - ERROR reading file: ' + repr(e))
+                    report.append(traceback.format_exc())
+                    jobs_failed.append(job_id)
+            else:
+                report.append('  - Local staged file not found: ' + str(fp))
+                jobs_no_local.append(job_id)
+        else:
+            report.append('  - URL is remote or missing; skipping local inspection')
+            jobs_no_local.append(job_id)
+
+    report.append('')
+
+    # collect parquet dates
+    report.append('## Parquet coverage (all files under `data/parquet/gex`)')
+    report.append('')
+    parquet_dates = set()
+    parquet_files = list(parquet_root.rglob('*.parquet'))
+    corrupt_files = []
+    con = duckdb.connect()
+    for f in sorted(parquet_files):
+        report.append(f'### {f}')
+        try:
+            q = f"SELECT DISTINCT DATE(TIMESTAMP 'epoch' + timestamp * INTERVAL '1 second') AS d FROM '{str(f)}'"
+            rows = con.execute(q).fetchall()
+            dates = sorted({str(r[0]) for r in rows if r[0] is not None})
+        except Exception:
+            try:
+                q2 = f"SELECT DISTINCT DATE(timestamp) AS d FROM '{str(f)}'"
+                rows2 = con.execute(q2).fetchall()
+                dates = sorted({str(r[0]) for r in rows2 if r[0] is not None})
+            except Exception as e:
+                err = f'ERROR: {e}'
+                dates = [err]
+                corrupt_files.append((str(f), str(e)))
+        if dates:
+            for d in dates:
+                if not d.startswith('ERROR'):
+                    parquet_dates.add(d)
+            report.append('  - Dates:')
+            for d in dates:
+                report.append(f'    - {d}')
+        else:
+            report.append('  - Dates: []')
+        report.append('')
+    con.close()
+
+    # aggregate job dates
+    all_job_dates = set()
+    for jid, ds in job_dates.items():
+        for d in ds:
+            all_job_dates.add(d)
+
+    report.append('')
+    report.append('## Comparison')
+    report.append('')
+    report.append(f'- Dates inferred from completed job local files: {sorted(list(all_job_dates))}')
+    report.append(f'- Dates present in Parquet files: {sorted(list(parquet_dates))}')
+    report.append('')
+
+    # Determine overall date range from parquet (furthest -> most recent), exclude weekends
+    parsed_parquet_dates = []
+    for d in parquet_dates:
+        try:
+            parsed_parquet_dates.append(datetime.fromisoformat(d).date())
+        except Exception:
+            try:
+                parsed_parquet_dates.append(pd.to_datetime(d, errors='coerce').date())
+            except Exception:
+                pass
+
+    if parsed_parquet_dates:
+        min_date = min(parsed_parquet_dates)
+        max_date = max(parsed_parquet_dates)
+        report.append(f'- Date range determined from parquet: {min_date.isoformat()} -> {max_date.isoformat()} (weekends excluded)')
+        # build expected business-day set
+        expected = set()
+        cur = min_date
+        from datetime import timedelta
+        while cur <= max_date:
+            if cur.weekday() < 5:  # Mon-Fri
+                expected.add(cur.isoformat())
+            cur = cur + timedelta(days=1)
+
+        missing_business = sorted(list(expected - parquet_dates))
+        extra = sorted(list(parquet_dates - expected))
+        report.append(f'- Business days missing from Parquet in the range: {missing_business}')
+        report.append(f'- Parquet contains dates outside expected business days in range: {extra}')
+    else:
+        report.append('- No valid parquet dates found to determine range.')
+        missing_business = []
+
+    report.append('')
+    # Show corrupt files explicitly
+    if corrupt_files:
+        report.append('## Corrupt or unreadable Parquet files')
+        report.append('')
+        for fn, err in corrupt_files:
+            report.append(f'- {fn}: {err}')
+        report.append('')
+    report.append('## Jobs without local staged file or remote-only')
+    for jid in jobs_no_local:
+        report.append(f'- {jid}')
+
+    report.append('')
+    report.append('## Jobs that failed to be inspected (errors reading file)')
+    for jid in jobs_failed:
+        report.append(f'- {jid}')
+
+    rp = Path('docs/RECONCILE_JOBSTORE_VS_PARQUET.md')
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    rp.write_text('\n'.join(report))
+    return rp
+
+
+def prune_staged_files(staged_root: Path | str = Path("data/source/gexbot"), retention_days: int = 14) -> list:
+    """Remove staged JSON files older than `retention_days` from `staged_root`.
+
+    Returns a list of removed file paths.
+    """
+    staged_root = Path(staged_root)
+    removed = []
+    if not staged_root.exists():
+        return removed
+
+    now_ts = datetime.utcnow().timestamp()
+    for p in staged_root.iterdir():
+        try:
+            if not p.is_file():
+                continue
+            if p.suffix.lower() != '.json':
+                continue
+            mtime = p.stat().st_mtime
+            age_days = (now_ts - mtime) / 86400.0
+            if age_days > retention_days:
+                p.unlink()
+                removed.append(str(p))
+                LOG.info('Pruned staged JSON older than %s days: %s', retention_days, p)
+        except Exception:
+            LOG.exception('Failed to prune staged file: %s', p)
+    return removed

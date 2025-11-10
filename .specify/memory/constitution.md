@@ -1,39 +1,50 @@
-<!--
-Sync Impact Report:
-- Version change: none → 1.0.0
-- List of modified principles: All principles added (Code Quality, Accuracy, Consistency, Testing, Performance)
-- Added sections: None
-- Removed sections: None
-- Templates requiring updates: plan-template.md (update Constitution Check to reflect new principles), tasks-template.md (make testing mandatory), spec-template.md (aligns), agent-file-template.md (check), checklist-template.md (check)
-- Follow-up TODOs: None
--->
-# Data Pipeline Constitution
+# [PROJECT_NAME] Constitution
 <!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
 
 ## Core Principles
 
-### I. Code Quality
-All code must adhere to high standards of readability, maintainability, and best practices. Code reviews are mandatory for all changes, ensuring style consistency, proper documentation, and efficient implementation.
+### [PRINCIPLE_1_NAME]
+<!-- Example: I. Library-First -->
+[PRINCIPLE_1_DESCRIPTION]
+<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
 
-### II. Accuracy
-All data processing, computations, and outputs must be accurate and verifiable. Implement comprehensive validation, error checking, and data integrity measures to prevent and detect inaccuracies.
+### [PRINCIPLE_2_NAME]
+<!-- Example: II. CLI Interface -->
+[PRINCIPLE_2_DESCRIPTION]
+<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
 
-### III. Consistency
-Maintain consistent coding style, naming conventions, architectural patterns, and project structure across the entire codebase. Use linters and formatters to enforce consistency.
+### [PRINCIPLE_3_NAME]
+<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
+[PRINCIPLE_3_DESCRIPTION]
+<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
 
-### IV. Testing
-Adopt test-driven development (TDD) for all features. Every component must have comprehensive unit tests, integration tests, and end-to-end tests. Tests must pass before any code is merged.
+### [PRINCIPLE_4_NAME]
+<!-- Example: IV. Integration Testing -->
+[PRINCIPLE_4_DESCRIPTION]
+<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
 
-### V. Performance
-Optimize for performance in all aspects. Monitor and benchmark critical paths, avoid unnecessary computations, ensure scalability, and meet defined performance targets.
+### [PRINCIPLE_5_NAME]
+<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
+[PRINCIPLE_5_DESCRIPTION]
+<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
 
-## Additional Constraints
-The project must use appropriate technologies for data pipeline tasks, such as Python with libraries like Pandas, NumPy, or similar. All code must be compatible with the target deployment environment.
+## [SECTION_2_NAME]
+<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
 
-## Development Workflow
-All changes must go through pull requests with code reviews. Automated CI/CD pipelines must run tests, linting, and performance checks. Releases must be versioned and documented.
+[SECTION_2_CONTENT]
+<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+
+## [SECTION_3_NAME]
+<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+
+[SECTION_3_CONTENT]
+<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
 
 ## Governance
-Constitution supersedes all other practices. Amendments require consensus, documentation, and a migration plan. All PRs must verify compliance with principles. Complexity must be justified.
+<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-**Version**: 1.0.0 | **Ratified**: 2025-11-07 | **Last Amended**: 2025-11-07
+[GOVERNANCE_RULES]
+<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+
+**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
+<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->

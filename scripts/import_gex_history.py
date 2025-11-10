@@ -2,10 +2,13 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import duckdb
 import polars as pl
 import requests
+from datetime import datetime, timezone, timedelta
+import re
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -55,6 +58,8 @@ def import_to_duckdb_and_parquet(file_path: Path, duckdb_path: Path, parquet_pat
     create_table_sql = f"""
     CREATE TABLE {table_name} (
         timestamp BIGINT,
+        timestamp_ms BIGINT,
+        timestamp_iso VARCHAR,
         ticker VARCHAR,
         min_dte INTEGER,
         sec_min_dte INTEGER,
@@ -75,6 +80,25 @@ def import_to_duckdb_and_parquet(file_path: Path, duckdb_path: Path, parquet_pat
     LOG.info("Created table with explicit schema")
     
     batch_data = []
+    column_order = [
+        "timestamp",
+        "timestamp_ms",
+        "timestamp_iso",
+        "ticker",
+        "min_dte",
+        "sec_min_dte",
+        "spot",
+        "zero_gamma",
+        "major_pos_vol",
+        "major_pos_oi",
+        "major_neg_vol",
+        "major_neg_oi",
+        "strikes",
+        "sum_gex_vol",
+        "sum_gex_oi",
+        "delta_risk_reversal",
+        "max_priors",
+    ]
     batch_count = 0
     total_processed = 0
     
@@ -85,6 +109,17 @@ def import_to_duckdb_and_parquet(file_path: Path, duckdb_path: Path, parquet_pat
             # Convert Decimal objects to floats recursively
             record = convert_decimals(record)
             
+            ts = record.get("timestamp")
+            if isinstance(ts, str):
+                ts_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                ts_epoch = int(ts_dt.timestamp())
+            else:
+                ts_epoch = int(ts)
+                ts_dt = datetime.fromtimestamp(ts_epoch, tz=timezone.utc)
+            record["timestamp"] = ts_epoch
+            record["timestamp_ms"] = ts_epoch * 1000 + int(ts_dt.microsecond / 1000)
+            record["timestamp_iso"] = ts_dt.isoformat()
+
             # Convert complex types to JSON strings
             if 'strikes' in record:
                 record['strikes'] = json.dumps(record['strikes'])
@@ -99,10 +134,13 @@ def import_to_duckdb_and_parquet(file_path: Path, duckdb_path: Path, parquet_pat
                 LOG.info(f"Processing batch {batch_count} ({len(batch_data)} records, total: {total_processed + len(batch_data)})")
                 
                 # Convert to DataFrame
-                batch_df = pd.DataFrame(batch_data)
+                batch_df = pd.DataFrame(batch_data, columns=column_order)
                 
-                # Insert batch
-                con.execute(f"INSERT INTO {table_name} SELECT * FROM batch_df")
+                # Insert batch with explicit column order
+                selected_cols = ", ".join(column_order)
+                con.execute(
+                    f"INSERT INTO {table_name} ({selected_cols}) SELECT {selected_cols} FROM batch_df"
+                )
                 
                 total_processed += len(batch_data)
                 batch_data = []  # Reset for next batch
@@ -112,8 +150,11 @@ def import_to_duckdb_and_parquet(file_path: Path, duckdb_path: Path, parquet_pat
         batch_count += 1
         LOG.info(f"Processing final batch {batch_count} ({len(batch_data)} records, total: {total_processed + len(batch_data)})")
         
-        batch_df = pd.DataFrame(batch_data)
-        con.execute(f"INSERT INTO {table_name} SELECT * FROM batch_df")
+        batch_df = pd.DataFrame(batch_data, columns=column_order)
+        selected_cols = ", ".join(column_order)
+        con.execute(
+            f"INSERT INTO {table_name} ({selected_cols}) SELECT {selected_cols} FROM batch_df"
+        )
         
         total_processed += len(batch_data)
 
@@ -140,37 +181,40 @@ def main():
     ticker = args.ticker
     endpoint = args.endpoint
 
-    local_file = PROJECT_ROOT / "data" / "source" / "gexbot" / f"{ticker}_{endpoint}_history.json"
-    local_file.parent.mkdir(parents=True, exist_ok=True)
-    LOG.info(f"Preparing to download: url={url}, ticker={ticker}, endpoint={endpoint}, local_file={local_file}")
     duckdb_file = PROJECT_ROOT / "data" / "gex_data.db"
 
-    # Extract year/month from endpoint or use current date
-    from datetime import datetime
-    try:
-        # If endpoint contains a date, extract it (e.g., endpoint='gex_2025-10-02')
-        import re
-        m = re.search(r'(\d{4})-(\d{2})', endpoint)
-        if m:
-            year, month = m.group(1), m.group(2)
-        else:
-            now = datetime.now()
-            year, month = str(now.year), f"{now.month:02d}"
-    except Exception:
-        now = datetime.now()
-        year, month = str(now.year), f"{now.month:02d}"
+    def infer_trade_date() -> datetime:
+        url_match = re.search(r"/(\d{4}-\d{2}-\d{2})_", url)
+        if url_match:
+            return datetime.fromisoformat(url_match.group(1))
+        endpoint_match = re.search(r"(\d{4})-(\d{2})-(\d{2})", endpoint)
+        if endpoint_match:
+            return datetime(
+                int(endpoint_match.group(1)),
+                int(endpoint_match.group(2)),
+                int(endpoint_match.group(3)),
+            )
+        return datetime.utcnow()
+
+    trade_date = infer_trade_date()
+    year, month = str(trade_date.year), f"{trade_date.month:02d}"
+    day_str = trade_date.strftime("%Y-%m-%d")
+
     # Include endpoint (e.g., gex_zero) in directory and filename for clarity
     endpoint_clean = endpoint.replace('/', '_').replace(' ', '_')
-    parquet_dir = (
-        PROJECT_ROOT
-        / "data"
-        / "parquet"
-        / "gex"
-        / f"year={year}"
-        / f"month={month}"
-        / ticker
-        / endpoint_clean
+    raw_dir = PROJECT_ROOT / "data" / "source" / "gexbot" / ticker / endpoint_clean
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    source_name = Path(urlsplit(url).path).name or f"{day_str}.json"
+    local_file = raw_dir / source_name
+    LOG.info(
+        "Preparing to download: url=%s, ticker=%s, endpoint=%s, trade_date=%s, local_file=%s",
+        url,
+        ticker,
+        endpoint,
+        day_str,
+        local_file,
     )
+    parquet_dir = PROJECT_ROOT / "data" / "parquet" / "gex" / year / month / ticker / endpoint_clean / day_str
     parquet_dir.mkdir(parents=True, exist_ok=True)
     parquet_file = parquet_dir / "strikes.parquet"
     (PROJECT_ROOT / "data").mkdir(parents=True, exist_ok=True)
@@ -187,14 +231,7 @@ def main():
         LOG.info(f"Done. Parquet file: {parquet_file} Exists: {parquet_file.exists()} Size: {parquet_file.stat().st_size if parquet_file.exists() else 'N/A'}")
         if queue_id is not None:
             LOG.info(f"Marking queue {queue_id} as completed")
-            gex_history_queue.mark_completed(
-                queue_id,
-                metadata={
-                    "local_file": str(local_file),
-                    "parquet_file": str(parquet_file),
-                    "duckdb_table": "gex_snapshots",
-                },
-            )
+            gex_history_queue.mark_job_completed(queue_id)
     except Exception as exc:
         LOG.error(f"Error during import: {exc}", exc_info=True)
         if queue_id is not None:

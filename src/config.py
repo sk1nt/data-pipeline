@@ -7,7 +7,8 @@ Handles environment variables, CLI arguments, and application settings.
 import os
 from pathlib import Path
 from typing import Optional
-from pydantic import BaseSettings, Field
+from pydantic import AliasChoices, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -40,10 +41,46 @@ class Settings(BaseSettings):
     staging_dir: str = Field(default="data/source/gexbot", env="STAGING_DIR")
     parquet_dir: str = Field(default="data/parquet/gex", env="PARQUET_DIR")
 
-    class Config:
-        """Pydantic configuration."""
-        env_file = ".env"
-        case_sensitive = False
+    # Schwab streaming
+    schwab_enabled: bool = Field(default=False, env="SCHWAB_ENABLED")
+    schwab_client_id: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("SCHWAB_CLIENT_ID", "SCHWAB_APPKEY"),
+    )
+    schwab_client_secret: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("SCHWAB_CLIENT_SECRET", "SCHWAB_SECRET", "SCHWAB_SECRECT"),
+    )
+    schwab_refresh_token: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("SCHWAB_REFRESH_TOKEN", "SCHWAB_RTOKEN"),
+    )
+    schwab_account_id: Optional[str] = Field(default=None, env="SCHWAB_ACCOUNT_ID")
+    schwab_rest_url: str = Field(default="https://api.schwab.com/v1", env="SCHWAB_REST_URL")
+    schwab_auth_url: str = Field(
+        default="https://api.schwab.com/oauth2/v1/authorize",
+        env="SCHWAB_AUTH_URL",
+    )
+    schwab_token_url: str = Field(
+        default="https://api.schwab.com/v1/oauth/token",
+        env="SCHWAB_TOKEN_URL",
+    )
+    schwab_stream_url: str = Field(default="wss://stream.schwab.com/v1", env="SCHWAB_STREAM_URL")
+    schwab_symbols: str = Field(default="MNQ,MES,SPY,QQQ,VIX", env="SCHWAB_SYMBOLS")
+    schwab_tick_channel: str = Field(default="market_data:ticks", env="SCHWAB_TICK_CHANNEL")
+    schwab_level2_channel: str = Field(default="market_data:level2", env="SCHWAB_LEVEL2_CHANNEL")
+    schwab_heartbeat_seconds: int = Field(default=15, env="SCHWAB_HEARTBEAT_SECONDS")
+    schwab_redirect_uri: Optional[str] = Field(default=None, env="SCHWAB_REDIRECT_URI")
+    schwab_scope: str = Field(
+        default="readonly",
+        env="SCHWAB_SCOPE",
+    )
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=False,
+        extra="allow",
+    )
 
     @property
     def data_path(self) -> Path:
@@ -66,6 +103,11 @@ class Settings(BaseSettings):
         if self.cors_origins == "*":
             return ["*"]
         return [origin.strip() for origin in self.cors_origins.split(",")]
+
+    @property
+    def schwab_symbol_list(self) -> list[str]:
+        """Return Schwab symbol list."""
+        return [symbol.strip().upper() for symbol in self.schwab_symbols.split(",") if symbol.strip()]
 
     def ensure_directories(self):
         """Ensure all required directories exist."""

@@ -111,7 +111,7 @@ After successful import, data is available in:
 
 - **DuckDB**: `data/market_data.db` (fast querying, real-time access)
 - **Parquet**: `data/parquet/` directory (analytics, archival)
-  - `gex/year=2024/month=01/*.parquet`
+  - `gex/2024/01/*.parquet`
 
 ## Troubleshooting
 

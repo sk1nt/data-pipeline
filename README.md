@@ -48,6 +48,30 @@ python backend/src/api/main.py
 # Visit http://localhost:3000 (serve frontend with HTTP server)
 ```
 
+### Schwab Streaming Service
+
+The Schwab streamer ingests tick + level 2 market data directly into the trading bus (Redis pub/sub).
+
+1. Set the following environment variables in `.env`:
+   - `SCHWAB_ENABLED=true`
+   - `SCHWAB_CLIENT_ID`, `SCHWAB_CLIENT_SECRET`, `SCHWAB_REFRESH_TOKEN`
+   - `SCHWAB_ACCOUNT_ID` (optional, for downstream routing)
+   - `SCHWAB_SYMBOLS=MNQ,MES,SPY,QQQ,VIX` (customize symbols)
+   - `SCHWAB_TICK_CHANNEL` / `SCHWAB_LEVEL2_CHANNEL` if you need custom Redis targets
+2. Install dependencies: `pip install -e .`
+3. Generate Schwab OAuth tokens (one-time, or whenever consent expires):
+   ```bash
+   python scripts/schwab_oauth_helper.py
+   ```
+   This prints the Schwab consent URL, guides you through login/MFA, and saves the new `SCHWAB_REFRESH_TOKEN` to `.env`.
+4. Run the streamer:
+
+```bash
+python scripts/run_schwab_streamer.py
+```
+
+Use `--dry-run` to validate configuration without opening the websocket.
+
 ## API Documentation
 
 ### Real-time Queries

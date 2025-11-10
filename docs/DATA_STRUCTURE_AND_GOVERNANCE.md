@@ -15,6 +15,7 @@ Canonical Directory Layout
   - Staged JSON files downloaded from external sources (one file per import).
   - Example: `2025-10-22_NQ_NDX_classic_gex_zero.json`
   - Rule: files are read-only once imported; do not mutate in-place.
+  - Retention & post-import policy: Staged JSON files are retained for 14 days after creation. A cleanup pass runs after imports to prune staged files older than 14 days. If you need to preserve raw JSON for audit/archival purposes, add an explicit archive step to copy files to an archive location (e.g., `data/archive/gex/`) before running imports.
 
 - `data/gex_data.db`
   - DuckDB file used as the transient processing engine and to hold staging tables.
@@ -25,8 +26,8 @@ Canonical Directory Layout
   - Metadata store for import jobs (table: `import_jobs`). Tracks `id`, `url`, `checksum`, `ticker`, `status`, `records_processed`, `last_error`, `created_at`, `updated_at`.
   - Rule: This is the authoritative job log. Do not manually edit entries except through tooling.
 
-- `data/parquet/gex/year=YYYY/month=MM/<ticker>/<endpoint>/`
-  - Canonical Parquet output location. Example: `data/parquet/gex/year=2025/month=10/NQ_NDX/gex_zero/strikes.parquet`.
+- `data/parquet/gex/YYYY/MM/<ticker>/<endpoint>/`
+  - Canonical Parquet output location. Example: `data/parquet/gex/2025/10/NQ_NDX/gex_zero/strikes.parquet`.
   - Rule: Parquet files are final outputs; downstream services read only from here. All writes must go through the import pipeline.
 
 Import Flow (high-level)
@@ -45,7 +46,7 @@ Import Flow (high-level)
 Export Rule
 -----------
 - After validation, the pipeline MUST write or append the data into the canonical Parquet location by:
-  - Creating the directory structure if missing: `data/parquet/gex/year=YYYY/month=MM/<ticker>/<endpoint>/`.
+  - Creating the directory structure if missing: `data/parquet/gex/YYYY/MM/<ticker>/<endpoint>/`.
   - Writing a single Parquet file for that date block (or appending / using partitioned Parquet tools). The project prefers partition-by-directory semantics.
 - Parquet files are immutable once written for a given job (new jobs may create new files). If a rewrite is required, the operation must be recorded in the job history with reason and checksum.
 

@@ -30,6 +30,8 @@ from .lib.gex_database import gex_db
 from .lib.logging_config import setup_logging
 from .models.api_models import GEXHistoryResponse, APIResponse
 from .lib.gex_history_queue import gex_history_queue
+from src.import_gex_history import process_historical_imports
+from fastapi import BackgroundTasks
 
 # Setup logging
 logger = setup_logging()
@@ -233,7 +235,7 @@ async def gex_endpoint(request: Request):
 # Historical data import endpoint (queue only)
 @app.post("/gex_history_url", response_model=GEXHistoryResponse)
 @limiter.limit("100/minute")
-async def gex_history_url_endpoint(request: Request):
+async def gex_history_url_endpoint(request: Request, background_tasks: BackgroundTasks):
     """Queue historical GEX imports without downloading immediately."""
     payload = await _parse_json_body(request)
 
@@ -268,11 +270,16 @@ async def gex_history_url_endpoint(request: Request):
         raise HTTPException(status_code=500, detail="Failed to queue historical import")
 
     logger.info("Queued history import url=%s ticker=%s endpoint=%s id=%s", url, ticker, endpoint, queue_id)
+    # Start background processing immediately so POST triggers download/import.
+    try:
+        background_tasks.add_task(process_historical_imports)
+    except Exception:
+        logger.exception("Failed to start background import task")
 
     return GEXHistoryResponse(
         job_id=str(queue_id),
         status="queued",
-        message="Historical import request accepted",
+        message="Historical import request accepted and will be processed",
     )
 
 
