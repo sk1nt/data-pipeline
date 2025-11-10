@@ -3,7 +3,10 @@
 
 import argparse
 import logging
+import queue
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -14,58 +17,91 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.lib.gex_history_queue import gex_history_queue
 
 
-def process_queue_worker(limit: int = 10, sleep_seconds: int = 5):
-    """Process pending jobs from the queue."""
+def process_job(job_id: int, url: str, ticker: str, endpoint: str, log: logging.Logger) -> None:
+    """Worker routine that runs a single job via import_gex_history.py."""
+    try:
+        gex_history_queue.mark_job_started(job_id)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(PROJECT_ROOT / "scripts" / "import_gex_history.py"),
+                url,
+                ticker,
+                endpoint,
+                "--queue-id",
+                str(job_id),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=PROJECT_ROOT,
+        )
+        if result.returncode == 0:
+            log.info("Job %s completed successfully", job_id)
+        else:
+            log.error("Job %s failed: %s", job_id, result.stderr)
+            gex_history_queue.mark_job_failed(job_id, result.stderr[:1000])
+    except Exception as exc:
+        log.error("Error processing job %s: %s", job_id, exc)
+        try:
+            gex_history_queue.mark_job_failed(job_id, str(exc)[:1000])
+        except Exception as inner_exc:
+            log.error("Failed to mark job %s as failed: %s", job_id, inner_exc)
+
+
+def threaded_worker(job_queue: "queue.Queue[tuple]", log: logging.Logger) -> None:
+    while True:
+        try:
+            job = job_queue.get()
+        except Exception:
+            job = None
+        if job is None:
+            job_queue.task_done()
+            break
+        job_id, url, ticker, endpoint = job
+        process_job(job_id, url, ticker, endpoint, log)
+        job_queue.task_done()
+
+
+def run_parallel_once(limit: int, workers: int, log: logging.Logger) -> None:
+    pending_jobs = gex_history_queue.get_pending_jobs(limit=limit)
+    if not pending_jobs:
+        log.info("No pending jobs found")
+        return
+    log.info("Dispatching %s jobs using %s workers", len(pending_jobs), workers)
+    job_queue: "queue.Queue[tuple]" = queue.Queue()
+    for job in pending_jobs:
+        job_id, url, ticker, endpoint, attempts = job
+        job_queue.put((job_id, url, ticker, endpoint))
+    threads = []
+    for _ in range(workers):
+        t = threading.Thread(target=threaded_worker, args=(job_queue, log), daemon=True)
+        t.start()
+        threads.append(t)
+    job_queue.join()
+    for _ in threads:
+        job_queue.put(None)
+    for t in threads:
+        t.join()
+
+
+def process_queue_worker(limit: int, sleep_seconds: int, workers: int):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    LOG = logging.getLogger("gex_queue_worker")
-
-    LOG.info(f"Starting queue worker (limit={limit}, sleep={sleep_seconds}s)")
-
+    log = logging.getLogger("gex_queue_worker")
+    log.info("Starting queue worker (limit=%s, sleep=%ss, workers=%s)", limit, sleep_seconds, workers)
     while True:
         try:
             pending_jobs = gex_history_queue.get_pending_jobs(limit=limit)
             if not pending_jobs:
-                LOG.info("No pending jobs, sleeping...")
+                log.info("No pending jobs, sleeping...")
                 time.sleep(sleep_seconds)
                 continue
-
-            LOG.info(f"Found {len(pending_jobs)} pending jobs")
-
-            for job in pending_jobs:
-                job_id, url, ticker, endpoint, attempts = job
-                LOG.info(f"Processing job {job_id}: {ticker} {endpoint}")
-
-                # Import and run the import script logic
-                try:
-                    # Mark as started
-                    gex_history_queue.mark_job_started(job_id)
-
-                    # Run the import process (similar to import_gex_history.py)
-                    import subprocess
-                    result = subprocess.run([
-                        sys.executable,
-                        str(PROJECT_ROOT / "scripts" / "import_gex_history.py"),
-                        url,
-                        ticker,
-                        endpoint,
-                        "--queue-id", str(job_id)
-                    ], capture_output=True, text=True, cwd=PROJECT_ROOT)
-
-                    if result.returncode == 0:
-                        LOG.info(f"Job {job_id} completed successfully")
-                    else:
-                        LOG.error(f"Job {job_id} failed: {result.stderr}")
-                        gex_history_queue.mark_job_failed(job_id, result.stderr[:1000])
-
-                except Exception as exc:
-                    LOG.error(f"Error processing job {job_id}: {exc}")
-                    gex_history_queue.mark_job_failed(job_id, str(exc)[:1000])
-
+            log.info("Found %s pending jobs", len(pending_jobs))
+            run_parallel_once(limit=limit, workers=workers, log=log)
         except KeyboardInterrupt:
-            LOG.info("Shutting down queue worker")
+            log.info("Shutting down queue worker")
             break
         except Exception as exc:
-            LOG.error(f"Queue worker error: {exc}")
+            log.error("Queue worker error: %s", exc)
             time.sleep(sleep_seconds)
 
 
@@ -74,43 +110,17 @@ def main():
     parser.add_argument("--limit", type=int, default=10, help="Max jobs to process per cycle")
     parser.add_argument("--sleep", type=int, default=5, help="Seconds to sleep between checks")
     parser.add_argument("--once", action="store_true", help="Process once and exit")
+    parser.add_argument("--workers", type=int, default=2, help="Number of parallel workers to run")
     args = parser.parse_args()
 
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    log = logging.getLogger("gex_queue_worker")
+    workers = max(1, args.workers)
+
     if args.once:
-        # Process one cycle and exit
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-        LOG = logging.getLogger("gex_queue_worker")
-
-        pending_jobs = gex_history_queue.get_pending_jobs(limit=args.limit)
-        LOG.info(f"Found {len(pending_jobs)} pending jobs")
-
-        for job in pending_jobs:
-            job_id, url, ticker, endpoint, attempts = job
-            LOG.info(f"Processing job {job_id}: {ticker} {endpoint}")
-
-            try:
-                gex_history_queue.mark_job_started(job_id)
-
-                import subprocess
-                result = subprocess.run([
-                    sys.executable,
-                    str(PROJECT_ROOT / "scripts" / "import_gex_history.py"),
-                    url,
-                    ticker,
-                    endpoint,
-                    "--queue-id", str(job_id)
-                ], capture_output=True, text=True, cwd=PROJECT_ROOT)
-
-                if result.returncode == 0:
-                    LOG.info(f"Job {job_id} completed successfully")
-                else:
-                    LOG.error(f"Job {job_id} failed: {result.stderr}")
-
-            except Exception as exc:
-                LOG.error(f"Error processing job {job_id}: {exc}")
-                gex_history_queue.mark_job_failed(job_id, str(exc)[:1000])
+        run_parallel_once(limit=args.limit, workers=workers, log=log)
     else:
-        process_queue_worker(limit=args.limit, sleep_seconds=args.sleep)
+        process_queue_worker(limit=args.limit, sleep_seconds=args.sleep, workers=workers)
 
 
 if __name__ == "__main__":

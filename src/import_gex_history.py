@@ -7,19 +7,53 @@ snapshots in DuckDB with strikes exported to Parquet.
 """
 
 import json
+import os
+import re
+import threading
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any, Dict, List, Union, Iterable
+from decimal import Decimal
+from datetime import datetime
+import datetime as dt
 
 import requests
 import polars as pl
+import ijson
 
 from .lib.gex_history_queue import gex_history_queue
 from .lib.gex_database import gex_db
 from .lib.logging_config import setup_logging
-from .models.api_models import GEXPayload
+from .models.api_models import GEXPayload, GEXStrike
 
 # Setup logging
 logger = setup_logging()
+CHUNK_SIZE = 5000
+STRIKE_EXPORT_WORKERS = max(4, (os.cpu_count() or 4) // 2)
+
+
+def convert_decimals(obj: Any) -> Any:
+    """Recursively convert Decimal objects to floats for JSON serialization."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    elif isinstance(obj, dict):
+        return {k: convert_decimals(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_decimals(item) for item in obj]
+    else:
+        return obj
+
+
+@dataclass
+class ProcessedRecord:
+    payload: GEXPayload
+    raw_record: Dict[str, Any]
+    endpoint: str
+    timestamp_epoch: int
+    net_gex_value: Optional[float]
+    max_priors_serialized: Optional[str]
 
 
 class GEXHistoryImporter:
@@ -31,6 +65,9 @@ class GEXHistoryImporter:
         self.source_dir = self.data_dir / "source" / "gexbot"
         self.parquet_dir = self.data_dir / "parquet" / "gex"
         self.source_dir.mkdir(parents=True, exist_ok=True)
+        self.chunk_size = CHUNK_SIZE
+        self.strike_workers = STRIKE_EXPORT_WORKERS
+        self._strike_buffers = defaultdict(list)
 
     def process_queue(self) -> None:
         """Process all pending jobs in the history queue."""
@@ -63,115 +100,319 @@ class GEXHistoryImporter:
 
     def _download_file(self, url: str, ticker: str, endpoint: str) -> Path:
         """Download file from URL to local storage."""
-        filename = f"{ticker}_{endpoint}_history.json"
+        filename = self._build_filename(url, ticker, endpoint)
         local_path = self.source_dir / filename
 
         logger.info(f"Downloading {url} to {local_path}")
-        response = requests.get(url, timeout=120)
-        response.raise_for_status()
+        # Support local file:// URLs as well as HTTP/HTTPS
+        if url.startswith("file://"):
+            src = Path(url[7:])
+            if not src.exists():
+                raise FileNotFoundError(src)
+            local_path.write_bytes(src.read_bytes())
+        else:
+            response = requests.get(url, timeout=120)
+            response.raise_for_status()
 
-        with open(local_path, 'wb') as f:
-            f.write(response.content)
+            with open(local_path, 'wb') as f:
+                f.write(response.content)
 
-        logger.info(f"Downloaded {len(response.content)} bytes")
+        try:
+            size = local_path.stat().st_size
+        except Exception:
+            size = None
+        logger.info(f"Downloaded {size if size is not None else 'unknown'} bytes")
         return local_path
+
+    def _build_filename(self, url: str, ticker: str, endpoint: str) -> str:
+        """Construct filename that preserves the download date if available."""
+        date_match = re.search(r"/(\d{4}-\d{2}-\d{2})_", url)
+        if date_match:
+            day = date_match.group(1)
+        else:
+            day = dt.datetime.utcnow().strftime("%Y-%m-%d")
+        safe_endpoint = (endpoint or "gex_zero").replace("/", "_").replace(" ", "_")
+        safe_ticker = (ticker or "UNKNOWN").replace("/", "_").replace(" ", "_")
+        return f"{day}_{safe_ticker}_{safe_endpoint}_history.json"
 
     def _import_data(self, file_path: Path, ticker: str, endpoint: str) -> int:
         """Import data from downloaded file."""
         logger.info(f"Importing data from {file_path}")
 
-        # Read and parse JSON
-        with open(file_path, 'r') as f:
-            data = json.load(f)
-
-        # Handle different JSON structures
-        if isinstance(data, dict) and 'data' in data:
-            records = data['data']
-        elif isinstance(data, list):
-            records = data
-        else:
-            records = [data]
-
         imported_count = 0
+        error_logged = False
 
-        for record in records:
-            try:
-                # Parse record using our full schema model
-                payload = GEXPayload(**record)
+        path_locks: Dict[Path, threading.Lock] = defaultdict(threading.Lock)
+        staging_table = f"staging_raw_{ticker.lower()}_{int(datetime.utcnow().timestamp())}"
+        try:
+            self._load_into_staging(file_path, staging_table)
+            processed_batch = self._prepare_from_staging(staging_table, endpoint)
+            if processed_batch:
+                self._store_snapshots_batch(processed_batch)
+                self._record_history_batch(processed_batch)
+                for processed in processed_batch:
+                    if processed.payload.strikes:
+                        self._buffer_strikes(processed)
+                imported_count += len(processed_batch)
+        finally:
+            self._drop_staging(staging_table)
 
-                # Store snapshot in database
-                self._store_snapshot(payload)
-
-                # Export strikes to Parquet if present
-                if payload.strikes:
-                    self._export_strikes_to_parquet(payload)
-
-                imported_count += 1
-
-            except Exception as e:
-                logger.warning(f"Failed to import record: {e}")
-                continue
-
-        logger.info(f"Imported {imported_count} snapshots from {len(records)} records")
+        logger.info(f"Imported {imported_count} snapshots from {file_path}")
+        self._flush_buffered_strikes(path_locks)
         return imported_count
 
-    def _store_snapshot(self, payload: GEXPayload) -> None:
-        """Store GEX snapshot in database."""
-        # Handle net_gex - use net_gex_vol if available, otherwise net_gex
-        net_gex_value = payload.net_gex_vol if payload.net_gex_vol is not None else payload.net_gex
+    def _load_into_staging(self, file_path: Path, table_name: str) -> None:
+        with gex_db.gex_data_connection() as conn:
+            conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+            conn.execute(
+                f"""
+                CREATE TABLE {table_name} AS
+                SELECT * FROM read_json_auto('{file_path}', maximum_depth=4)
+                """
+            )
 
-        # Handle max_priors - convert list to JSON string if needed
-        max_priors_value = payload.max_priors
-        if isinstance(max_priors_value, list):
-            max_priors_value = json.dumps(max_priors_value)
+    def _prepare_from_staging(self, table_name: str, endpoint: str) -> List[ProcessedRecord]:
+        processed: List[ProcessedRecord] = []
+        with gex_db.gex_data_connection() as conn:
+            rows = conn.execute(f"SELECT * FROM {table_name}").fetchall()
+            columns = [desc[0] for desc in conn.description]
+        for row in rows:
+            record = dict(zip(columns, row))
+            record_copy = {k: v for k, v in record.items() if k != 'strikes'}
+            if 'max_priors' in record_copy and isinstance(record_copy['max_priors'], list):
+                record_copy['max_priors'] = json.dumps(record_copy['max_priors'])
+            if 'timestamp' in record_copy and isinstance(record_copy['timestamp'], int):
+                record_copy['timestamp'] = datetime.fromtimestamp(record_copy['timestamp'])
+            payload = GEXPayload(**record_copy)
+            strikes = []
+            if 'strikes' in record and isinstance(record['strikes'], list):
+                for s in record['strikes']:
+                    if isinstance(s, list) and len(s) >= 4:
+                        strikes.append(
+                            GEXStrike(
+                                strike=float(s[0]),
+                                gamma_now=float(s[1]),
+                                vanna=float(s[2]) if len(s) > 2 else None,
+                                history=s[3] if len(s) > 3 and isinstance(s[3], list) else None,
+                            )
+                        )
+            payload.strikes = strikes if strikes else None
+            payload_endpoint = endpoint or payload.endpoint or "gex_zero"
+            payload.endpoint = payload_endpoint
+            net_gex_value = payload.net_gex_vol if payload.net_gex_vol is not None else payload.net_gex
+            max_priors_serialized = payload.max_priors
+            if isinstance(max_priors_serialized, list):
+                max_priors_serialized = json.dumps(max_priors_serialized)
+            try:
+                timestamp_epoch = int(payload.timestamp.timestamp())
+            except Exception:
+                timestamp_epoch = int(datetime.utcnow().timestamp())
+            processed.append(
+                ProcessedRecord(
+                    payload=payload,
+                    raw_record=record,
+                    endpoint=payload_endpoint,
+                    timestamp_epoch=timestamp_epoch,
+                    net_gex_value=net_gex_value,
+                    max_priors_serialized=max_priors_serialized,
+                )
+            )
+        return processed
+
+    def _drop_staging(self, table_name: str) -> None:
+        with gex_db.gex_data_connection() as conn:
+            conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+    def _store_snapshots_batch(self, batch: List[ProcessedRecord]) -> None:
+        if not batch:
+            return
+        rows = []
+        for item in batch:
+            payload = item.payload
+            rows.append(
+                [
+                    payload.timestamp,
+                    payload.ticker,
+                    payload.spot_price,
+                    payload.zero_gamma,
+                    item.net_gex_value,
+                    payload.min_dte,
+                    payload.sec_min_dte,
+                    payload.major_pos_vol,
+                    payload.major_pos_oi,
+                    payload.major_neg_vol,
+                    payload.major_neg_oi,
+                    payload.sum_gex_vol,
+                    payload.sum_gex_oi,
+                    payload.delta_risk_reversal,
+                    item.max_priors_serialized,
+                ]
+            )
 
         with gex_db.gex_data_connection() as conn:
-            conn.execute("""
+            conn.executemany(
+                """
                 INSERT INTO gex_snapshots (
                     timestamp, ticker, spot_price, zero_gamma, net_gex,
                     min_dte, sec_min_dte, major_pos_vol, major_pos_oi,
                     major_neg_vol, major_neg_oi, sum_gex_vol, sum_gex_oi,
                     delta_risk_reversal, max_priors
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, [
-                payload.timestamp, payload.ticker, payload.spot_price,
-                payload.zero_gamma, net_gex_value, payload.min_dte,
-                payload.sec_min_dte, payload.major_pos_vol, payload.major_pos_oi,
-                payload.major_neg_vol, payload.major_neg_oi, payload.sum_gex_vol,
-                payload.sum_gex_oi, payload.delta_risk_reversal, max_priors_value
-            ])
+                """,
+                rows,
+            )
 
-    def _export_strikes_to_parquet(self, payload: GEXPayload) -> None:
-        """Export strike data to Parquet."""
-        if not payload.strikes:
+    def _record_history_batch(self, batch: List[ProcessedRecord]) -> None:
+        if not batch:
             return
 
-        # Convert strikes to Polars DataFrame
-        strikes_data = []
-        for strike in payload.strikes:
-            strikes_data.append({
+        snapshot_rows = []
+        strike_rows = []
+        key_set = {(item.payload.ticker, item.timestamp_epoch, item.endpoint) for item in batch}
+        delete_rows = list(key_set)
+
+        for item in batch:
+            payload = item.payload
+            raw_record = item.raw_record
+            endpoint_value = item.endpoint
+            strikes = payload.strikes or []
+            payload_kind = (
+                raw_record.get("kind")
+                or raw_record.get("payload_kind")
+                or raw_record.get("type")
+                or "snapshot"
+            )
+            received_at = raw_record.get("received_at")
+            updated_at = datetime.utcnow().isoformat()
+            max_change_json = json.dumps(raw_record.get("max_change") or {})
+
+            raw_max_priors = raw_record.get("max_priors")
+            if raw_max_priors is None:
+                raw_max_priors = payload.max_priors
+            if isinstance(raw_max_priors, str):
+                max_priors_json = raw_max_priors
+            else:
+                max_priors_json = json.dumps(raw_max_priors or [])
+
+            raw_payload_json = json.dumps(raw_record)
+
+            snapshot_rows.append(
+                [
+                    payload.ticker,
+                    item.timestamp_epoch,
+                    endpoint_value,
+                    payload_kind,
+                    received_at,
+                    payload.spot_price,
+                    payload.zero_gamma,
+                    item.net_gex_value,
+                    payload.net_gex_oi,
+                    payload.major_pos_vol,
+                    payload.major_neg_vol,
+                    payload.major_pos_oi,
+                    payload.major_neg_oi,
+                    payload.delta_risk_reversal,
+                    len(strikes),
+                    max_change_json,
+                    max_priors_json,
+                    raw_payload_json,
+                    updated_at,
+                ]
+            )
+
+            for strike in strikes:
+                strike_rows.append(
+                    (
+                        payload.ticker,
+                        item.timestamp_epoch,
+                        endpoint_value,
+                        strike.strike,
+                        strike.gamma_now,
+                        strike.vanna,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        json.dumps(strike.history) if strike.history else None,
+                    )
+                )
+
+        with gex_db.gex_history_connection() as conn:
+            conn.executemany(
+                "DELETE FROM gex_bridge_snapshots WHERE ticker = ? AND timestamp = ? AND endpoint = ?",
+                delete_rows,
+            )
+            conn.executemany(
+                "DELETE FROM gex_bridge_strikes WHERE ticker = ? AND timestamp = ? AND endpoint = ?",
+                delete_rows,
+            )
+            conn.executemany(
+                """
+                INSERT INTO gex_bridge_snapshots (
+                    ticker, timestamp, endpoint, payload_kind, received_at,
+                    spot, zero_gamma, net_gex_vol, net_gex_oi,
+                    major_pos_vol, major_neg_vol, major_pos_oi, major_neg_oi,
+                    delta_risk_reversal, strikes_count, max_change_json,
+                    max_priors_json, raw_payload_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                snapshot_rows,
+            )
+            if strike_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO gex_bridge_strikes (
+                        ticker, timestamp, endpoint, strike, gamma_now, vanna,
+                        gamma_1m, gamma_5m, gamma_10m, gamma_15m, gamma_30m,
+                        history_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    strike_rows,
+                )
+
+    def _buffer_strikes(self, processed: ProcessedRecord) -> None:
+        payload = processed.payload
+        if not payload.strikes:
+            return
+        key = (
+            payload.ticker,
+            processed.endpoint,
+            payload.timestamp.year,
+            payload.timestamp.month,
+        )
+        rows = [
+            {
                 'timestamp': payload.timestamp.isoformat(),
                 'ticker': payload.ticker,
                 'strike': strike.strike,
                 'gamma': strike.gamma_now,
                 'oi_gamma': strike.oi_gamma,
-                'priors': json.dumps(strike.history) if strike.history else None
-            })
+                'priors': json.dumps(strike.history) if strike.history else None,
+            }
+            for strike in payload.strikes
+        ]
+        self._strike_buffers[key].extend(rows)
 
-        df = pl.DataFrame(strikes_data)
-
-        # Determine Parquet path
-        year = payload.timestamp.year
-        month = f"{payload.timestamp.month:02d}"
-        endpoint_clean = str(payload.endpoint or 'unknown').replace('/', '_').replace(' ', '_')
-
-        parquet_dir = self.parquet_dir / f"year={year}" / f"month={month}" / payload.ticker / endpoint_clean
-        parquet_dir.mkdir(parents=True, exist_ok=True)
-        parquet_file = parquet_dir / "strikes.parquet"
-
-        # Write to Parquet
-        df.write_parquet(str(parquet_file))
-        logger.info(f"Exported {len(strikes_data)} strikes to {parquet_file}")
+    def _flush_buffered_strikes(self, path_locks: Dict[Path, threading.Lock]) -> None:
+        if not self._strike_buffers:
+            return
+        for key, rows in self._strike_buffers.items():
+            ticker, endpoint, year, month = key
+            endpoint_clean = str(endpoint or 'unknown').replace('/', '_').replace(' ', '_')
+            parquet_dir = self.parquet_dir / f"{year}" / f"{month:02d}" / ticker / endpoint_clean
+            parquet_dir.mkdir(parents=True, exist_ok=True)
+            parquet_file = parquet_dir / "strikes.parquet"
+            df = pl.DataFrame(rows)
+            lock = path_locks[parquet_file]
+            with lock:
+                df.write_parquet(
+                    str(parquet_file),
+                    compression="zstd",
+                    compression_level=3,
+                )
+                logger.info("Wrote %s buffered strikes to %s", len(rows), parquet_file)
+        self._strike_buffers.clear()
 
 
 def process_historical_imports():

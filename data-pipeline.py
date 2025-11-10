@@ -16,6 +16,7 @@ import argparse
 import json
 import logging
 import sys
+import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -30,8 +31,10 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from src.lib.gex_history_queue import gex_history_queue  # noqa: E402
+from src.import_gex_history import process_historical_imports  # noqa: E402
 
 LOG = logging.getLogger("gex_history_bridge")
+_QUEUE_WORKER_ACTIVE = threading.Event()
 
 
 def _json_bytes(payload: Dict[str, Any]) -> bytes:
@@ -134,6 +137,7 @@ class HistoryBridgeHandler(BaseHTTPRequestHandler):
                 endpoint=endpoint,
                 payload=metadata or {},
             )
+            trigger_queue_processing()
         except Exception as exc:  # pragma: no cover
             LOG.exception("Failed to enqueue history request")
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
@@ -176,6 +180,29 @@ def parse_args() -> argparse.Namespace:
         help="Logging verbosity (default: INFO)",
     )
     return parser.parse_args()
+
+
+def trigger_queue_processing() -> None:
+    """Kick off background processing if no worker is currently active."""
+    if _QUEUE_WORKER_ACTIVE.is_set():
+        LOG.debug("Queue processor already running; skipping trigger")
+        return
+
+    def _worker():
+        if _QUEUE_WORKER_ACTIVE.is_set():
+            return
+        _QUEUE_WORKER_ACTIVE.set()
+        LOG.info("Starting background queue processor")
+        try:
+            process_historical_imports()
+        except Exception:  # pragma: no cover - logged by importer
+            LOG.exception("Background queue processor failed")
+        finally:
+            LOG.info("Queue processor finished")
+            _QUEUE_WORKER_ACTIVE.clear()
+
+    thread = threading.Thread(target=_worker, name="gex-history-processor", daemon=True)
+    thread.start()
 
 
 def main() -> None:

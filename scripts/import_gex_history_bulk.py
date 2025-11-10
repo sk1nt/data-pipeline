@@ -216,7 +216,7 @@ def import_history(
                 year = dt.year
                 month = f"{dt.month:02d}"
                 endpoint_clean = str(endpoint).replace('/', '_').replace(' ', '_')
-                parquet_dir = PROJECT_ROOT / "data" / "parquet" / "gex" / f"year={year}" / f"month={month}" / ticker / endpoint_clean
+                parquet_dir = PROJECT_ROOT / "data" / "parquet" / "gex" / f"{year}" / f"{month:02d}" / ticker / endpoint_clean
                 parquet_dir.mkdir(parents=True, exist_ok=True)
                 parquet_file = parquet_dir / "strikes.parquet"
                 pl.from_pandas(df).write_parquet(str(parquet_file))

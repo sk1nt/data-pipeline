@@ -89,7 +89,7 @@ Generic payload from external webhook sources.
 
 - **DuckDB gex_data.db**: Real-time data (`gex_snapshots`, `gex_strikes`, `universal_webhooks`, `option_trades_events`)
 - **DuckDB gex_history.db**: History import metadata and queue (`gex_history_queue`)
-- **Parquet**: Historical data exports (`data/parquet/gex/year=/month=/ticker/endpoint/strikes.parquet`)
+- **Parquet**: Historical data exports (`data/parquet/gex/YYYY/MM/ticker/endpoint/strikes.parquet`)
 - **JSON**: Staged downloads (`data/source/gexbot/ticker_endpoint_history.json`)
 
 ## Constraints
