@@ -113,17 +113,18 @@ class TastyTradeStreamer:
             LOGGER.debug("Trade: %s", payload)
 
     async def _handle_quote(self, quote) -> None:
-        if not quote or not self._on_depth:
+        if not quote:
             return
-        bids = self._extract_levels(getattr(quote, "bid_prices", []), getattr(quote, "bid_sizes", []))
-        asks = self._extract_levels(getattr(quote, "ask_prices", []), getattr(quote, "ask_sizes", []))
+        bids = self._extract_levels(getattr(quote, "bid_prices", []) or [], getattr(quote, "bid_sizes", []) or [])
+        asks = self._extract_levels(getattr(quote, "ask_prices", []) or [], getattr(quote, "ask_sizes", []) or [])
         depth_payload = {
             "symbol": self._normalize_symbol(getattr(quote, "event_symbol", "")),
             "timestamp": self._ts_from_ms(getattr(quote, "time", 0)),
             "bids": bids,
             "asks": asks,
         }
-        await self._on_depth(depth_payload)
+        if self._on_depth:
+            await self._on_depth(depth_payload)
 
     def _extract_levels(
         self,
@@ -162,4 +163,3 @@ class TastyTradeStreamer:
             return datetime.fromtimestamp(value / 1000).isoformat()
         except Exception:
             return datetime.utcnow().isoformat()
-
