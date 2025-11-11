@@ -6,7 +6,7 @@ Handles environment variables, CLI arguments, and application settings.
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     parquet_dir: str = Field(default="data/parquet/gex", env="PARQUET_DIR")
     redis_retention_ms: int = Field(default=86_400_000, env="REDIS_RETENTION_MS")
     flush_interval_seconds: int = Field(default=600, env="FLUSH_INTERVAL_SECONDS")
+    redis_host: str = Field(default="localhost", env="REDIS_HOST")
+    redis_port: int = Field(default=6379, env="REDIS_PORT")
+    redis_db: int = Field(default=0, env="REDIS_DB")
+    redis_password: Optional[str] = Field(default=None, env="REDIS_PASSWORD")
 
     # TastyTrade DXLink streamer
     tastytrade_stream_enabled: bool = Field(default=False, env="TASTYTRADE_STREAM_ENABLED")
@@ -132,6 +136,15 @@ class Settings(BaseSettings):
     @property
     def gex_symbol_list(self) -> list[str]:
         return [symbol.strip().upper() for symbol in self.gex_poll_symbols.split(",") if symbol.strip()]
+
+    @property
+    def redis_params(self) -> Dict[str, Any]:
+        return {
+            "host": self.redis_host,
+            "port": self.redis_port,
+            "db": self.redis_db,
+            "password": self.redis_password,
+        }
 
     def ensure_directories(self):
         """Ensure all required directories exist."""

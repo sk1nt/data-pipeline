@@ -1,236 +1,288 @@
 #!/usr/bin/env python3
-"""Minimal GEX history bridge server.
-
-This server only implements the /gex_history_url endpoint that accepts a JSON
-payload with a signed download URL, ticker, and endpoint label. Requests are
-persisted into the DuckDB-backed queue exposed by src.lib.gex_history_queue so
-that background workers (e.g. scripts/import_gex_history.py) can process them.
-
-The goal is to keep the implementation self-contained without depending on the
-old torch-market repository or any legacy-private packages.
-"""
-
+"""Unified data pipeline server keeping legacy GEX endpoints and new services."""
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
-import sys
-import threading
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from contextlib import asynccontextmanager
 from pathlib import Path
+from datetime import datetime
 from typing import Any, Dict, Optional
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-SRC_ROOT = PROJECT_ROOT / "src"
+import uvicorn
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+from pydantic import BaseModel, Field
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+import sys
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+if str(PROJECT_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from src.lib.gex_history_queue import gex_history_queue  # noqa: E402
-from src.import_gex_history import process_historical_imports  # noqa: E402
+from src.config import settings
+from src.import_gex_history import process_historical_imports
+from src.lib.gex_history_queue import gex_history_queue
+from src.lib.redis_client import RedisClient
+from src.services.gexbot_poller import GEXBotPoller, GEXBotPollerSettings
+from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreamer
+from src.services.redis_timeseries import RedisTimeSeriesClient
 
-LOG = logging.getLogger("gex_history_bridge")
-_QUEUE_WORKER_ACTIVE = threading.Event()
+LOGGER = logging.getLogger("data_pipeline")
 
 
-def _json_bytes(payload: Dict[str, Any]) -> bytes:
-    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+class HistoryPayload(BaseModel):
+    url: str
+    ticker: Optional[str] = None
+    endpoint: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
-class HistoryBridgeHandler(BaseHTTPRequestHandler):
-    """HTTP handler that only supports /gex_history_url and /health."""
+class ServiceManager:
+    def __init__(self) -> None:
+        self.tastytrade: Optional[TastyTradeStreamer] = None
+        self.gex_poller: Optional[GEXBotPoller] = None
+        self.redis_client: Optional[RedisClient] = None
+        self.rts: Optional[RedisTimeSeriesClient] = None
 
-    server_version = "GEXHistoryBridge/1.0"
-
-    def _send_json(self, status: HTTPStatus, payload: Dict[str, Any]) -> None:
-        body = _json_bytes(payload)
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_OPTIONS(self) -> None:  # noqa: N802
-        """Handle CORS preflight requests."""
-        self.send_response(HTTPStatus.NO_CONTENT)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
-
-    def do_GET(self) -> None:  # noqa: N802
-        path = self.path.rstrip("/")
-        if path in {"", "/"}:
-            self._send_json(HTTPStatus.OK, {"status": "ok"})
-            return
-        if path == "/health":
-            self._send_json(HTTPStatus.OK, {"status": "healthy"})
-            return
-        self.send_error(HTTPStatus.NOT_FOUND, "Endpoint not found")
-
-    def do_POST(self) -> None:  # noqa: N802
-        """Only /gex_history_url is supported."""
-        path = self.path.rstrip("/")
-        if path != "/gex_history_url":
-            self.send_error(HTTPStatus.NOT_FOUND, "Endpoint not found")
-            return
-        self._handle_history_request()
-
-    # ------------------------------------------------------------------ internals
-
-    def _handle_history_request(self) -> None:
-        length = int(self.headers.get("Content-Length", "0"))
-        if length <= 0:
-            self.send_error(HTTPStatus.BAD_REQUEST, "Empty request body")
-            return
-
-        raw_body = self.rfile.read(length)
-        LOG.debug("History request body: %s", raw_body)
-
-        try:
-            payload = json.loads(raw_body.decode("utf-8"))
-        except json.JSONDecodeError:
-            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid JSON payload")
-            return
-
-        if not isinstance(payload, dict):
-            self.send_error(HTTPStatus.BAD_REQUEST, "Payload must be a JSON object")
-            return
-
-        url = self._normalize_string(payload.get("url"))
-        ticker = self._normalize_string(payload.get("ticker"))
-        endpoint = self._normalize_string(
-            payload.get("endpoint") or payload.get("feed") or payload.get("kind")
+    def start(self) -> None:
+        self.redis_client = RedisClient(
+            host=settings.redis_host,
+            port=settings.redis_port,
+            db=settings.redis_db,
+            password=settings.redis_password,
         )
-        if not endpoint:
-            endpoint = self._infer_endpoint(url)
-        metadata = payload.get("metadata")
-        if metadata and not isinstance(metadata, dict):
-            metadata = None
+        self.rts = RedisTimeSeriesClient(self.redis_client.client)
 
-        # Extract ticker from URL if not provided or incorrect
-        # URL format: https://hist.gex.bot/gb-nqndx/2025-10-21_NQ_NDX_classic_gex_zero.json
-        if not ticker or ticker == "NDX":
-            import re
-            # Try to extract ticker from filename in URL
-            url_match = re.search(r'/(\d{4}-\d{2}-\d{2})_([^_]+_[^_]+)_classic', url)
-            if url_match:
-                ticker = url_match.group(2)  # Extract NQ_NDX from filename
-                LOG.info(f"Extracted ticker '{ticker}' from URL")
-
-        if not url or not ticker:
-            self.send_error(HTTPStatus.BAD_REQUEST, "Missing url or ticker")
-            return
-
-        if not endpoint:
-            endpoint = "gex_zero"
-
-        LOG.info("Queueing history request url=%s ticker=%s endpoint=%s", url, ticker, endpoint)
-
-        try:
-            queue_id = gex_history_queue.enqueue_request(
-                url=url,
-                ticker=ticker,
-                endpoint=endpoint,
-                payload=metadata or {},
+        if settings.tastytrade_stream_enabled:
+            self.tastytrade = TastyTradeStreamer(
+                StreamerSettings(
+                    client_id=settings.tastytrade_client_id or "",
+                    client_secret=settings.tastytrade_client_secret or "",
+                    refresh_token=settings.tastytrade_refresh_token or "",
+                    symbols=settings.tastytrade_symbol_list,
+                    depth_levels=settings.tastytrade_depth_levels,
+                ),
+                on_trade=self._handle_trade_event,
+                on_depth=self._handle_depth_event,
             )
-            trigger_queue_processing()
-        except Exception as exc:  # pragma: no cover
-            LOG.exception("Failed to enqueue history request")
-            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+            self.tastytrade.start()
+            LOGGER.info("TastyTrade streamer started")
+
+        if settings.gex_polling_enabled and settings.gexbot_api_key:
+            self.gex_poller = GEXBotPoller(
+                GEXBotPollerSettings(
+                    api_key=settings.gexbot_api_key,
+                    symbols=settings.gex_symbol_list,
+                    interval_seconds=settings.gex_poll_interval_seconds,
+                ),
+                redis_client=self.redis_client,
+                ts_client=self.rts,
+            )
+            self.gex_poller.start()
+            LOGGER.info("GEXBot poller started")
+
+    async def stop(self) -> None:
+        if self.tastytrade:
+            await self.tastytrade.stop()
+            LOGGER.info("TastyTrade streamer stopped")
+        if self.gex_poller:
+            await self.gex_poller.stop()
+            LOGGER.info("GEXBot poller stopped")
+
+    async def _handle_trade_event(self, payload: Dict[str, Any]) -> None:
+        if not self.rts:
             return
+        await asyncio.to_thread(self._write_trade_timeseries, payload)
 
-        self._send_json(
-            HTTPStatus.ACCEPTED,
-            {
-                "status": "queued",
-                "id": queue_id,
-                "url": url,
-                "ticker": ticker,
-                "endpoint": endpoint,
-            },
+    async def _handle_depth_event(self, payload: Dict[str, Any]) -> None:
+        if not self.rts:
+            return
+        await asyncio.to_thread(self._write_depth_timeseries, payload)
+
+    def _write_trade_timeseries(self, payload: Dict[str, Any]) -> None:
+        symbol = payload.get("symbol", "").upper() or "UNKNOWN"
+        timestamp_ms = _timestamp_ms(payload.get("timestamp"))
+        price = float(payload.get("price", 0.0))
+        size = float(payload.get("size", 0.0))
+        samples = [
+            (f"ts:trade:price:{symbol}", timestamp_ms, price, {"symbol": symbol, "type": "trade", "field": "price"}),
+            (f"ts:trade:size:{symbol}", timestamp_ms, size, {"symbol": symbol, "type": "trade", "field": "size"}),
+        ]
+        self.rts.multi_add(samples)
+
+    def _write_depth_timeseries(self, payload: Dict[str, Any]) -> None:
+        symbol = payload.get("symbol", "").upper() or "UNKNOWN"
+        timestamp_ms = _timestamp_ms(payload.get("timestamp"))
+        bids = payload.get("bids") or []
+        asks = payload.get("asks") or []
+        samples = []
+        depth_levels = settings.tastytrade_depth_levels
+        for idx, level in enumerate(bids[:depth_levels], start=1):
+            price = float(level.get("price", 0.0))
+            size = float(level.get("size", 0.0))
+            samples.append(
+                (
+                    f"ts:depth:{symbol}:bid:{idx}:price",
+                    timestamp_ms,
+                    price,
+                    {"symbol": symbol, "type": "depth", "side": "bid", "level": str(idx), "field": "price"},
+                )
+            )
+            samples.append(
+                (
+                    f"ts:depth:{symbol}:bid:{idx}:size",
+                    timestamp_ms,
+                    size,
+                    {"symbol": symbol, "type": "depth", "side": "bid", "level": str(idx), "field": "size"},
+                )
+            )
+        for idx, level in enumerate(asks[:depth_levels], start=1):
+            price = float(level.get("price", 0.0))
+            size = float(level.get("size", 0.0))
+            samples.append(
+                (
+                    f"ts:depth:{symbol}:ask:{idx}:price",
+                    timestamp_ms,
+                    price,
+                    {"symbol": symbol, "type": "depth", "side": "ask", "level": str(idx), "field": "price"},
+                )
+            )
+            samples.append(
+                (
+                    f"ts:depth:{symbol}:ask:{idx}:size",
+                    timestamp_ms,
+                    size,
+                    {"symbol": symbol, "type": "depth", "side": "ask", "level": str(idx), "field": "size"},
+                )
+            )
+        if samples and self.rts:
+            self.rts.multi_add(samples)
+
+
+service_manager = ServiceManager()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    LOGGER.info("Starting services during FastAPI lifespan")
+    service_manager.start()
+    try:
+        yield
+    finally:
+        LOGGER.info("Stopping services during FastAPI lifespan")
+        await service_manager.stop()
+
+
+app = FastAPI(title="Data Pipeline", lifespan=lifespan)
+
+
+@app.get("/")
+async def root() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/health")
+async def health() -> Dict[str, str]:
+    return {"status": "healthy"}
+
+
+@app.post("/gex_history_url")
+async def gex_history_endpoint(payload: HistoryPayload, background_tasks: BackgroundTasks):
+    url = payload.url.strip()
+    ticker = _normalize_string(payload.ticker)
+    endpoint = _normalize_string(payload.endpoint)
+    metadata = payload.metadata if isinstance(payload.metadata, dict) else None
+
+    if not endpoint:
+        endpoint = _infer_endpoint(url)
+    if not ticker:
+        ticker = _extract_ticker_from_url(url)
+
+    if not url or not ticker:
+        raise HTTPException(status_code=400, detail="Missing url or ticker")
+
+    try:
+        queue_id = gex_history_queue.enqueue_request(
+            url=url,
+            ticker=ticker,
+            endpoint=endpoint or "gex_zero",
+            payload=metadata or {},
         )
+    except Exception as exc:
+        LOGGER.exception("Failed to enqueue history request")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    @staticmethod
-    def _normalize_string(value: Optional[Any]) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value.strip()
-        return str(value).strip()
+    background_tasks.add_task(_trigger_queue_processing)
 
-    @staticmethod
-    def _infer_endpoint(url: str) -> str:
-        import re
-        match = re.search(r'_((?:gex_zero|gex_one|gex_full))\.json', url)
-        if match:
-            inferred = match.group(1)
-            LOG.info("Inferred endpoint '%s' from URL", inferred)
-            return inferred
-        return "gex_zero"
+    return {
+        "status": "queued",
+        "id": queue_id,
+        "url": url,
+        "ticker": ticker,
+        "endpoint": endpoint or "gex_zero",
+    }
 
-    def log_message(self, fmt: str, *args: Any) -> None:  # noqa: D401
-        """Route BaseHTTPRequestHandler logging through logging module."""
-        LOG.info("%s - %s", self.address_string(), fmt % args)
+
+async def _trigger_queue_processing() -> None:
+    try:
+        await asyncio.to_thread(process_historical_imports)
+    except Exception:
+        LOGGER.exception("Background import processing failed")
+
+
+def _normalize_string(value: Optional[Any]) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _infer_endpoint(url: str) -> str:
+    import re
+
+    match = re.search(r"_((?:gex_zero|gex_one|gex_full))\\.json", url)
+    if match:
+        return match.group(1)
+    return "gex_zero"
+
+
+def _extract_ticker_from_url(url: str) -> str:
+    import re
+
+    match = re.search(r"/(\\d{4}-\\d{2}-\\d{2})_([^_]+_[^_]+)_classic", url)
+    if match:
+        return match.group(2)
+    return ""
+
+
+def _timestamp_ms(value: Optional[str]) -> int:
+    if isinstance(value, (int, float)):
+        return int(float(value))
+    if isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return int(dt.timestamp() * 1000)
+        except ValueError:
+            pass
+    return int(datetime.utcnow().timestamp() * 1000)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run GEX history bridge server")
-    parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
-    parser.add_argument(
-        "--port", type=int, default=8877, help="Port for incoming POSTs (default: 8877)"
-    )
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
-        help="Logging verbosity (default: INFO)",
-    )
+    parser = argparse.ArgumentParser(description="Run data pipeline server")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8877)
+    parser.add_argument("--log-level", default="info")
     return parser.parse_args()
-
-
-def trigger_queue_processing() -> None:
-    """Kick off background processing if no worker is currently active."""
-    if _QUEUE_WORKER_ACTIVE.is_set():
-        LOG.debug("Queue processor already running; skipping trigger")
-        return
-
-    def _worker():
-        if _QUEUE_WORKER_ACTIVE.is_set():
-            return
-        _QUEUE_WORKER_ACTIVE.set()
-        LOG.info("Starting background queue processor")
-        try:
-            process_historical_imports()
-        except Exception:  # pragma: no cover - logged by importer
-            LOG.exception("Background queue processor failed")
-        finally:
-            LOG.info("Queue processor finished")
-            _QUEUE_WORKER_ACTIVE.clear()
-
-    thread = threading.Thread(target=_worker, name="gex-history-processor", daemon=True)
-    thread.start()
 
 
 def main() -> None:
     args = parse_args()
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-    server = ThreadingHTTPServer((args.host, args.port), HistoryBridgeHandler)
-    LOG.info("Serving /gex_history_url on http://%s:%s", args.host, args.port)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        LOG.info("Shutting down...")
-    finally:
-        server.server_close()
+    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
+    uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level.lower())
 
 
 if __name__ == "__main__":

@@ -17,14 +17,17 @@ Run all real-time services via `data-pipeline.py`, buffering one full trading da
 ## Task Breakdown
 
 ### 1. Service Extraction & Config
-- [ ] Move DXLink ingestion into `src/services/tastytrade_streamer.py` (start/stop API)
-- [ ] Create `src/services/gexbot_poller.py` with cache for latest snapshot & max-change
-- [ ] Extend `src/config.Settings` with service toggles + Redis/flush params
+- [x] Move DXLink ingestion into `src/services/tastytrade_streamer.py` (start/stop API)
+- [x] Create `src/services/gexbot_poller.py` with cache for latest snapshot & max-change
+- [x] Extend `src/config.Settings` with service toggles + Redis/flush params
+- [x] Nightly GEX symbol discovery → store supported-ticker set in Redis (24h TTL)
+- [x] Auto-enroll ad-hoc symbols for the current day (persist list in Redis, expires nightly)
 
 ### 2. RedisTimeSeries Integration
 - [ ] Define key schema + retention in docs and config
-- [ ] Write trades/depth updates from streamer into RedisTimeSeries
-- [ ] Write GEX snapshots/max-change into RedisTimeSeries
+- [ ] Define key schema + retention in docs and config
+- [x] Write trades/depth updates from streamer into RedisTimeSeries
+- [x] Write GEX snapshots/max-change into RedisTimeSeries
 
 ### 3. Flush Pipeline (10 min)
 - [ ] Implement flush worker to read RedisTimeSeries deltas, persist to DuckDB/Parquet
