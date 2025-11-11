@@ -2,7 +2,8 @@
 
 **Feature Branch**: `002-extract-mnq-data`  
 **Created**: 2025-11-08  
-**Status**: Draft  
+**Status**: Closed - Feature cancelled, functionality superseded by other implementations  
+**Closed**: 2025-11-11  
 **Input**: User description: "Add a historical tick extraction method for MNQ from the SierraChart Data folder that extracts 70 days back and writes directly to duckdb from SCID file, it should also pull market depth for the same timeline."
 
 ## Clarifications
