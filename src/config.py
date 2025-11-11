@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     redis_port: int = Field(default=6379, env="REDIS_PORT")
     redis_db: int = Field(default=0, env="REDIS_DB")
     redis_password: Optional[str] = Field(default=None, env="REDIS_PASSWORD")
+    timeseries_db_path: str = Field(default="data/redis_timeseries.db", env="TIMESERIES_DB_PATH")
+    timeseries_parquet_dir: str = Field(default="data/parquet/timeseries", env="TIMESERIES_PARQUET_DIR")
 
     # TastyTrade DXLink streamer
     tastytrade_stream_enabled: bool = Field(default=False, env="TASTYTRADE_STREAM_ENABLED")
@@ -152,6 +154,7 @@ class Settings(BaseSettings):
             self.data_path,
             self.staging_path,
             self.parquet_path,
+            Path(self.timeseries_parquet_dir),
         ]
 
         for directory in directories:

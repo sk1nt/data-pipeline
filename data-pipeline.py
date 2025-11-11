@@ -29,6 +29,7 @@ from src.lib.redis_client import RedisClient
 from src.services.gexbot_poller import GEXBotPoller, GEXBotPollerSettings
 from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreamer
 from src.services.redis_timeseries import RedisTimeSeriesClient
+from src.services.redis_flush_worker import FlushWorkerSettings, RedisFlushWorker
 
 LOGGER = logging.getLogger("data_pipeline")
 
@@ -46,6 +47,7 @@ class ServiceManager:
         self.gex_poller: Optional[GEXBotPoller] = None
         self.redis_client: Optional[RedisClient] = None
         self.rts: Optional[RedisTimeSeriesClient] = None
+        self.flush_worker: Optional[RedisFlushWorker] = None
 
     def start(self) -> None:
         self.redis_client = RedisClient(
@@ -84,6 +86,12 @@ class ServiceManager:
             self.gex_poller.start()
             LOGGER.info("GEXBot poller started")
 
+        if self.rts and self.redis_client:
+            flush_settings = FlushWorkerSettings()
+            self.flush_worker = RedisFlushWorker(self.redis_client, self.rts, flush_settings)
+            self.flush_worker.start()
+            LOGGER.info("Redis flush worker started")
+
     async def stop(self) -> None:
         if self.tastytrade:
             await self.tastytrade.stop()
@@ -91,6 +99,9 @@ class ServiceManager:
         if self.gex_poller:
             await self.gex_poller.stop()
             LOGGER.info("GEXBot poller stopped")
+        if self.flush_worker:
+            await self.flush_worker.stop()
+            LOGGER.info("Redis flush worker stopped")
 
     async def _handle_trade_event(self, payload: Dict[str, Any]) -> None:
         if not self.rts:
