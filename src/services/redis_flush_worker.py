@@ -160,5 +160,3 @@ class RedisFlushWorker:
         summary.setdefault("duration", 0.0)
         summary.setdefault("timestamp", None)
         return summary
-*** End Patch
-PATCH

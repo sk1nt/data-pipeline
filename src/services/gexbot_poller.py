@@ -83,9 +83,9 @@ class GEXBotPoller:
                 for symbol in symbols:
                     try:
                         snapshot = await self._fetch_symbol(session, symbol)
-            if snapshot:
-                self.latest[symbol.upper()] = snapshot
-                await self._record_timeseries(snapshot)
+                        if snapshot:
+                            self.latest[symbol.upper()] = snapshot
+                            await self._record_timeseries(snapshot)
                     except Exception:  # pragma: no cover - defensive logging
                         LOGGER.exception("Failed to poll GEXBot for %s", symbol)
                 try:
