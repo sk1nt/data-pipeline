@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     redis_password: Optional[str] = Field(default=None, env="REDIS_PASSWORD")
     timeseries_db_path: str = Field(default="data/redis_timeseries.db", env="TIMESERIES_DB_PATH")
     timeseries_parquet_dir: str = Field(default="data/parquet/timeseries", env="TIMESERIES_PARQUET_DIR")
+    service_control_token: Optional[str] = Field(default=None, env="SERVICE_CONTROL_TOKEN")
+
+    # Discord bot control
+    discord_bot_enabled: bool = Field(default=False, env="DISCORD_BOT_ENABLED")
 
     # TastyTrade DXLink streamer
     tastytrade_stream_enabled: bool = Field(default=False, env="TASTYTRADE_STREAM_ENABLED")
