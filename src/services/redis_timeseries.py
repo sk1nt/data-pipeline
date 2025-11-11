@@ -19,12 +19,16 @@ class RedisTimeSeriesClient:
 
     def add_sample(self, key: str, timestamp_ms: int, value: float, labels: Dict[str, str]) -> None:
         try:
-            self.client.execute_command("TS.ADD", key, timestamp_ms, value)
+            self.client.execute_command(
+                "TS.ADD", key, timestamp_ms, value, "ON_DUPLICATE", "LAST"
+            )
         except redis.ResponseError as exc:
             if "TSDB: key does not exist" not in str(exc):
                 raise
             self._create_series(key, labels)
-            self.client.execute_command("TS.ADD", key, timestamp_ms, value)
+            self.client.execute_command(
+                "TS.ADD", key, timestamp_ms, value, "ON_DUPLICATE", "LAST"
+            )
 
     def multi_add(self, samples: Iterable[Tuple[str, int, float, Dict[str, str]]]) -> None:
         records = list(samples)
@@ -32,7 +36,7 @@ class RedisTimeSeriesClient:
             return
         pipeline = self.client.pipeline()
         for key, ts, value, _ in records:
-            pipeline.execute_command("TS.ADD", key, ts, value)
+            pipeline.execute_command("TS.ADD", key, ts, value, "ON_DUPLICATE", "LAST")
         try:
             pipeline.execute()
         except redis.ResponseError:
@@ -70,8 +74,9 @@ class RedisTimeSeriesClient:
             settings.redis_retention_ms,
             "DUPLICATE_POLICY",
             "LAST",
-            "LABELS",
         ]
-        for k, v in labels.items():
-            args.extend([k, v])
+        if labels:
+            args.append("LABELS")
+            for k, v in labels.items():
+                args.extend([k, v])
         self.client.execute_command(*args)
