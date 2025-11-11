@@ -35,6 +35,12 @@ from src.services.redis_flush_worker import FlushWorkerSettings, RedisFlushWorke
 from src.services.discord_bot_service import DiscordBotService
 
 LOGGER = logging.getLogger("data_pipeline")
+NOISY_STREAM_LOGGERS = [
+    "tastytrade",
+    "tastytrade.session",
+    "tastytrade.utils",
+    "httpx",
+]
 
 
 class HistoryPayload(BaseModel):
@@ -59,6 +65,7 @@ class ServiceManager:
 
     def start(self) -> None:
         self._ensure_redis_clients()
+        self._silence_streamer_logs()
         for service in ("tastytrade", "gex_poller", "redis_flush", "discord_bot"):
             self.start_service(service)
 
@@ -163,6 +170,10 @@ class ServiceManager:
     async def restart_service(self, name: str) -> None:
         await self.stop_service(name)
         self.start_service(name)
+
+    def _silence_streamer_logs(self) -> None:
+        for logger_name in NOISY_STREAM_LOGGERS:
+            logging.getLogger(logger_name).setLevel(logging.WARNING)
 
     async def _handle_trade_event(self, payload: Dict[str, Any]) -> None:
         if not self.rts:
