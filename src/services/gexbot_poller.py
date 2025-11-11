@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone, timedelta
@@ -14,6 +15,7 @@ from .redis_timeseries import RedisTimeSeriesClient
 
 
 LOGGER = logging.getLogger(__name__)
+SNAPSHOT_KEY_PREFIX = "gex:snapshot:"
 
 
 @dataclass
@@ -21,6 +23,7 @@ class GEXBotPollerSettings:
     api_key: str
     symbols: List[str] = field(default_factory=lambda: ["NQ_NDX", "ES_SPX", "SPY", "QQQ", "SPX", "NDX"])
     interval_seconds: int = 60
+    aggregation_period: str = "zero"
 
 
 class GEXBotPoller:
@@ -127,19 +130,24 @@ class GEXBotPoller:
         session: aiohttp.ClientSession,
         symbol: str,
     ) -> Optional[Dict[str, Any]]:
-        base_url = f"https://api.gexbot.com/{symbol}/classic"
+        base_url = f"https://api.gexbot.com/{symbol}/classic/{self.settings.aggregation_period}"
 
-        async def _endpoint(name: str) -> Optional[Dict[str, Any]]:
-            url = f"{base_url}/{name}?key={self.settings.api_key}"
+        async def _endpoint(suffix: str = "") -> Optional[Dict[str, Any]]:
+            url = f"{base_url}{suffix}?key={self.settings.api_key}"
             async with session.get(url) as resp:
                 if resp.status != 200:
-                    LOGGER.debug("GEXBot %s %s returned %s", symbol, name, resp.status)
+                    LOGGER.debug(
+                        "GEXBot %s%s returned %s",
+                        symbol,
+                        suffix or "",
+                        resp.status,
+                    )
                     return None
                 return await resp.json()
 
-        zero = await _endpoint("zero")
-        majors = await _endpoint("majors") if zero else None
-        maxchange = await _endpoint("maxchange") if zero else None
+        zero = await _endpoint()
+        majors = await _endpoint("/majors") if zero else None
+        maxchange = await _endpoint("/maxchange") if zero else None
         if not zero and not majors and not maxchange:
             return None
 
@@ -173,42 +181,102 @@ class GEXBotPoller:
         if isinstance(timestamp, (int, float)):
             timestamp = datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat()
 
-        return {
+        zero_payload = zero or {}
+        majors_payload = majors or {}
+        maxchange_payload = maxchange or {}
+        maxchange_windows: Dict[str, list[float]] = {}
+        if isinstance(maxchange_payload, dict):
+            for window, data in maxchange_payload.items():
+                if window in {"ticker", "timestamp"}:
+                    continue
+                if isinstance(data, (list, tuple)) and len(data) == 2:
+                    try:
+                        strike = float(data[0]) if data[0] is not None else None
+                        delta = float(data[1]) if data[1] is not None else None
+                    except (TypeError, ValueError):
+                        continue
+                    if strike is None or delta is None:
+                        continue
+                    maxchange_windows[window] = [strike, delta]
+
+        net_gex = _first(
+            majors_payload.get("net_gex_vol"),
+            majors_payload.get("net_gex"),
+            zero_payload.get("net_gex"),
+            zero_payload.get("net_gex_vol"),
+            zero_payload.get("sum_gex_vol"),
+        )
+        net_gex_oi = _first(
+            majors_payload.get("net_gex_oi"),
+            zero_payload.get("net_gex_oi"),
+            zero_payload.get("sum_gex_oi"),
+        )
+
+        snapshot = {
             "symbol": symbol.upper(),
             "timestamp": timestamp,
-            "spot": _first(zero.get("spot") if zero else None, majors.get("spot") if majors else None),
-            "zero_gamma": _first(zero.get("zero_gamma") if zero else None, maxchange.get("zero_gamma") if maxchange else None),
-            "net_gex": _first(zero.get("net_gex") if zero else None, zero.get("net_gex_vol") if zero else None),
+            "spot": _first(
+                zero_payload.get("spot"),
+                majors_payload.get("spot"),
+                maxchange_payload.get("spot"),
+            ),
+            "zero_gamma": _first(
+                zero_payload.get("zero_gamma"),
+                maxchange_payload.get("zero_gamma"),
+            ),
+            "net_gex": net_gex,
+            "net_gex_oi": net_gex_oi,
+            "sum_gex_vol": zero_payload.get("sum_gex_vol"),
+            "sum_gex_oi": zero_payload.get("sum_gex_oi"),
             "major_pos_vol": _first(
-                majors.get("major_pos_vol") if majors else None,
-                maxchange.get("major_pos_vol") if maxchange else None,
+                majors_payload.get("major_pos_vol"),
+                majors_payload.get("mpos_vol"),
+                zero_payload.get("major_pos_vol"),
+                zero_payload.get("mpos_vol"),
             ),
             "major_neg_vol": _first(
-                majors.get("major_neg_vol") if majors else None,
-                maxchange.get("major_neg_vol") if maxchange else None,
+                majors_payload.get("major_neg_vol"),
+                majors_payload.get("mneg_vol"),
+                zero_payload.get("major_neg_vol"),
+                zero_payload.get("mneg_vol"),
             ),
             "major_pos_oi": _first(
-                majors.get("major_pos_oi") if majors else None,
-                maxchange.get("major_pos_oi") if maxchange else None,
+                majors_payload.get("major_pos_oi"),
+                majors_payload.get("mpos_oi"),
+                zero_payload.get("major_pos_oi"),
+                zero_payload.get("mpos_oi"),
             ),
             "major_neg_oi": _first(
-                majors.get("major_neg_oi") if majors else None,
-                maxchange.get("major_neg_oi") if maxchange else None,
+                majors_payload.get("major_neg_oi"),
+                majors_payload.get("mneg_oi"),
+                zero_payload.get("major_neg_oi"),
+                zero_payload.get("mneg_oi"),
             ),
             "major_pos_strike": _first(
-                majors.get("major_pos_strike") if majors else None,
-                maxchange.get("major_pos_strike") if maxchange else None,
+                majors_payload.get("major_pos_strike"),
+                zero_payload.get("major_pos_strike"),
+                maxchange_payload.get("major_pos_strike"),
             ),
             "major_neg_strike": _first(
-                majors.get("major_neg_strike") if majors else None,
-                maxchange.get("major_neg_strike") if maxchange else None,
+                majors_payload.get("major_neg_strike"),
+                zero_payload.get("major_neg_strike"),
+                maxchange_payload.get("major_neg_strike"),
             ),
             "delta_risk_reversal": _first(
-                zero.get("delta_risk_reversal") if zero else None,
-                maxchange.get("delta_risk_reversal") if maxchange else None,
+                zero_payload.get("delta_risk_reversal"),
+                maxchange_payload.get("delta_risk_reversal"),
             ),
-            "maxchange": maxchange or {},
+            "maxchange": maxchange_windows,
         }
+        snapshot["net_gex_vol"] = snapshot["net_gex"]
+        snapshot["major_pos"] = snapshot["major_pos_vol"]
+        snapshot["major_neg"] = snapshot["major_neg_vol"]
+        snapshot["ticker"] = snapshot["symbol"]
+        snapshot["min_dte"] = zero_payload.get("min_dte")
+        snapshot["sec_min_dte"] = zero_payload.get("sec_min_dte")
+        snapshot["max_priors"] = zero_payload.get("max_priors")
+        snapshot["strikes"] = zero_payload.get("strikes")
+        return snapshot
 
     def _write_snapshot_series(self, snapshot: Dict[str, Any]) -> None:
         ts_client = self.ts_client
@@ -221,6 +289,9 @@ class GEXBotPoller:
             "spot": snapshot.get("spot"),
             "zero_gamma": snapshot.get("zero_gamma"),
             "net_gex": snapshot.get("net_gex"),
+            "net_gex_oi": snapshot.get("net_gex_oi"),
+            "sum_gex_vol": snapshot.get("sum_gex_vol"),
+            "sum_gex_oi": snapshot.get("sum_gex_oi"),
             "major_pos_vol": snapshot.get("major_pos_vol"),
             "major_neg_vol": snapshot.get("major_neg_vol"),
             "major_pos_oi": snapshot.get("major_pos_oi"),
@@ -264,8 +335,22 @@ class GEXBotPoller:
                         continue
         if samples:
             ts_client.multi_add(samples)
+        self._store_snapshot_blob(snapshot)
         self.snapshot_count += 1
         self.last_snapshot_ts = snapshot.get("timestamp") or datetime.utcnow().isoformat()
+
+    def _store_snapshot_blob(self, snapshot: Dict[str, Any]) -> None:
+        if not self.redis:
+            return
+        symbol = snapshot.get("symbol") or snapshot.get("ticker")
+        if not symbol:
+            return
+        key = f"{SNAPSHOT_KEY_PREFIX}{symbol.upper()}"
+        try:
+            payload = json.dumps(snapshot)
+            self.redis.client.set(key, payload)
+        except Exception:
+            LOGGER.warning("Failed to cache GEX snapshot for %s", symbol, exc_info=True)
 
     def _load_dynamic_symbols(self) -> Set[str]:
         if not self.redis:

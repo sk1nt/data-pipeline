@@ -38,14 +38,14 @@ pip install -e .
 ### Running
 
 ```bash
-# Start Redis
-redis-server
+# Start Redis (local instance)
+redis-server redis/redis.conf &
 
-# Start API server
-python backend/src/api/main.py
+# Start the unified pipeline (services + control API)
+python data-pipeline.py --host 0.0.0.0 --port 8877
 
-# Open monitoring UI
-# Visit http://localhost:3000 (serve frontend with HTTP server)
+# Monitor services / restart feeds
+# Visit http://localhost:8877/status.html
 ```
 
 ### Schwab Streaming Service

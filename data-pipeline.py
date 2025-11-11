@@ -128,6 +128,7 @@ class ServiceManager:
                     api_key=settings.gexbot_api_key,
                     symbols=settings.gex_symbol_list,
                     interval_seconds=settings.gex_poll_interval_seconds,
+                    aggregation_period=settings.gex_poll_aggregation,
                 ),
                 redis_client=self.redis_client,
                 ts_client=self.rts,

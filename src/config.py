@@ -62,9 +62,19 @@ class Settings(BaseSettings):
     tastytrade_refresh_token: Optional[str] = Field(default=None, env="TASTYTRADE_REFRESH_TOKEN")
 
     # GEXBot poller
-    gex_polling_enabled: bool = Field(default=False, env="GEXBOT_POLLING_ENABLED")
+    gex_polling_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("GEXBOT_POLLING_ENABLED"),
+    )
     gex_poll_interval_seconds: int = Field(default=60, env="GEXBOT_POLL_INTERVAL_SECONDS")
-    gex_poll_symbols: str = Field(default="NQ_NDX,ES_SPX,SPY,QQQ,SPX,NDX", env="GEXBOT_POLL_SYMBOLS")
+    gex_poll_symbols: str = Field(
+        default="NQ_NDX,ES_SPX,SPY,QQQ,SPX,NDX",
+        validation_alias=AliasChoices("GEXBOT_POLL_SYMBOLS"),
+    )
+    gex_poll_aggregation: str = Field(
+        default="zero",
+        validation_alias=AliasChoices("GEXBOT_POLL_AGGREGATION"),
+    )
     gexbot_api_key: Optional[str] = Field(default=None, env="GEXBOT_API_KEY")
 
     # Schwab streaming

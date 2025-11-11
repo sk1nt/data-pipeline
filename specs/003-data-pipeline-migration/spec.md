@@ -2,7 +2,8 @@
 
 **Feature Branch**: `003-data-pipeline-migration`  
 **Created**: November 9, 2025  
-**Status**: Draft  
+**Status**: Closed - Feature cancelled, functionality integrated into main codebase  
+**Closed**: 2025-11-11  
 **Input**: User description: "migrate full functionality of ../torch-market/data-pipeline.py into current environment"
 
 ## Clarifications
