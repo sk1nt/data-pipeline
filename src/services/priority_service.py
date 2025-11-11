@@ -9,11 +9,11 @@ from uuid import UUID
 from ..lib.logging import get_logger
 from ..lib.priority_db import PriorityDatabaseManager
 from ..lib.redis_client import RedisClient
-from ..lib.utils import calculate_priority_score
 from ..lib.exceptions import DatabaseError
 from ..models.priority_request import PriorityRequest
 from ..models.data_source import DataSource
 from ..models.enums import JobStatus
+from .rule_engine import RuleEngine
 
 logger = get_logger(__name__)
 
@@ -24,6 +24,7 @@ class PriorityService:
     def __init__(self, db_manager: PriorityDatabaseManager, redis_client: RedisClient):
         self.db = db_manager
         self.redis = redis_client
+        self.rule_engine = RuleEngine()
 
     async def submit_priority_request(
         self,
@@ -50,17 +51,29 @@ class PriorityService:
                 logger.warning(f"Data source {data_source.source_id} has low reliability score: {data_source.reliability_score}")
                 # Still allow but log warning
 
-            # Calculate priority score
-            priority_score = calculate_priority_score(
-                priority_level=request.priority_level,
-                deadline=request.deadline,
-                data_source_reliability=data_source.reliability_score
+            # Get active priority rules (use defaults for now)
+            active_rules = self.rule_engine.create_default_rules()
+
+            # Use rule engine for automatic priority assignment
+            calculated_score, matched_rules = self.rule_engine.evaluate_priority_request(
+                request, data_source, active_rules
             )
 
-            # Set calculated values
-            request.priority_score = priority_score
+            # Override the manual priority level with rule-based score
+            request.priority_score = calculated_score
+
+            # Update priority level based on calculated score
+            request.priority_level = self.rule_engine.get_priority_level_from_score(calculated_score)
+
+            # Set status and timestamp
             request.status = JobStatus.PENDING
             request.submitted_at = datetime.utcnow()
+
+            # Log rule matches for audit
+            if matched_rules:
+                logger.info(f"AUDIT: Request {request.request_id} auto-assigned priority {request.priority_level.value} ({calculated_score:.3f}) based on rules: {', '.join(matched_rules)}")
+            else:
+                logger.info(f"AUDIT: Request {request.request_id} auto-assigned default priority {request.priority_level.value} ({calculated_score:.3f}) - no rules matched")
 
             # Save to database
             request_dict = request.dict_for_db()
@@ -72,7 +85,7 @@ class PriorityService:
             # Add to Redis priority queue
             await self.redis.add_to_priority_queue(
                 request_id=str(request_id),
-                priority_score=priority_score,
+                priority_score=request.priority_score,
                 data={
                     'source_id': str(data_source.source_id),
                     'data_type': request.data_type.value,
@@ -80,7 +93,7 @@ class PriorityService:
                 }
             )
 
-            logger.info(f"Submitted priority request {request_id} with score {priority_score}")
+            logger.info(f"Submitted priority request {request_id} with score {request.priority_score}")
             return request
 
         except Exception as e:

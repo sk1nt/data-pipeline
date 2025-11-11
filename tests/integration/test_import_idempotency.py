@@ -26,7 +26,7 @@ def make_sample_json(path: Path):
 
 def test_idempotent_import(tmp_path):
     db_path = tmp_path / "gex_data.db"
-    history_db = tmp_path / "gex_history.db"
+    history_db = tmp_path / "gex_data.db"
     # create empty duckdb databases
     duckdb.connect(str(db_path)).close()
     duckdb.connect(str(history_db)).close()

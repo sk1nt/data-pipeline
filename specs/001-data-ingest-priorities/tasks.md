@@ -75,13 +75,13 @@ Based on plan.md: Single project structure with `src/`, `tests/` at repository r
 
 ### Implementation for User Story 2
 
-- [ ] T020 [P] [US2] Create PriorityRule model in src/models/priority_rule.py
-- [ ] T021 [US2] Implement priority rule engine for automatic assignment in src/services/rule_engine.py
-- [ ] T022 [US2] Create rule evaluation logic with market impact and freshness criteria
-- [ ] T023 [US2] Integrate rule engine with priority service from US1
-- [ ] T024 [US2] Create GET /rules endpoint in src/api/routes/rules.py
-- [ ] T025 [US2] Add rule validation and conflict resolution
-- [ ] T026 [US2] Add audit logging for automatic priority decisions
+- [x] T020 [P] [US2] Create PriorityRule model in src/models/priority_rule.py
+- [x] T021 [US2] Implement priority rule engine for automatic assignment in src/services/rule_engine.py
+- [x] T022 [US2] Create rule evaluation logic with market impact and freshness criteria
+- [x] T023 [US2] Integrate rule engine with priority service from US1
+- [x] T024 [US2] Create GET /rules endpoint in src/api/routes/rules.py
+- [x] T025 [US2] Add rule validation and conflict resolution
+- [x] T026 [US2] Add audit logging for automatic priority decisions
 
 **Checkpoint**: At this point, User Stories 1 AND 2 should work - automatic priority assignment based on guidelines
 
@@ -95,8 +95,8 @@ Based on plan.md: Single project structure with `src/`, `tests/` at repository r
 
 ### Implementation for User Story 3
 
-- [ ] T027 [P] [US3] Create ProcessingJob model in src/models/processing_job.py
-- [ ] T028 [P] [US3] Create GEXSnapshot and GEXStrike models in src/models/gex_data.py
+- [x] T027 [P] [US3] Create ProcessingJob model in src/models/processing_job.py
+- [x] T028 [P] [US3] Create GEXSnapshot and GEXStrike models in src/models/gex_data.py
 - [ ] T029 [US3] Implement priority queue management with Redis sorted sets in src/services/queue_service.py
 - [ ] T030 [US3] Create high-speed processing pipeline with Polars optimization in src/services/processing_service.py
 - [ ] T031 [US3] Create GET /ingest/priority/{request_id} endpoint for status tracking

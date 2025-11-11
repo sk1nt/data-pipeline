@@ -44,7 +44,7 @@
 -- **CRITICAL: Data safety & CI gating tasks (must be completed before any mass imports or destructive operations)**
 
 - [ ] T047 [CRITICAL] Implement safe import workflow for historical imports (staging area, import to temporary tables/files, schema validation, atomic swap). Include rollback on validation failure and tests that verify no clean data is overwritten. (Maps: FR-009, FR-003)
-- [ ] T048 [CRITICAL] Implement automatic pre-import backups and restore scripts for `data/gex_data.db` and `data/gex_history.db`. Add automation/CLI to create and verify backups prior to any write operations. (Maps: FR-009)
+- [ ] T048 [CRITICAL] Implement automatic pre-import backups and restore scripts for `data/gex_data.db` and `data/gex_data.db`. Add automation/CLI to create and verify backups prior to any write operations. (Maps: FR-009)
 - [ ] T049 [CRITICAL] Create CI/CD pipeline (e.g., GitHub Actions) that enforces linting, unit/integration tests, and performance benchmarks on every PR. Make passing CI a merge gate. (Maps: Constitution - Development Workflow)
 - [ ] T050 [HIGH] Implement idempotency and resume semantics for historical import jobs: dedupe keys, resume markers, and retry behavior. Add tests for retry/resume and duplicate submission handling. (Maps: FR-003)
 - [ ] T051 [HIGH] Reconcile and formalize performance targets: update NFR and plan to a single canonical throughput and add benchmark tests to assert it in CI. (Maps: NFR-002, plan.md Performance Goals)

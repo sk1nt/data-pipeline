@@ -89,7 +89,7 @@ A data engineer imports market depth data specifically for MNQ futures to suppor
 - **FR-002**: System MUST import all fields from complete gex_zero data for NQ_NDX from JSON files, including timestamps, spot prices, gamma values, strike data, min_dte, sec_min_dte, major_pos_vol, major_pos_oi, major_neg_vol, major_neg_oi, sum_gex_vol, sum_gex_oi, delta_risk_reversal, max_priors, and all other available fields (do not filter gex_zero fields)
 - **FR-003**: [DEFERRED] System MUST import all fields from baseline tick data for MNQ and NQ from TastyTrade CSV streams, including bid/ask/last prices and volumes
 - **FR-004**: [DEFERRED] System MUST import all fields from market depth data for MNQ from JSONL files preserving order book structure
-- **FR-005**: [DEFERRED] System MUST migrate relevant data from SQLite databases (gex_history.db, trade_history.db) preserving schema and relationships
+- **FR-005**: [DEFERRED] System MUST migrate relevant data from SQLite databases (gex_data.db, trade_history.db) preserving schema and relationships
 - **FR-006**: System MUST validate GEX data integrity during import checking for duplicates, gaps, and corruption, and skip verified duplicates
 - **FR-007**: System MUST provide progress reporting and error handling for GEX data imports
 - **FR-008**: System MUST store imported GEX data in both DuckDB database (for fast querying) and Parquet files in the data directory (for long-term storage and analytics), importing first to DuckDB for immediate querying and validation, then exporting to Parquet files

@@ -6,8 +6,8 @@ payload with a signed download URL, ticker, and endpoint label. Requests are
 persisted into the DuckDB-backed queue exposed by src.lib.gex_history_queue so
 that background workers (e.g. scripts/import_gex_history.py) can process them.
 
-The goal is to keep the implementation self-contained: no references to the old
-torch-market repository or the broader `market_ml` package are required.
+The goal is to keep the implementation self-contained without depending on the
+old torch-market repository or any legacy-private packages.
 """
 
 from __future__ import annotations
@@ -107,6 +107,8 @@ class HistoryBridgeHandler(BaseHTTPRequestHandler):
         endpoint = self._normalize_string(
             payload.get("endpoint") or payload.get("feed") or payload.get("kind")
         )
+        if not endpoint:
+            endpoint = self._infer_endpoint(url)
         metadata = payload.get("metadata")
         if metadata and not isinstance(metadata, dict):
             metadata = None
@@ -161,6 +163,16 @@ class HistoryBridgeHandler(BaseHTTPRequestHandler):
         if isinstance(value, str):
             return value.strip()
         return str(value).strip()
+
+    @staticmethod
+    def _infer_endpoint(url: str) -> str:
+        import re
+        match = re.search(r'_((?:gex_zero|gex_one|gex_full))\.json', url)
+        if match:
+            inferred = match.group(1)
+            LOG.info("Inferred endpoint '%s' from URL", inferred)
+            return inferred
+        return "gex_zero"
 
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: D401
         """Route BaseHTTPRequestHandler logging through logging module."""
