@@ -325,8 +325,9 @@ class GEXBotPoller:
         return None
 
     def status(self) -> Dict[str, Any]:
+        running = self._task is not None and not self._task.done()
         return {
-            "running": self._task is not None and not self._task.done(),
+            "running": running,
             "snapshot_count": self.snapshot_count,
             "last_snapshot_ts": self.last_snapshot_ts,
             "base_symbols": sorted(self._base_symbols),

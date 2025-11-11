@@ -62,6 +62,10 @@ class TastyTradeStreamer:
             await self._task
             self._task = None
 
+    @property
+    def is_running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
     async def _run(self) -> None:
         LOGGER.info(
             "Starting TastyTrade DXLink streamer (symbols=%s, depth_levels=%s)",
