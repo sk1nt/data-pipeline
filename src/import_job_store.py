@@ -12,7 +12,7 @@ def _now() -> str:
 
 
 class ImportJobStore:
-    def __init__(self, db_path: Path | str = "data/gex_history.db"):
+    def __init__(self, db_path: Path | str = "data/gex_data.db"):
         self.db_path = str(db_path)
         self._ensure_table()
 

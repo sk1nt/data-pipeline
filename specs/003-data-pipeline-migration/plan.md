@@ -13,7 +13,7 @@ Migrate the full functionality of the data-pipeline.py server from torch-market 
 
 **Language/Version**: Python 3.11  
 **Primary Dependencies**: FastAPI, Pydantic, threading, requests, polars, duckdb  
-**Storage**: Separate DuckDB databases (gex_data.db for real-time data, gex_history.db for import metadata), Parquet files for historical data  
+**Storage**: Separate DuckDB databases (gex_data.db for real-time data, gex_data.db for import metadata), Parquet files for historical data  
 **Testing**: pytest  
 **Target Platform**: Linux server  
 **Project Type**: single/web application  

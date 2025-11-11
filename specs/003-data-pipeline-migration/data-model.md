@@ -82,13 +82,13 @@ Generic payload from external webhook sources.
 ## Data Flow
 
 1. **GEX Payloads**: Received via POST /gex, validated, stored in gex_data.db DuckDB
-2. **Historical Data**: Requested via POST /gex_history_url, queued in gex_history.db, downloaded to staging, imported to gex_data.db DuckDB/Parquet
+2. **Historical Data**: Requested via POST /gex_history_url, queued in gex_data.db, downloaded to staging, imported to gex_data.db DuckDB/Parquet
 3. **Webhook Payloads**: Received via POST /uw, stored in gex_data.db DuckDB, processed by topic
 
 ## Storage
 
 - **DuckDB gex_data.db**: Real-time data (`gex_snapshots`, `gex_strikes`, `universal_webhooks`, `option_trades_events`)
-- **DuckDB gex_history.db**: History import metadata and queue (`gex_history_queue`)
+- **DuckDB gex_data.db**: History import metadata and queue (`gex_history_queue`)
 - **Parquet**: Historical data exports (`data/parquet/gex/YYYY/MM/ticker/endpoint/strikes.parquet`)
 - **JSON**: Staged downloads (`data/source/gexbot/ticker_endpoint_history.json`)
 

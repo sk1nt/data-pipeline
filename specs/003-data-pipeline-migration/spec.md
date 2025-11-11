@@ -10,7 +10,7 @@
 ### Session 2025-11-09
 
 - Q: Database technology for data persistence → A: DuckDB (no SQLite will be used)
-- Q: Database architecture for gex_history_url functionality → A: Use separate gex_history.db database
+- Q: Database architecture for gex_history_url functionality → A: Use separate gex_data.db database
 - Q: Data safety during implementation → A: Implementation tasks must never overwrite established clean data in data folder
 - Q: Data source for gexbot API updates and derived snapshots → A: Should come from established gex_data.db
 - Q: Database schema for GEX data → A: Use existing legacy gex_snapshots and gex_strikes tables (preserve 45M+ existing data points)
@@ -91,9 +91,9 @@ As a developer, I want comprehensive testing for all data sources with data inte
 - **FR-002**: System MUST handle POST requests to /gex for capturing and persisting GEX payloads to the database.
 - **FR-003**: System MUST handle POST requests to /gex_history_url to download JSON files from URLs, stage them in data/source/gexbot/, and import data into the established gex_data.db DuckDB database and Parquet formats.
 - **FR-004**: System MUST handle POST requests to /uw for universal webhook payload persistence.
-- **FR-005**: System MUST persist GEX snapshots, strikes, and webhook data to the established gex_data.db DuckDB database (gex_snapshots, gex_strikes, universal_webhooks, option_trades_events tables), and history queue/import metadata to gex_history.db DuckDB database.
+- **FR-005**: System MUST persist GEX snapshots, strikes, and webhook data to the established gex_data.db DuckDB database (gex_snapshots, gex_strikes, universal_webhooks, option_trades_events tables), and history queue/import metadata to gex_data.db DuckDB database.
 - **FR-006**: System MUST support all configuration options, environment variables, and command-line arguments from the original data-pipeline.py.
-- **FR-007**: System MUST maintain the same directory structure for data storage (data/gex_data.db, data/gex_history.db, data/parquet/gex/, data/source/gexbot/).
+- **FR-007**: System MUST maintain the same directory structure for data storage (data/gex_data.db, data/gex_data.db, data/parquet/gex/, data/source/gexbot/).
 - **FR-008**: System MUST provide data integrity validation and spot checking across timestamps for all data sources (GEX payloads, historical imports, webhooks).
 - **FR-009**: System MUST never overwrite established clean data in data folder during implementation or operation.
 

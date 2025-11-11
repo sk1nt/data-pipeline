@@ -71,7 +71,7 @@ Expected response: `{"status": "received"}`
 - **Database**: `data/gex_data.db` (DuckDB)
 - **Parquet Files**: `data/parquet/gex/YYYY/MM/{ticker}/{endpoint}/strikes.parquet`
 - **Staged Downloads**: `data/source/gexbot/{ticker}_{endpoint}_history.json`
-- **SQLite Metadata**: `data/gex_history.db`
+- **SQLite Metadata**: `data/gex_data.db`
 
 ## Monitoring
 
