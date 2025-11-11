@@ -6,9 +6,10 @@ import argparse
 import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import uvicorn
@@ -48,6 +49,10 @@ class ServiceManager:
         self.redis_client: Optional[RedisClient] = None
         self.rts: Optional[RedisTimeSeriesClient] = None
         self.flush_worker: Optional[RedisFlushWorker] = None
+        self.trade_count = 0
+        self.depth_count = 0
+        self.last_trade_ts: Optional[str] = None
+        self.last_depth_ts: Optional[str] = None
 
     def start(self) -> None:
         self.redis_client = RedisClient(
@@ -103,6 +108,19 @@ class ServiceManager:
             await self.flush_worker.stop()
             LOGGER.info("Redis flush worker stopped")
 
+    def status(self) -> Dict[str, Any]:
+        return {
+            "tastytrade_streamer": {
+                "running": self.tastytrade is not None,
+                "trade_samples": self.trade_count,
+                "last_trade_ts": self.last_trade_ts,
+                "depth_samples": self.depth_count,
+                "last_depth_ts": self.last_depth_ts,
+            },
+            "gex_poller": getattr(self.gex_poller, "status", lambda: {})(),
+            "redis_flush_worker": getattr(self.flush_worker, "status", lambda: {})(),
+        }
+
     async def _handle_trade_event(self, payload: Dict[str, Any]) -> None:
         if not self.rts:
             return
@@ -123,6 +141,8 @@ class ServiceManager:
             (f"ts:trade:size:{symbol}", timestamp_ms, size, {"symbol": symbol, "type": "trade", "field": "size"}),
         ]
         self.rts.multi_add(samples)
+        self.trade_count += 1
+        self.last_trade_ts = payload.get("timestamp") or datetime.utcnow().isoformat()
 
     def _write_depth_timeseries(self, payload: Dict[str, Any]) -> None:
         symbol = payload.get("symbol", "").upper() or "UNKNOWN"
@@ -171,6 +191,8 @@ class ServiceManager:
             )
         if samples and self.rts:
             self.rts.multi_add(samples)
+            self.depth_count += 1
+            self.last_depth_ts = payload.get("timestamp") or datetime.utcnow().isoformat()
 
 
 service_manager = ServiceManager()
@@ -198,6 +220,11 @@ async def root() -> Dict[str, str]:
 @app.get("/health")
 async def health() -> Dict[str, str]:
     return {"status": "healthy"}
+
+
+@app.get("/status")
+async def status() -> Dict[str, Any]:
+    return service_manager.status()
 
 
 @app.post("/gex_history_url")
