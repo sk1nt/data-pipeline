@@ -153,7 +153,7 @@ class TastyTradeStreamer:
         futures = {"MNQ", "MES", "NQ", "ES"}
         if symbol in futures:
             return f"/{symbol}:XCME"
-        return f"/{symbol}"
+        return symbol
 
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:
