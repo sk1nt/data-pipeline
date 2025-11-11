@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import redis
 
@@ -40,7 +40,7 @@ class RedisTimeSeriesClient:
             for key, ts, value, labels in records:
                 self.add_sample(key, ts, value, labels)
 
-    def range(self, key: str, start_ms: int, end_ms: int) -> List[Tuple[int, float]]:
+    def range(self, key: str, start_ms: int, end_ms: Union[int, str]) -> List[Tuple[int, float]]:
         result = self.client.execute_command("TS.RANGE", key, start_ms, end_ms)
         return [(int(ts), float(val)) for ts, val in result]
 

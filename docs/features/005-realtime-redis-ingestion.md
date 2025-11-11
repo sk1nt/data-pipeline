@@ -30,7 +30,7 @@ Run all real-time services via `data-pipeline.py`, buffering one full trading da
 - [x] Write GEX snapshots/max-change into RedisTimeSeries
 
 ### 3. Flush Pipeline (10 min)
-- [ ] Implement flush worker to read RedisTimeSeries deltas, persist to DuckDB/Parquet
+- [x] Implement flush worker to read RedisTimeSeries deltas, persist to DuckDB/Parquet
 - [ ] Add logging/metrics for flush success/failure
 
 ### 4. FastAPI Lifecycle Wiring
