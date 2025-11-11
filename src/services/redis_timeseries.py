@@ -63,7 +63,15 @@ class RedisTimeSeriesClient:
         return self.client.execute_command(*args)
 
     def _create_series(self, key: str, labels: Dict[str, str]) -> None:
-        args = ["TS.CREATE", key, "RETENTION", settings.redis_retention_ms, "LABELS"]
+        args = [
+            "TS.CREATE",
+            key,
+            "RETENTION",
+            settings.redis_retention_ms,
+            "DUPLICATE_POLICY",
+            "LAST",
+            "LABELS",
+        ]
         for k, v in labels.items():
             args.extend([k, v])
         self.client.execute_command(*args)
