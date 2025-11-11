@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import duckdb
 import pandas as pd
@@ -40,6 +41,7 @@ class RedisFlushWorker:
         self.settings = settings
         self._task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
+        self._last_summary: Dict[str, Any] = {}
 
     def start(self) -> None:
         if self._task and not self._task.done():
@@ -71,8 +73,15 @@ class RedisFlushWorker:
             LOGGER.exception("Redis flush worker encountered an error")
 
     def _flush_sync(self) -> None:
+        start_time = time.perf_counter()
         keys = list(self.redis_client.client.scan_iter(match=self.settings.key_pattern))
         if not keys:
+            self._last_summary = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "samples": 0,
+                "keys": 0,
+                "duration": 0.0,
+            }
             return
         last_hash = self.settings.last_hash
         new_records: List[Tuple[str, int, float]] = []
@@ -86,6 +95,13 @@ class RedisFlushWorker:
             new_records.extend((key, ts, value) for ts, value in samples)
             last_updates[key] = samples[-1][0]
         if not new_records:
+            duration = time.perf_counter() - start_time
+            self._last_summary = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "samples": 0,
+                "keys": 0,
+                "duration": duration,
+            }
             return
         df = pd.DataFrame(new_records, columns=["key", "ts", "value"])
         df["day"] = pd.to_datetime(df["ts"], unit="ms").dt.date
@@ -93,7 +109,20 @@ class RedisFlushWorker:
         self._write_parquet(df)
         if last_updates:
             self.redis_client.client.hset(last_hash, mapping=last_updates)
-        LOGGER.info("Flushed %s RedisTimeSeries samples", len(df))
+        duration = time.perf_counter() - start_time
+        summary = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "samples": int(len(df)),
+            "keys": int(len(last_updates)),
+            "duration": duration,
+        }
+        self._last_summary = summary
+        LOGGER.info(
+            "Redis flush worker: %s samples from %s keys in %.2fs",
+            summary["samples"],
+            summary["keys"],
+            summary["duration"],
+        )
 
     def _write_to_duckdb(self, df: pd.DataFrame) -> None:
         self.settings.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -121,5 +150,15 @@ class RedisFlushWorker:
             day_dir.mkdir(parents=True, exist_ok=True)
             filename = day_dir / f"flush_{flush_ts}.parquet"
             group.to_parquet(filename, index=False)
+
+    def status(self) -> Dict[str, Any]:
+        running = self._task is not None and not self._task.done()
+        summary = dict(self._last_summary)
+        summary.setdefault("running", running)
+        summary.setdefault("samples", 0)
+        summary.setdefault("keys", 0)
+        summary.setdefault("duration", 0.0)
+        summary.setdefault("timestamp", None)
+        return summary
 *** End Patch
 PATCH

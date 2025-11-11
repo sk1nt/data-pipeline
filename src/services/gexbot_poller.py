@@ -47,6 +47,8 @@ class GEXBotPoller:
         self._dynamic_symbols: Set[str] = self._load_dynamic_symbols()
         self._supported_symbols: Set[str] = set(self._base_symbols)
         self._last_supported_refresh: Optional[date] = None
+        self.snapshot_count = 0
+        self.last_snapshot_ts: Optional[str] = None
 
     def start(self) -> None:
         if self._task and not self._task.done():
@@ -81,9 +83,9 @@ class GEXBotPoller:
                 for symbol in symbols:
                     try:
                         snapshot = await self._fetch_symbol(session, symbol)
-                        if snapshot:
-                            self.latest[symbol.upper()] = snapshot
-                            await self._record_timeseries(snapshot)
+            if snapshot:
+                self.latest[symbol.upper()] = snapshot
+                await self._record_timeseries(snapshot)
                     except Exception:  # pragma: no cover - defensive logging
                         LOGGER.exception("Failed to poll GEXBot for %s", symbol)
                 try:
@@ -262,6 +264,8 @@ class GEXBotPoller:
                         continue
         if samples:
             ts_client.multi_add(samples)
+        self.snapshot_count += 1
+        self.last_snapshot_ts = snapshot.get("timestamp") or datetime.utcnow().isoformat()
 
     def _load_dynamic_symbols(self) -> Set[str]:
         if not self.redis:
@@ -319,6 +323,15 @@ class GEXBotPoller:
             if isinstance(symbols, list):
                 return [str(item) for item in symbols]
         return None
+
+    def status(self) -> Dict[str, Any]:
+        return {
+            "running": self._task is not None and not self._task.done(),
+            "snapshot_count": self.snapshot_count,
+            "last_snapshot_ts": self.last_snapshot_ts,
+            "base_symbols": sorted(self._base_symbols),
+            "dynamic_symbols": sorted(self._dynamic_symbols),
+        }
 
 
 def _timestamp_ms(value: Any) -> int:
