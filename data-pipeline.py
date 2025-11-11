@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -225,6 +226,45 @@ async def health() -> Dict[str, str]:
 @app.get("/status")
 async def status() -> Dict[str, Any]:
     return service_manager.status()
+
+
+STATUS_PAGE = """
+<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"UTF-8\" />
+  <title>Data Pipeline Status</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #111; color: #f1f1f1; }
+    pre { background: #222; padding: 1rem; border-radius: 8px; }
+    .warning { color: #ffcc00; }
+  </style>
+</head>
+<body>
+  <h1>Data Pipeline Status</h1>
+  <p class=\"warning\">This page refreshes every 3 seconds.</p>
+  <pre id=\"status\">Loading...</pre>
+  <script>
+    async function refresh() {
+      try {
+        const res = await fetch('/status');
+        const data = await res.json();
+        document.getElementById('status').textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        document.getElementById('status').textContent = 'Error: ' + err;
+      }
+    }
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>
+"""
+
+
+@app.get("/status.html", response_class=HTMLResponse)
+async def status_page() -> str:
+    return STATUS_PAGE
 
 
 @app.post("/gex_history_url")
