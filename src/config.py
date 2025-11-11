@@ -40,6 +40,22 @@ class Settings(BaseSettings):
     import_timeout: int = Field(default=300, env="IMPORT_TIMEOUT")  # seconds
     staging_dir: str = Field(default="data/source/gexbot", env="STAGING_DIR")
     parquet_dir: str = Field(default="data/parquet/gex", env="PARQUET_DIR")
+    redis_retention_ms: int = Field(default=86_400_000, env="REDIS_RETENTION_MS")
+    flush_interval_seconds: int = Field(default=600, env="FLUSH_INTERVAL_SECONDS")
+
+    # TastyTrade DXLink streamer
+    tastytrade_stream_enabled: bool = Field(default=False, env="TASTYTRADE_STREAM_ENABLED")
+    tastytrade_symbols: str = Field(default="MES,MNQ,NQ,SPY,QQQ,VIX", env="TASTYTRADE_STREAM_SYMBOLS")
+    tastytrade_depth_levels: int = Field(default=40, env="TASTYTRADE_DEPTH_LEVELS")
+    tastytrade_client_id: Optional[str] = Field(default=None, env="TASTYTRADE_CLIENT_ID")
+    tastytrade_client_secret: Optional[str] = Field(default=None, env="TASTYTRADE_CLIENT_SECRET")
+    tastytrade_refresh_token: Optional[str] = Field(default=None, env="TASTYTRADE_REFRESH_TOKEN")
+
+    # GEXBot poller
+    gex_polling_enabled: bool = Field(default=False, env="GEXBOT_POLLING_ENABLED")
+    gex_poll_interval_seconds: int = Field(default=60, env="GEXBOT_POLL_INTERVAL_SECONDS")
+    gex_poll_symbols: str = Field(default="NQ_NDX,ES_SPX,SPY,QQQ,SPX,NDX", env="GEXBOT_POLL_SYMBOLS")
+    gexbot_api_key: Optional[str] = Field(default=None, env="GEXBOT_API_KEY")
 
     # Schwab streaming
     schwab_enabled: bool = Field(default=False, env="SCHWAB_ENABLED")
@@ -102,12 +118,20 @@ class Settings(BaseSettings):
         """Get CORS origins as a list."""
         if self.cors_origins == "*":
             return ["*"]
-        return [origin.strip() for origin in self.cors_origins.split(",")]
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     @property
     def schwab_symbol_list(self) -> list[str]:
         """Return Schwab symbol list."""
         return [symbol.strip().upper() for symbol in self.schwab_symbols.split(",") if symbol.strip()]
+
+    @property
+    def tastytrade_symbol_list(self) -> list[str]:
+        return [symbol.strip().upper() for symbol in self.tastytrade_symbols.split(",") if symbol.strip()]
+
+    @property
+    def gex_symbol_list(self) -> list[str]:
+        return [symbol.strip().upper() for symbol in self.gex_poll_symbols.split(",") if symbol.strip()]
 
     def ensure_directories(self):
         """Ensure all required directories exist."""
