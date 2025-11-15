@@ -12,7 +12,7 @@
 
 ## Installation
 
-1. Ensure the migrated `data_pipeline.py` is in the project root or `src/` directory
+1. Ensure the migrated `data-pipeline.py` is in the project root or `src/` directory
 2. Install dependencies:
    ```bash
    pip install fastapi pydantic polars duckdb requests
@@ -22,7 +22,7 @@
 
 1. Start the server:
    ```bash
-   python src/data_pipeline.py --host 127.0.0.1 --port 8877
+   python data-pipeline.py --host 127.0.0.1 --port 8877
    ```
 
 2. The server will start on `http://127.0.0.1:8877`

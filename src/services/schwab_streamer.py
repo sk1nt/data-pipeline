@@ -11,12 +11,19 @@ from typing import Callable, Optional
 
 import httpx
 from websocket import WebSocketApp
+from schwab.client import Client as Schwab
 
 from ..config import settings
 from ..lib.logging import get_logger
 from ..lib.redis_client import RedisClient
 from ..models.market_data import Level2Event, Level2Quote, TickEvent
 from .trading_publisher import TradingEventPublisher
+
+import os
+import json
+import base64
+from pathlib import Path
+from threading import Lock
 
 LOG = get_logger(__name__)
 
@@ -35,7 +42,7 @@ class SchwabToken:
 
 
 class SchwabAuthClient:
-    """Handles Schwab OAuth token management with auto-refresh."""
+    """Handles Schwab OAuth token management with auto-refresh using schwab-py."""
 
     def __init__(
         self,
@@ -48,9 +55,39 @@ class SchwabAuthClient:
         self.client_secret = client_secret
         self.refresh_token = refresh_token
         self.rest_url = rest_url.rstrip("/")
-        self._token: Optional[SchwabToken] = None
         self._stop_refresh = threading.Event()
         self._refresh_thread: Optional[threading.Thread] = None
+        self._lock = Lock()
+
+        # token persistence path: project-root/.tokens/schwab_token.json
+        project_root = Path(__file__).resolve().parents[2]
+        self._tok_path = project_root / ".tokens" / "schwab_token.json"
+        
+        # Initialize schwab-py client
+        self.schwab = Schwab(
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            redirect_uri=None,  # Not needed for refresh
+            token_path=str(self._tok_path)
+        )
+        
+        # If we have a refresh token, set it in the schwab client
+        if self.refresh_token:
+            # Load or set the token
+            try:
+                tokens = self._load_persisted_tokens()
+                if tokens:
+                    self.schwab.tokens = tokens
+                else:
+                    # Set initial tokens
+                    self.schwab.tokens = {
+                        'access_token': '',
+                        'refresh_token': self.refresh_token,
+                        'token_type': 'Bearer',
+                        'expires_in': 0
+                    }
+            except Exception:
+                pass
 
     def start_auto_refresh(self) -> None:
         """Start background thread for automatic token refresh."""
@@ -69,44 +106,41 @@ class SchwabAuthClient:
             self._refresh_thread.join(timeout=5)
         LOG.info("Stopped Schwab token auto-refresh")
 
-    def get_token(self) -> SchwabToken:
-        """Return valid access token, refreshing when required."""
-        if self._token and not self._token.is_expired:
-            return self._token
-        self._token = self._fetch_token()
-        return self._token
+    def refresh_tokens(self) -> Optional[dict]:
+        """Manually refresh tokens using schwab-py."""
+        LOG.info("Manually refreshing Schwab tokens...")
+        try:
+            with self._lock:
+                self.schwab.refresh_token()
+                tokens = self.schwab.tokens
+                LOG.info("Tokens refreshed successfully")
+                return tokens
+        except Exception as e:
+            LOG.error("Manual token refresh failed: %s", e)
+            return None
 
-    def _fetch_token(self) -> SchwabToken:
-        token_endpoint = f"{self.rest_url}/oauth/token"
-        payload = {
-            "grant_type": "refresh_token",
-            "refresh_token": self.refresh_token,
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-        }
-        LOG.info("Requesting Schwab OAuth token")
-        resp = httpx.post(token_endpoint, data=payload, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        expires_in = int(data.get("expires_in", 1800))
-        new_refresh_token = data.get("refresh_token", self.refresh_token)
-        if new_refresh_token != self.refresh_token:
-            LOG.info("Refresh token rotated")
-            self.refresh_token = new_refresh_token
-        token = SchwabToken(
-            access_token=data["access_token"],
-            expires_at=datetime.utcnow() + timedelta(seconds=expires_in),
-            refresh_token=self.refresh_token,
-        )
-        LOG.info("Obtained Schwab token expiring at %s", token.expires_at.isoformat())
-        return token
+    def get_token(self) -> SchwabToken:
+        """Return valid access token, refreshing if needed."""
+        with self._lock:
+            # schwab-py handles refresh automatically when accessing access_token
+            access_token = self.schwab.access_token
+            tokens = self.schwab.tokens
+            expires_in = tokens.get('expires_in', 1800)
+            expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+            refresh_token = tokens.get('refresh_token', self.refresh_token)
+            return SchwabToken(
+                access_token=access_token,
+                expires_at=expires_at,
+                refresh_token=refresh_token
+            )
 
     def _auto_refresh_loop(self) -> None:
         """Background loop to refresh tokens periodically."""
         ACCESS_REFRESH_INTERVAL = 29 * 60  # 29 minutes
         while not self._stop_refresh.is_set():
             try:
-                self._token = self._fetch_token()
+                with self._lock:
+                    self.schwab.refresh_token()
             except Exception as e:
                 LOG.error("Auto-refresh failed: %s", e)
             # Sleep in chunks to be responsive to stop
@@ -174,7 +208,7 @@ class SchwabMessageParser:
 
 
 class SchwabStreamClient:
-    """Maintains websocket connection to Schwab streaming API."""
+    """Maintains websocket connection to Schwab streaming API using schwab-py."""
 
     def __init__(
         self,
@@ -192,67 +226,31 @@ class SchwabStreamClient:
         self.symbols = symbols
         self.heartbeat_seconds = heartbeat_seconds
         self.parser = SchwabMessageParser()
-        self._ws: Optional[WebSocketApp] = None
-        self._stop_event = threading.Event()
         self._tick_handler = tick_handler
         self._level2_handler = level2_handler
+        self.stream = self.auth_client.schwab.stream()
 
     def start(self) -> None:
         """Start streaming loop (blocking)."""
         LOG.info("Starting Schwab streamer for symbols: %s", ",".join(self.symbols))
         self.auth_client.start_auto_refresh()  # Start background token refresh
-        while not self._stop_event.is_set():
-            token = self.auth_client.get_token()
-            headers = {"Authorization": f"Bearer {token.access_token}"}
-            self._run_socket(headers)
-            if not self._stop_event.is_set():
-                LOG.warning("Streaming connection closed; retrying in 5s")
-                time.sleep(5)
+        self.stream.start(
+            symbols=self.symbols,
+            on_tick=self._on_tick,
+            on_level2=self._on_level2
+        )
 
     def stop(self) -> None:
         """Signal streaming loop to stop."""
-        self._stop_event.set()
+        self.stream.stop()
         self.auth_client.stop_auto_refresh()  # Stop background token refresh
-        if self._ws:
-            self._ws.close()
 
-    def _run_socket(self, headers: dict) -> None:
-        self._ws = WebSocketApp(
-            self.stream_url,
-            header=[f"{k}: {v}" for k, v in headers.items()],
-            on_open=self._on_open,
-            on_message=self._on_message,
-            on_error=self._on_error,
-            on_close=self._on_close,
-        )
-        thread = threading.Thread(target=self._ws.run_forever, daemon=True)
-        thread.start()
-        heartbeat = self.heartbeat_seconds
-        while thread.is_alive() and not self._stop_event.is_set():
-            time.sleep(heartbeat)
-            if self._ws:
-                try:
-                    self._ws.send(json.dumps({"action": "heartbeat"}))
-                except Exception:
-                    LOG.warning("Failed to send heartbeat; closing socket")
-                    self._ws.close()
-                    break
+    def refresh_tokens(self) -> Optional[dict]:
+        """Manually refresh tokens via the auth client."""
+        return self.auth_client.refresh_tokens()
 
-    def _on_open(self, ws: WebSocketApp) -> None:  # pragma: no cover - network I/O
-        LOG.info("Connected to Schwab stream; subscribing to symbols")
-        subscription = {
-            "action": "subscribe",
-            "symbols": self.symbols,
-            "channels": ["tick", "level2"],
-        }
-        ws.send(json.dumps(subscription))
-
-    def _on_message(self, ws: WebSocketApp, message: str) -> None:  # pragma: no cover
-        try:
-            payload = json.loads(message)
-        except json.JSONDecodeError:
-            LOG.debug("Ignoring non-JSON message: %s", message)
-            return
+    def _on_tick(self, payload: dict) -> None:
+        """Handle tick event from schwab-py stream."""
         for kind, event in self.parser.parse(payload):
             if kind == "tick":
                 self.publisher.publish_tick(event)  # type: ignore[arg-type]
@@ -261,19 +259,17 @@ class SchwabStreamClient:
                         self._tick_handler(event)
                     except Exception as exc:  # pragma: no cover - defensive
                         LOG.warning("Tick handler error: %s", exc)
-            elif kind == "level2":
+
+    def _on_level2(self, payload: dict) -> None:
+        """Handle level2 event from schwab-py stream."""
+        for kind, event in self.parser.parse(payload):
+            if kind == "level2":
                 self.publisher.publish_level2(event)  # type: ignore[arg-type]
                 if self._level2_handler:
                     try:
                         self._level2_handler(event)
                     except Exception as exc:  # pragma: no cover - defensive
                         LOG.warning("Level2 handler error: %s", exc)
-
-    def _on_error(self, ws: WebSocketApp, error: Exception) -> None:  # pragma: no cover
-        LOG.error("Schwab stream error: %s", error)
-
-    def _on_close(self, ws: WebSocketApp, *_args) -> None:  # pragma: no cover
-        LOG.info("Schwab stream closed")
 
 
 def build_streamer(
