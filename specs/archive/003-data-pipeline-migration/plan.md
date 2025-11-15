@@ -7,7 +7,7 @@
 
 ## Summary
 
-Migrate the full functionality of the data-pipeline.py server from torch-market into the current data-pipeline environment, including GEX data capture endpoints, historical data import, and webhook handling, ensuring all features work identically in the new location.
+Migrate the full functionality of the data-pipeline.py server into the current data-pipeline environment, including GEX data capture endpoints, historical data import, and webhook handling, ensuring all features work identically in the new location.
 
 ## Technical Context
 
@@ -49,7 +49,7 @@ specs/003-data-pipeline-migration/
 
 ```text
 src/
-├── data_pipeline.py     # Main server implementation (migrated from torch-market)
+├── data-pipeline.py     # Main server implementation (migrated)
 ├── import_gex_history.py # Historical data import script
 └── lib/
     └── gex_history_queue.py # Queue management for imports

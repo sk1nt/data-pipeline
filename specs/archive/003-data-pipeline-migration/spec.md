@@ -4,7 +4,7 @@
 **Created**: November 9, 2025  
 **Status**: Closed - Feature cancelled, functionality integrated into main codebase  
 **Closed**: 2025-11-11  
-**Input**: User description: "migrate full functionality of ../torch-market/data-pipeline.py into current environment"
+**Input**: User description: "migrate full functionality of the original data-pipeline.py into current environment"
 
 ## Clarifications
 
@@ -20,7 +20,7 @@
 
 ### User Story 1 - Migrate GEX Data Capture Server (Priority: P1)
 
-As a developer, I want to migrate the full functionality of the data-pipeline.py server from the torch-market project into the current data-pipeline environment so that I can capture, process, and persist GEX data payloads without dependencies on the original location.
+As a developer, I want to migrate the full functionality of the data-pipeline.py server into the current data-pipeline environment so that I can capture, process, and persist GEX data payloads without dependencies on the original location.
 
 **Why this priority**: This is the core functionality required for the migration, enabling the primary use case of GEX data capture.
 
@@ -118,5 +118,5 @@ As a developer, I want comprehensive testing for all data sources with data inte
 - **SC-001**: Server starts successfully in the current environment without import or runtime errors.
 - **SC-002**: All endpoints (/gex, /gex_history_url, /uw) respond correctly to valid requests with appropriate status codes.
 - **SC-003**: GEX data is persisted correctly to database and Parquet files in the expected formats and locations.
-- **SC-004**: No functionality is lost compared to the original torch-market/data-pipeline.py, with all features working identically.
+- **SC-004**: No functionality is lost compared to the original data-pipeline.py, with all features working identically.
 - **SC-005**: All data sources pass integrity validation and timestamp spot checking tests.

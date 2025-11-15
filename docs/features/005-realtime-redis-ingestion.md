@@ -47,6 +47,6 @@ Run all real-time services via `data-pipeline.py`, buffering one full trading da
 - [ ] Provide operational runbook
 
 ## Notes
-- GEXBot poller references legacy implementation in `../torch-market/data-pipeline.py` but will now store latest snapshot/max-change in memory/Redis instead of JSON files.
+- GEXBot poller references a legacy implementation's `data-pipeline.py` (archived) but will now store latest snapshot/max-change in memory/Redis instead of JSON files.
 - Redis retention/flush cadence can be tuned later; start with 24h retention and 10-minute flush.
 - Guardrails/backups defer until ingestion proves stable.

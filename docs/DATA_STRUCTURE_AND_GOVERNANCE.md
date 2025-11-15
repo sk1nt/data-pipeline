@@ -109,7 +109,7 @@ python src/import_gex_history_safe.py
 ```bash
 python run_server.py
 # or
-python -m src.data_pipeline
+python data-pipeline.py
 ```
 
 - Inspect job history (quick python snippet):
