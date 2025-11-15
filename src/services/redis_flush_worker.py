@@ -110,7 +110,17 @@ class RedisFlushWorker:
         for key in keys:
             last_ts = self.redis_client.client.hget(last_hash, key)
             start = int(last_ts) + 1 if last_ts is not None else 0
-            samples = self.ts_client.range(key, start, "+")
+            try:
+                samples = self.ts_client.range(key, start, "+")
+            except redis.ResponseError as exc:
+                # If the key exists but is not a RedisTimeSeries key (wrong type), skip it.
+                # This can happen if non-TS keys share the `ts:*` prefix.
+                msg = str(exc)
+                if "WRONGTYPE" in msg or "WRONGTYPE" in msg.upper():
+                    LOGGER.warning("Skipping non-timeseries key %s: %s", key, msg)
+                    continue
+                # Re-raise unexpected ResponseError
+                raise
             if not samples:
                 continue
             new_records.extend((key, ts, value) for ts, value in samples)
