@@ -8,7 +8,6 @@ import datetime as dt
 import time
 from pathlib import Path
 import duckdb
-import sqlite3
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,32 +41,8 @@ def delete_from_gex_data(cutoff_ts: dt.datetime, dry_run: bool) -> None:
 
 
 def delete_from_gex_history(epoch_cutoff: int, dry_run: bool) -> None:
-    tables = ["gex_bridge_snapshots", "gex_bridge_strikes"]
-    for table in tables:
-        retries = 0
-        while True:
-            conn = sqlite3.connect("data/gex_history.db", timeout=10.0)
-            try:
-                stmt = f"DELETE FROM {table} WHERE timestamp < ?"
-                if dry_run:
-                    count = conn.execute(
-                        f"SELECT COUNT(*) FROM {table} WHERE timestamp < ?",
-                        [epoch_cutoff],
-                    ).fetchone()[0]
-                    print(f"[dry-run] {table}: would delete {count:,} rows")
-                else:
-                    conn.execute(stmt, [epoch_cutoff])
-                    conn.commit()
-                    print(f"{table}: deleted rows before epoch {epoch_cutoff}")
-                break
-            except sqlite3.OperationalError as exc:
-                if "database is locked" in str(exc).lower() and retries < 5:
-                    retries += 1
-                    time.sleep(0.5 * retries)
-                    continue
-                raise
-            finally:
-                conn.close()
+    # Legacy history tables have been removed; nothing to purge.
+    print("No history tables to purge (gex_bridge_* removed). Skipping.")
 
 
 def prune_parquet(root: Path, cutoff: dt.date, dry_run: bool) -> None:

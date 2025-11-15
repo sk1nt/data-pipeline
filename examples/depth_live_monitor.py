@@ -8,17 +8,17 @@ import os
 from pathlib import Path
 import sys
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from market_ml.data import find_sierra_chart_depth_file
-
 # Sierra Chart depth file constants
 DEPTH_HEADER_SIZE = 64
 DEPTH_RECORD_SIZE = 24
+
+DEFAULT_DEPTH_ROOT = Path(os.getenv("SIERRA_DEPTH_DIR", "/mnt/c/SierraChart/Data/MarketDepthData"))
 
 def parse_depth_record(record_bytes: bytes) -> Dict:
     """Parse a single depth record."""
@@ -59,6 +59,20 @@ def parse_depth_record(record_bytes: bytes) -> Dict:
         print(f"Error parsing depth record: {e}")
         return None
 
+def find_sierra_chart_depth_file(symbol: str, search_root: Optional[Path] = None) -> Optional[Path]:
+    """Best-effort search for the latest *.depth file matching symbol."""
+    depth_dir = search_root or DEFAULT_DEPTH_ROOT
+    if not depth_dir.exists():
+        return None
+
+    symbol_upper = symbol.upper()
+    # Typical files look like ESZ25_FUT_CME.2025-11-10.depth
+    pattern = f"**/{symbol_upper}*.depth"
+    candidates = sorted(depth_dir.glob(pattern))
+    if not candidates:
+        return None
+    return candidates[-1]
+
 def get_current_depth_file(symbol: str) -> Path:
     """Get the current depth file path for a symbol."""
     discovered = find_sierra_chart_depth_file(symbol)
@@ -66,7 +80,7 @@ def get_current_depth_file(symbol: str) -> Path:
         return discovered
 
     today = datetime.now().strftime('%Y-%m-%d')
-    depth_dir = Path(os.getenv("SIERRA_DEPTH_DIR", "/mnt/c/SierraChart/Data/MarketDepthData"))
+    depth_dir = DEFAULT_DEPTH_ROOT
     fallback_contracts = {
         'ES': 'ESZ25_FUT_CME',
         'MES': 'MESZ25_FUT_CME',

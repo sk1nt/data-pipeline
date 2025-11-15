@@ -31,7 +31,11 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+- Code Quality: Project must include linting and formatting tools; Code reviews mandatory
+- Accuracy: Implement data validation and error checking mechanisms
+- Consistency: Use consistent coding style and naming conventions; Enforce with linters
+- Testing: Adopt TDD; Comprehensive unit, integration, and end-to-end tests required
+- Performance: Define and monitor performance goals; Optimize critical paths
 
 ## Project Structure
 

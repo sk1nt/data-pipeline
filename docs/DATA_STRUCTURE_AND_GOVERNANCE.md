@@ -22,17 +22,22 @@ Canonical Directory Layout
   - Table: `staging_strikes_<job_id>` used during import; final validated metadata recorded in `strikes` only as transient metadata.
   - Rule: DuckDB is a processing engine, not canonical storage. Parquet is canonical for downstream use.
 
-- `data/gex_history.db`
+- `data/gex_data.db` *(deprecated — history tables now live inside `data/gex_data.db`)*
   - Metadata store for import jobs (table: `import_jobs`). Tracks `id`, `url`, `checksum`, `ticker`, `status`, `records_processed`, `last_error`, `created_at`, `updated_at`.
   - Rule: This is the authoritative job log. Do not manually edit entries except through tooling.
 
-- `data/parquet/gex/YYYY/MM/<ticker>/<endpoint>/`
-  - Canonical Parquet output location. Example: `data/parquet/gex/2025/10/NQ_NDX/gex_zero/strikes.parquet`.
+- `data/source/gexbot/<ticker>/<endpoint>/YYYY-MM-DD_*.json`
+  - Raw history snapshots downloaded from GEXBot (temporary staging).
+- `data/parquet/gex/YYYY/MM/<ticker>/<endpoint>/<YYYYMMDD>.parquet`
+  - Canonical strike history per trading day (mounted via DuckDB view `parquet_gex_strikes`).
+
+> **Note (2025-11-11):** `gex_bridge_*` tables have been removed. Canonical data lives in
+> `data/parquet/gex/...` with DuckDB views, while raw JSON remains under `data/source/gexbot/...`.
   - Rule: Parquet files are final outputs; downstream services read only from here. All writes must go through the import pipeline.
 
 Import Flow (high-level)
 ------------------------
-1. A job record is created or queued in `gex_history.db` with `status='pending'` and a `url` pointing to the source JSON.
+1. A job record is created or queued in the history tables (`gex_history_queue` inside `data/gex_data.db`) with `status='pending'` and a `url` pointing to the source JSON.
 2. The import runner (manual CLI: `src/import_gex_history_safe.py` or the HTTP endpoint `/gex_history_url`) picks a `pending` job.
 3. `download_to_staging(url, ticker, endpoint)` downloads the JSON to `data/source/gexbot/` and performs a light JSON parse/validation.
 4. `safe_import(staged_path, duckdb_path, publish=True)`:
@@ -40,13 +45,13 @@ Import Flow (high-level)
    - Registers DataFrame as `batch_df` and creates `staging_strikes_<job_id>` in DuckDB.
    - Runs integrity checks (non-zero records, no null timestamps).
    - Inserts into `strikes` table in DuckDB (transient metadata) and marks job completed in the job store.
-   - Exports validated data to Parquet at the canonical `data/parquet/gex/...` path (see Export rule below).
+  - Writes canonical rows into `gex_snapshots` / `gex_strikes` (no Parquet export).
 5. Job store records `records_processed` and `status` (`completed`|`failed`).
 
 Export Rule
 -----------
 - After validation, the pipeline MUST write or append the data into the canonical Parquet location by:
-  - Creating the directory structure if missing: `data/parquet/gex/YYYY/MM/<ticker>/<endpoint>/`.
+  - Ensuring the raw JSON download lands in `data/source/gexbot/<ticker>/<endpoint>/`.
   - Writing a single Parquet file for that date block (or appending / using partitioned Parquet tools). The project prefers partition-by-directory semantics.
 - Parquet files are immutable once written for a given job (new jobs may create new files). If a rewrite is required, the operation must be recorded in the job history with reason and checksum.
 
@@ -62,7 +67,7 @@ Concurrency & Locks
 Metadata & Provenance
 ---------------------
 - Keep the original staged JSON file as the immutable source of truth for that import. Do not alter the filename.
-- Job metadata in `gex_history.db` MUST include the original `url`, the computed `checksum`, and timestamps for `created_at` and `updated_at`.
+- Job metadata in the history tables (now in `data/gex_data.db`) MUST include the original `url`, the computed `checksum`, and timestamps for `created_at` and `updated_at`.
 - Any manual corrections to data must be accompanied by a follow-up job that documents the correction and references the `id` of the original job.
 
 Access & Responsibilities
@@ -74,12 +79,12 @@ Retention & Backups
 -------------------
 - Staged JSON files: keep for 90 days by default, then archive to `archive/` if needed.
 - Parquet files: canonical, keep indefinitely unless legal or storage constraints apply; changes should follow a documented rewrite process.
-- DB backups: snapshot `data/gex_history.db` and `data/gex_data.db` before mass import operations.
+- DB backups: snapshot `data/gex_data.db` (covers both real-time and history tables) before mass import operations.
 
 Troubleshooting & Verification
 ------------------------------
 - Quick verifications:
-  - Check job status: `SELECT * FROM import_jobs ORDER BY created_at DESC LIMIT 10` in `data/gex_history.db`.
+  - Check job status: `SELECT * FROM import_jobs ORDER BY created_at DESC LIMIT 10` in `data/gex_data.db`.
   - Confirm staged file exists: `ls -la data/source/gexbot/`.
   - Confirm Parquet contents: use DuckDB to read Parquet and list distinct dates.
 - If an import fails, `mark_failed` records `last_error`. Use that error to triage.
@@ -104,7 +109,7 @@ python src/import_gex_history_safe.py
 ```bash
 python run_server.py
 # or
-python -m src.data_pipeline
+python data-pipeline.py
 ```
 
 - Inspect job history (quick python snippet):
@@ -112,7 +117,7 @@ python -m src.data_pipeline
 ```bash
 python - <<'PY'
 import duckdb
-con = duckdb.connect('data/gex_history.db')
+con = duckdb.connect('data/gex_data.db')
 print(con.execute("SELECT id, url, status, records_processed, created_at FROM import_jobs ORDER BY created_at DESC LIMIT 20").fetchall())
 con.close()
 PY
