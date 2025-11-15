@@ -44,30 +44,8 @@ class RedisTimeSeriesClient:
             for key, ts, value, labels in records:
                 self.add_sample(key, ts, value, labels)
 
-    def range(
-        self,
-        key: str,
-        start_ms: Union[int, str],
-        end_ms: Union[int, str],
-        count: Optional[int] = None,
-    ) -> List[Tuple[int, float]]:
-        args = ["TS.RANGE", key, start_ms, end_ms]
-        if count is not None:
-            args.extend(["COUNT", count])
-        result = self.client.execute_command(*args)
-        return [(int(ts), float(val)) for ts, val in result]
-
-    def revrange(
-        self,
-        key: str,
-        start_ms: Union[int, str],
-        end_ms: Union[int, str],
-        count: Optional[int] = None,
-    ) -> List[Tuple[int, float]]:
-        args = ["TS.REVRANGE", key, start_ms, end_ms]
-        if count is not None:
-            args.extend(["COUNT", count])
-        result = self.client.execute_command(*args)
+    def range(self, key: str, start_ms: int, end_ms: Union[int, str]) -> List[Tuple[int, float]]:
+        result = self.client.execute_command("TS.RANGE", key, start_ms, end_ms)
         return [(int(ts), float(val)) for ts, val in result]
 
     def mrange(

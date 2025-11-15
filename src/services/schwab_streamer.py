@@ -27,7 +27,6 @@ class SchwabToken:
 
     access_token: str
     expires_at: datetime
-    refresh_token: str  # Add refresh_token to update it
 
     @property
     def is_expired(self) -> bool:
@@ -35,7 +34,7 @@ class SchwabToken:
 
 
 class SchwabAuthClient:
-    """Handles Schwab OAuth token management with auto-refresh."""
+    """Handles Schwab OAuth token management."""
 
     def __init__(
         self,
@@ -49,25 +48,6 @@ class SchwabAuthClient:
         self.refresh_token = refresh_token
         self.rest_url = rest_url.rstrip("/")
         self._token: Optional[SchwabToken] = None
-        self._stop_refresh = threading.Event()
-        self._refresh_thread: Optional[threading.Thread] = None
-
-    def start_auto_refresh(self) -> None:
-        """Start background thread for automatic token refresh."""
-        if self._refresh_thread and self._refresh_thread.is_alive():
-            LOG.info("Auto-refresh already running")
-            return
-        self._stop_refresh.clear()
-        self._refresh_thread = threading.Thread(target=self._auto_refresh_loop, daemon=True)
-        self._refresh_thread.start()
-        LOG.info("Started Schwab token auto-refresh")
-
-    def stop_auto_refresh(self) -> None:
-        """Stop the auto-refresh thread."""
-        self._stop_refresh.set()
-        if self._refresh_thread:
-            self._refresh_thread.join(timeout=5)
-        LOG.info("Stopped Schwab token auto-refresh")
 
     def get_token(self) -> SchwabToken:
         """Return valid access token, refreshing when required."""
@@ -89,32 +69,12 @@ class SchwabAuthClient:
         resp.raise_for_status()
         data = resp.json()
         expires_in = int(data.get("expires_in", 1800))
-        new_refresh_token = data.get("refresh_token", self.refresh_token)
-        if new_refresh_token != self.refresh_token:
-            LOG.info("Refresh token rotated")
-            self.refresh_token = new_refresh_token
         token = SchwabToken(
             access_token=data["access_token"],
             expires_at=datetime.utcnow() + timedelta(seconds=expires_in),
-            refresh_token=self.refresh_token,
         )
         LOG.info("Obtained Schwab token expiring at %s", token.expires_at.isoformat())
         return token
-
-    def _auto_refresh_loop(self) -> None:
-        """Background loop to refresh tokens periodically."""
-        ACCESS_REFRESH_INTERVAL = 29 * 60  # 29 minutes
-        while not self._stop_refresh.is_set():
-            try:
-                self._token = self._fetch_token()
-            except Exception as e:
-                LOG.error("Auto-refresh failed: %s", e)
-            # Sleep in chunks to be responsive to stop
-            slept = 0
-            while slept < ACCESS_REFRESH_INTERVAL and not self._stop_refresh.is_set():
-                chunk = min(10, ACCESS_REFRESH_INTERVAL - slept)
-                time.sleep(chunk)
-                slept += chunk
 
 
 class SchwabMessageParser:
@@ -183,8 +143,6 @@ class SchwabStreamClient:
         stream_url: str,
         symbols: list[str],
         heartbeat_seconds: int = 15,
-        tick_handler: Optional[Callable[[TickEvent], None]] = None,
-        level2_handler: Optional[Callable[[Level2Event], None]] = None,
     ):
         self.auth_client = auth_client
         self.publisher = publisher
@@ -194,13 +152,10 @@ class SchwabStreamClient:
         self.parser = SchwabMessageParser()
         self._ws: Optional[WebSocketApp] = None
         self._stop_event = threading.Event()
-        self._tick_handler = tick_handler
-        self._level2_handler = level2_handler
 
     def start(self) -> None:
         """Start streaming loop (blocking)."""
         LOG.info("Starting Schwab streamer for symbols: %s", ",".join(self.symbols))
-        self.auth_client.start_auto_refresh()  # Start background token refresh
         while not self._stop_event.is_set():
             token = self.auth_client.get_token()
             headers = {"Authorization": f"Bearer {token.access_token}"}
@@ -212,7 +167,6 @@ class SchwabStreamClient:
     def stop(self) -> None:
         """Signal streaming loop to stop."""
         self._stop_event.set()
-        self.auth_client.stop_auto_refresh()  # Stop background token refresh
         if self._ws:
             self._ws.close()
 
@@ -256,18 +210,8 @@ class SchwabStreamClient:
         for kind, event in self.parser.parse(payload):
             if kind == "tick":
                 self.publisher.publish_tick(event)  # type: ignore[arg-type]
-                if self._tick_handler:
-                    try:
-                        self._tick_handler(event)
-                    except Exception as exc:  # pragma: no cover - defensive
-                        LOG.warning("Tick handler error: %s", exc)
             elif kind == "level2":
                 self.publisher.publish_level2(event)  # type: ignore[arg-type]
-                if self._level2_handler:
-                    try:
-                        self._level2_handler(event)
-                    except Exception as exc:  # pragma: no cover - defensive
-                        LOG.warning("Level2 handler error: %s", exc)
 
     def _on_error(self, ws: WebSocketApp, error: Exception) -> None:  # pragma: no cover
         LOG.error("Schwab stream error: %s", error)
@@ -279,8 +223,6 @@ class SchwabStreamClient:
 def build_streamer(
     redis_client: Optional[RedisClient] = None,
     publisher_factory: Optional[Callable[[RedisClient], TradingEventPublisher]] = None,
-    tick_handler: Optional[Callable[[TickEvent], None]] = None,
-    level2_handler: Optional[Callable[[Level2Event], None]] = None,
 ) -> SchwabStreamClient:
     """Factory to wire dependencies from settings."""
     if not settings.schwab_client_id or not settings.schwab_client_secret or not settings.schwab_refresh_token:
@@ -304,6 +246,4 @@ def build_streamer(
         stream_url=settings.schwab_stream_url,
         symbols=settings.schwab_symbol_list,
         heartbeat_seconds=settings.schwab_heartbeat_seconds,
-        tick_handler=tick_handler,
-        level2_handler=level2_handler,
     )

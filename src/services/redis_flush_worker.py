@@ -25,7 +25,7 @@ LOGGER = logging.getLogger(__name__)
 class FlushWorkerSettings:
     interval_seconds: int = settings.flush_interval_seconds
     key_pattern: str = "ts:*"
-    last_hash: str = "ts_meta:last_flushed"
+    last_hash: str = "ts:last_flushed"
     db_path: Path = Path(settings.timeseries_db_path)
     parquet_dir: Path = Path(settings.timeseries_parquet_dir)
     gex_snapshot_db: Path = settings.data_path / "gex_data.db"
@@ -46,21 +46,6 @@ class RedisFlushWorker:
         self._task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
         self._last_summary: Dict[str, Any] = {}
-        self._migrate_legacy_metadata()
-
-    def _migrate_legacy_metadata(self) -> None:
-        """Migrate legacy metadata key to new location."""
-        legacy_key = "ts:last_flushed"
-        new_key = self.settings.last_hash
-        
-        if self.redis_client.client.exists(legacy_key) and not self.redis_client.client.exists(new_key):
-            LOGGER.info("Migrating legacy metadata from %s to %s", legacy_key, new_key)
-            legacy_data = self.redis_client.client.hgetall(legacy_key)
-            if legacy_data:
-                self.redis_client.client.hset(new_key, mapping=legacy_data)
-            # Delete the legacy key to prevent conflicts
-            self.redis_client.client.delete(legacy_key)
-            LOGGER.info("Deleted legacy metadata key %s", legacy_key)
 
     def start(self) -> None:
         if self._task and not self._task.done():
