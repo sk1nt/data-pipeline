@@ -107,7 +107,14 @@ class RedisFlushWorker:
         last_hash = self.settings.last_hash
         new_records: List[Tuple[str, int, float]] = []
         last_updates = {}
+        legacy_key = "ts:last_flushed"
         for key in keys:
+            # Normalize key to string for comparisons and logging
+            k = key.decode() if isinstance(key, (bytes, bytearray)) else str(key)
+            # Skip metadata keys that share the `ts:` prefix to avoid WRONGTYPE errors
+            if k == last_hash or k == legacy_key:
+                LOGGER.debug("Skipping metadata key %s during flush", k)
+                continue
             last_ts = self.redis_client.client.hget(last_hash, key)
             start = int(last_ts) + 1 if last_ts is not None else 0
             try:
@@ -117,7 +124,9 @@ class RedisFlushWorker:
                 # This can happen if non-TS keys share the `ts:*` prefix.
                 msg = str(exc)
                 if "WRONGTYPE" in msg or "WRONGTYPE" in msg.upper():
-                    LOGGER.warning("Skipping non-timeseries key %s: %s", key, msg)
+                    # If it's a known metadata key we already filtered, we shouldn't reach here.
+                    # For other non-TS keys, warn once and continue.
+                    LOGGER.warning("Skipping non-timeseries key %s: %s", k, msg)
                     continue
                 # Re-raise unexpected ResponseError
                 raise
