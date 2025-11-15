@@ -3,15 +3,15 @@
 **Feature Branch**: `001-schwab-realtime-gex`  
 **Created**: November 10, 2025  
 **Status**: Draft  
-**Input**: User description: "Add support for Schwab API access, verifying token update process with no user intervention.  Once this is complete, demonstrate real time market data and ability to do quote lookups.  Once complete, we will compare tastytrade streaming to schwab."
+**Input**: User description: "Add support for Schwab and demonstrate real time data using Redis or sitting in memory. Add support for GEX API call in memory as well"
 
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Connect to Schwab Trading API (Priority: P1)
 
-As a data engineer, I want to connect to Schwab's trading API so that I can access real-time market data and options information.
+As a data engineer, I want to connect to Schwab's trading API so that I can access real-time market data and options information for GEX calculations.
 
-**Why this priority**: Establishing the connection to Schwab is the foundation for all real-time data access.
+**Why this priority**: Establishing the connection to Schwab is the foundation for all real-time data access and GEX functionality.
 
 **Independent Test**: Can be fully tested by verifying successful API authentication and basic data retrieval from Schwab endpoints.
 
@@ -24,9 +24,9 @@ As a data engineer, I want to connect to Schwab's trading API so that I can acce
 
 ### User Story 2 - Stream Real-Time Market Data (Priority: P2)
 
-As a data engineer, I want to stream real-time market data from Schwab and cache it in Redis.
+As a data engineer, I want to stream real-time market data from Schwab and cache it in Redis or memory so that GEX calculations can access current market conditions instantly.
 
-**Why this priority**: Real-time data is essential for accurate calculations and trading decisions.
+**Why this priority**: Real-time data is essential for accurate GEX calculations and trading decisions.
 
 **Independent Test**: Can be fully tested by verifying data streams successfully, caches properly, and provides instant access to current market data.
 
@@ -38,6 +38,13 @@ As a data engineer, I want to stream real-time market data from Schwab and cache
 
 ---
 
+### User Story 3 - Provide In-Memory GEX API (Priority: P3)
+
+As a data engineer, I want an in-memory GEX calculation API so that gamma exposure computations can be performed rapidly using cached market data.
+
+**Why this priority**: Fast GEX calculations enable real-time trading analysis and decision support.
+
+**Independent Test**: Can be fully tested by verifying GEX calculations complete quickly using cached data and return accurate exposure metrics.
 
 **Acceptance Scenarios**:
 
@@ -112,86 +119,3 @@ As a data engineer, I want to stream real-time market data from Schwab and cache
 
 **Acceptance Scenarios**:
 
-1. **Given** [initial state], **When** [action], **Then** [expected outcome]
-2. **Given** [initial state], **When** [action], **Then** [expected outcome]
-
----
-
-### User Story 2 - [Brief Title] (Priority: P2)
-
-[Describe this user journey in plain language]
-
-**Why this priority**: [Explain the value and why it has this priority level]
-
-**Independent Test**: [Describe how this can be tested independently]
-
-**Acceptance Scenarios**:
-
-1. **Given** [initial state], **When** [action], **Then** [expected outcome]
-
----
-
-### User Story 3 - [Brief Title] (Priority: P3)
-
-[Describe this user journey in plain language]
-
-**Why this priority**: [Explain the value and why it has this priority level]
-
-**Independent Test**: [Describe how this can be tested independently]
-
-**Acceptance Scenarios**:
-
-1. **Given** [initial state], **When** [action], **Then** [expected outcome]
-
----
-
-[Add more user stories as needed, each with an assigned priority]
-
-### Edge Cases
-
-<!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right edge cases.
--->
-
-- What happens when [boundary condition]?
-- How does system handle [error scenario]?
-
-## Requirements *(mandatory)*
-
-<!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right functional requirements.
--->
-
-### Functional Requirements
-
-- **FR-001**: System MUST [specific capability, e.g., "allow users to create accounts"]
-- **FR-002**: System MUST [specific capability, e.g., "validate email addresses"]  
-- **FR-003**: Users MUST be able to [key interaction, e.g., "reset their password"]
-- **FR-004**: System MUST [data requirement, e.g., "persist user preferences"]
-- **FR-005**: System MUST [behavior, e.g., "log all security events"]
-
-*Example of marking unclear requirements:*
-
-- **FR-006**: System MUST authenticate users via [NEEDS CLARIFICATION: auth method not specified - email/password, SSO, OAuth?]
-- **FR-007**: System MUST retain user data for [NEEDS CLARIFICATION: retention period not specified]
-
-### Key Entities *(include if feature involves data)*
-
-- **[Entity 1]**: [What it represents, key attributes without implementation]
-- **[Entity 2]**: [What it represents, relationships to other entities]
-
-## Success Criteria *(mandatory)*
-
-<!--
-  ACTION REQUIRED: Define measurable success criteria.
-  These must be technology-agnostic and measurable.
--->
-
-### Measurable Outcomes
-
-- **SC-001**: [Measurable metric, e.g., "Users can complete account creation in under 2 minutes"]
-- **SC-002**: [Measurable metric, e.g., "System handles 1000 concurrent users without degradation"]
-- **SC-003**: [User satisfaction metric, e.g., "90% of users successfully complete primary task on first attempt"]
-- **SC-004**: [Business metric, e.g., "Reduce support tickets related to [X] by 50%"]

@@ -119,20 +119,3 @@ No constitution violations. Added sub-packages under `backend/src/services` inst
 - `tasks.md` capturing granular implementation tracker
 
 **Implementation Phases**:
-1. **Connectivity Foundations**: OAuth2 PKCE helper, secrets loading, token refresh jobs, health endpoints.
-2. **Streaming + Caching**: WebSocket consumer, Redis (or alternate in-memory store) ingestion to hold the active trading day, stale-data detection, backpressure + rate-limit guardrails.
-3. **GEX Engine + API**: Polars/NumPy GEX computation, concurrency-safe caches, API serialization, error responses.
-4. **Reliability & Monitoring**: Circuit breaker, reconnection policies, structured logs, metrics export, resilient startup/shutdown.
-5. **Validation**: Unit + property tests for greeks/gamma math, integration tests with mocked Schwab feed, contract tests vs `gex-api.yaml`, soak/perf tests targeting success criteria.
-
-**Status**: ✅ PLANNED - Implementation tasks defined in `tasks.md`, ready for development
-
-## Phase 3: Integration & Deployment
-
-**Objective**: Harden feature for production use.
-
-**Deliverables**:
-- Redis/DuckDB sizing + retention policies
-- Deployment runbooks (OAuth secret management, rotation)
-- Monitoring dashboards + alerts for connection health, cache hit rate, GEX latency
-- Ops documentation + rollout checklist
