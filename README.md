@@ -12,6 +12,18 @@ A high-performance data pipeline platform designed for financial tick data, prov
 - **Backtesting Support**: Historical data queries for strategy development
 - **Monitoring Dashboard**: Web UI for service status and data sampling
 
+## Schwab Real-Time GEX Feature (Merged from Spec)
+
+This feature integrates Schwab's trading API for real-time market and options data, enabling ultra-low-latency Gamma Exposure (GEX) calculations and streaming support:
+
+- **Schwab API Integration**: Authenticated connection using OAuth2 PKCE, automatic token refresh, and WebSocket streaming for up to 1000 symbols.
+- **Real-Time Data Streaming**: Market and options data streamed into Redis or in-memory cache, with configurable TTL and freshness validation.
+- **In-Memory GEX API**: FastAPI endpoints provide rapid GEX calculations using cached data, supporting 100+ concurrent requests with p95 <200ms.
+- **Resilience & Monitoring**: Handles Schwab rate limits, connection failures, and cache refreshes automatically. All API and cache operations are logged for monitoring.
+- **Entities**: SchwabConnection, MarketData, OptionData, GEXCalculation, CacheEntry.
+- **Success Criteria**: <30s API connect, <50ms cache hit, <100ms GEX response, 99.5% cache hit rate, auto-recovery within 10s, 100 concurrent requests without degradation.
+- **Edge Cases**: Connection loss, rate limiting, stale data, memory management, invalid options data.
+
 ## Architecture
 
 - **Backend**: Python 3.11 with FastAPI, Polars, DuckDB, Redis
@@ -38,14 +50,14 @@ pip install -e .
 ### Running
 
 ```bash
-# Start Redis
-redis-server
+# Start Redis (local instance)
+redis-server redis/redis.conf &
 
-# Start API server
-python backend/src/api/main.py
+# Start the unified pipeline (services + control API)
+python data-pipeline.py --host 0.0.0.0 --port 8877
 
-# Open monitoring UI
-# Visit http://localhost:3000 (serve frontend with HTTP server)
+# Monitor services / restart feeds
+# Visit http://localhost:8877/status.html
 ```
 
 ### Schwab Streaming Service
@@ -64,7 +76,12 @@ The Schwab streamer ingests tick + level 2 market data directly into the trading
    python scripts/schwab_oauth_helper.py
    ```
    This prints the Schwab consent URL, guides you through login/MFA, and saves the new `SCHWAB_REFRESH_TOKEN` to `.env`.
-4. Run the streamer:
+4. (Optional) Keep tokens fresh automatically:
+   ```bash
+   python scripts/schwab_token_rotator.py --access-interval-minutes 25 --refresh-interval-days 6
+   ```
+   The rotator stores the latest access/refresh pair in `data/schwab_tokens.json` and rewrites `SCHWAB_REFRESH_TOKEN` in `.env` every six days. Leave it running alongside your data services so the streamer always has a valid token.
+5. Run the streamer:
 
 ```bash
 python scripts/run_schwab_streamer.py

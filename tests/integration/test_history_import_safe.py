@@ -27,7 +27,7 @@ def make_sample_json(path: Path):
 
 def test_safe_import_stages_and_inserts(tmp_path, monkeypatch):
     db_path = tmp_path / "gex_data.db"
-    history_db_path = tmp_path / "gex_history.db"
+    history_db_path = tmp_path / "gex_data.db"
     # create empty duckdb
     duckdb.connect(str(db_path)).close()
     duckdb.connect(str(history_db_path)).close()

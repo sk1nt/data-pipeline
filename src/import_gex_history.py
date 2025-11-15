@@ -11,7 +11,6 @@ import os
 import re
 import threading
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Any, Dict, List, Union, Iterable
@@ -20,8 +19,8 @@ from datetime import datetime
 import datetime as dt
 
 import requests
-import polars as pl
 import ijson
+import polars as pl
 
 from .lib.gex_history_queue import gex_history_queue
 from .lib.gex_database import gex_db
@@ -31,7 +30,6 @@ from .models.api_models import GEXPayload, GEXStrike
 # Setup logging
 logger = setup_logging()
 CHUNK_SIZE = 5000
-STRIKE_EXPORT_WORKERS = max(4, (os.cpu_count() or 4) // 2)
 
 
 def convert_decimals(obj: Any) -> Any:
@@ -63,11 +61,13 @@ class GEXHistoryImporter:
         """Initialize the importer."""
         self.data_dir = Path("data")
         self.source_dir = self.data_dir / "source" / "gexbot"
-        self.parquet_dir = self.data_dir / "parquet" / "gex"
         self.source_dir.mkdir(parents=True, exist_ok=True)
         self.chunk_size = CHUNK_SIZE
-        self.strike_workers = STRIKE_EXPORT_WORKERS
-        self._strike_buffers = defaultdict(list)
+        self.parquet_dir = self.data_dir / "parquet" / "gex"
+        self.parquet_dir.mkdir(parents=True, exist_ok=True)
+        self._strike_buffers: Dict[
+            tuple[str, str, dt.date], List[Dict[str, Any]]
+        ] = defaultdict(list)
 
     def process_queue(self) -> None:
         """Process all pending jobs in the history queue."""
@@ -101,7 +101,11 @@ class GEXHistoryImporter:
     def _download_file(self, url: str, ticker: str, endpoint: str) -> Path:
         """Download file from URL to local storage."""
         filename = self._build_filename(url, ticker, endpoint)
-        local_path = self.source_dir / filename
+        ticker_dir = self._safe_name(ticker or "UNKNOWN")
+        endpoint_dir = self._safe_name(endpoint or "gex_zero")
+        dest_dir = self.source_dir / ticker_dir / endpoint_dir
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        local_path = dest_dir / filename
 
         logger.info(f"Downloading {url} to {local_path}")
         # Support local file:// URLs as well as HTTP/HTTPS
@@ -135,6 +139,10 @@ class GEXHistoryImporter:
         safe_ticker = (ticker or "UNKNOWN").replace("/", "_").replace(" ", "_")
         return f"{day}_{safe_ticker}_{safe_endpoint}_history.json"
 
+    @staticmethod
+    def _safe_name(value: str) -> str:
+        return (value or "unknown").replace("/", "_").replace(" ", "_")
+
     def _import_data(self, file_path: Path, ticker: str, endpoint: str) -> int:
         """Import data from downloaded file."""
         logger.info(f"Importing data from {file_path}")
@@ -149,10 +157,8 @@ class GEXHistoryImporter:
             processed_batch = self._prepare_from_staging(staging_table, endpoint)
             if processed_batch:
                 self._store_snapshots_batch(processed_batch)
-                self._record_history_batch(processed_batch)
                 for processed in processed_batch:
-                    if processed.payload.strikes:
-                        self._buffer_strikes(processed)
+                    self._buffer_strikes(processed)
                 imported_count += len(processed_batch)
         finally:
             self._drop_staging(staging_table)
@@ -262,157 +268,72 @@ class GEXHistoryImporter:
                 rows,
             )
 
-    def _record_history_batch(self, batch: List[ProcessedRecord]) -> None:
-        if not batch:
-            return
 
-        snapshot_rows = []
-        strike_rows = []
-        key_set = {(item.payload.ticker, item.timestamp_epoch, item.endpoint) for item in batch}
-        delete_rows = list(key_set)
-
-        for item in batch:
-            payload = item.payload
-            raw_record = item.raw_record
-            endpoint_value = item.endpoint
-            strikes = payload.strikes or []
-            payload_kind = (
-                raw_record.get("kind")
-                or raw_record.get("payload_kind")
-                or raw_record.get("type")
-                or "snapshot"
-            )
-            received_at = raw_record.get("received_at")
-            updated_at = datetime.utcnow().isoformat()
-            max_change_json = json.dumps(raw_record.get("max_change") or {})
-
-            raw_max_priors = raw_record.get("max_priors")
-            if raw_max_priors is None:
-                raw_max_priors = payload.max_priors
-            if isinstance(raw_max_priors, str):
-                max_priors_json = raw_max_priors
-            else:
-                max_priors_json = json.dumps(raw_max_priors or [])
-
-            raw_payload_json = json.dumps(raw_record)
-
-            snapshot_rows.append(
-                [
-                    payload.ticker,
-                    item.timestamp_epoch,
-                    endpoint_value,
-                    payload_kind,
-                    received_at,
-                    payload.spot_price,
-                    payload.zero_gamma,
-                    item.net_gex_value,
-                    payload.net_gex_oi,
-                    payload.major_pos_vol,
-                    payload.major_neg_vol,
-                    payload.major_pos_oi,
-                    payload.major_neg_oi,
-                    payload.delta_risk_reversal,
-                    len(strikes),
-                    max_change_json,
-                    max_priors_json,
-                    raw_payload_json,
-                    updated_at,
-                ]
-            )
-
-            for strike in strikes:
-                strike_rows.append(
-                    (
-                        payload.ticker,
-                        item.timestamp_epoch,
-                        endpoint_value,
-                        strike.strike,
-                        strike.gamma_now,
-                        strike.vanna,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        json.dumps(strike.history) if strike.history else None,
-                    )
-                )
-
-        with gex_db.gex_history_connection() as conn:
-            conn.executemany(
-                "DELETE FROM gex_bridge_snapshots WHERE ticker = ? AND timestamp = ? AND endpoint = ?",
-                delete_rows,
-            )
-            conn.executemany(
-                "DELETE FROM gex_bridge_strikes WHERE ticker = ? AND timestamp = ? AND endpoint = ?",
-                delete_rows,
-            )
-            conn.executemany(
-                """
-                INSERT INTO gex_bridge_snapshots (
-                    ticker, timestamp, endpoint, payload_kind, received_at,
-                    spot, zero_gamma, net_gex_vol, net_gex_oi,
-                    major_pos_vol, major_neg_vol, major_pos_oi, major_neg_oi,
-                    delta_risk_reversal, strikes_count, max_change_json,
-                    max_priors_json, raw_payload_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                snapshot_rows,
-            )
-            if strike_rows:
-                conn.executemany(
-                    """
-                    INSERT INTO gex_bridge_strikes (
-                        ticker, timestamp, endpoint, strike, gamma_now, vanna,
-                        gamma_1m, gamma_5m, gamma_10m, gamma_15m, gamma_30m,
-                        history_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    strike_rows,
-                )
 
     def _buffer_strikes(self, processed: ProcessedRecord) -> None:
         payload = processed.payload
-        if not payload.strikes:
+        strikes = payload.strikes or []
+        if not strikes:
             return
-        key = (
-            payload.ticker,
-            processed.endpoint,
-            payload.timestamp.year,
-            payload.timestamp.month,
-        )
-        rows = [
-            {
-                'timestamp': payload.timestamp.isoformat(),
-                'ticker': payload.ticker,
-                'strike': strike.strike,
-                'gamma': strike.gamma_now,
-                'oi_gamma': strike.oi_gamma,
-                'priors': json.dumps(strike.history) if strike.history else None,
-            }
-            for strike in payload.strikes
-        ]
-        self._strike_buffers[key].extend(rows)
+        endpoint = processed.endpoint or "gex_zero"
+        trade_day = payload.timestamp.date()
+        key = (payload.ticker, endpoint, trade_day)
+        entries = []
+        for strike in strikes:
+            entries.append(
+                {
+                    "timestamp": payload.timestamp.isoformat(),
+                    "ticker": payload.ticker,
+                    "endpoint": endpoint,
+                    "strike": strike.strike,
+                    "gamma": strike.gamma_now,
+                    "oi_gamma": strike.oi_gamma,
+                    "priors": json.dumps(strike.history) if strike.history else None,
+                }
+            )
+        self._strike_buffers[key].extend(entries)
 
-    def _flush_buffered_strikes(self, path_locks: Dict[Path, threading.Lock]) -> None:
+    def _flush_buffered_strikes(
+        self, path_locks: Dict[Path, threading.Lock]
+    ) -> None:
         if not self._strike_buffers:
             return
+
         for key, rows in self._strike_buffers.items():
-            ticker, endpoint, year, month = key
-            endpoint_clean = str(endpoint or 'unknown').replace('/', '_').replace(' ', '_')
-            parquet_dir = self.parquet_dir / f"{year}" / f"{month:02d}" / ticker / endpoint_clean
-            parquet_dir.mkdir(parents=True, exist_ok=True)
-            parquet_file = parquet_dir / "strikes.parquet"
+            ticker, endpoint, trade_day = key
+            endpoint_clean = endpoint.replace("/", "_").replace(" ", "_")
+            year = trade_day.year
+            month = f"{trade_day.month:02d}"
+            day_str = trade_day.strftime("%Y%m%d")
+            target_dir = (
+                self.parquet_dir
+                / f"{year}"
+                / month
+                / ticker
+                / endpoint_clean
+            ) / day_str
+            target_dir.mkdir(parents=True, exist_ok=True)
+            parquet_file = target_dir / "strikes.parquet"
+
             df = pl.DataFrame(rows)
             lock = path_locks[parquet_file]
             with lock:
-                df.write_parquet(
-                    str(parquet_file),
-                    compression="zstd",
-                    compression_level=3,
+                if parquet_file.exists():
+                    existing = pl.read_parquet(parquet_file)
+                    df = (
+                        pl.concat([existing, df], how="vertical_relaxed")
+                        .unique(
+                            subset=["timestamp", "ticker", "endpoint", "strike"],
+                            keep="last",
+                        )
+                    )
+                df.write_parquet(str(parquet_file), compression="zstd")
+                logger.info(
+                    "Wrote %s strike rows to %s", len(df), parquet_file
                 )
-                logger.info("Wrote %s buffered strikes to %s", len(rows), parquet_file)
+
         self._strike_buffers.clear()
+
 
 
 def process_historical_imports():

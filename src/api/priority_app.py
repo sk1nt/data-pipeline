@@ -182,6 +182,20 @@ except ImportError as e:
     logger.warning(f"Priority route modules not available yet: {e}")
     logger.info("API will start with limited functionality")
 
+try:
+    from .routes.rules import router as rules_router
+
+    app.include_router(
+        rules_router,
+        tags=["rules"],
+    )
+
+    logger.info("Rules API routes loaded successfully")
+
+except ImportError as e:
+    logger.warning(f"Rules route modules not available yet: {e}")
+    logger.info("API will start with limited functionality")
+
 
 if __name__ == "__main__":
     import uvicorn
