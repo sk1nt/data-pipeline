@@ -116,3 +116,6 @@ logs/
 redis/dump.rdb
 redis/*.log
 data/
+
+# Local token storage (keep out of VCS)
+.tokens/
