@@ -101,6 +101,10 @@ class Settings(BaseSettings):
         default="https://api.schwab.com/v1/oauth/token",
         env="SCHWAB_TOKEN_URL",
     )
+    schwab_token_auth_method: str = Field(
+        default="form",
+        env="SCHWAB_TOKEN_AUTH_METHOD",
+    )
     schwab_stream_url: str = Field(default="wss://stream.schwab.com/v1", env="SCHWAB_STREAM_URL")
     schwab_symbols: str = Field(default="MNQ,MES,SPY,QQQ,VIX", env="SCHWAB_SYMBOLS")
     schwab_tick_channel: str = Field(default="market_data:ticks", env="SCHWAB_TICK_CHANNEL")
