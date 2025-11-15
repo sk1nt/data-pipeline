@@ -1,0 +1,241 @@
+openapi: 3.0.3
+info:
+  title: Financial Tick Data Pipeline API
+  version: 1.0.0
+  description: API for secure querying of financial tick data by AI models
+
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Local development server
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /ticks/realtime:
+    get:
+      summary: Get real-time tick data
+      description: Retrieve latest tick data for specified symbols
+      parameters:
+        - name: symbols
+          in: query
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+          description: Comma-separated list of financial symbols
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+          description: Maximum number of ticks to return per symbol
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TickData'
+                  metadata:
+                    $ref: '#/components/schemas/QueryMetadata'
+        '401':
+          description: Unauthorized
+        '429':
+          description: Rate limit exceeded
+
+  /ticks/historical:
+    get:
+      summary: Get historical tick data
+      description: Retrieve historical tick data for backtesting
+      parameters:
+        - name: symbols
+          in: query
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+          description: Comma-separated list of financial symbols
+        - name: start_time
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: Start of time range (ISO 8601)
+        - name: end_time
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: End of time range (ISO 8601)
+        - name: interval
+          in: query
+          schema:
+            type: string
+            enum: [1s, 1m, 1h, 4h]
+            default: 1m
+          description: Aggregation interval
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/EnrichedData'
+                  metadata:
+                    $ref: '#/components/schemas/QueryMetadata'
+        '401':
+          description: Unauthorized
+        '400':
+          description: Invalid parameters
+
+  /status:
+    get:
+      summary: Get system status
+      description: Retrieve operational status of all pipeline services
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  services:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ServiceStatus'
+                  timestamp:
+                    type: string
+                    format: date-time
+
+components:
+  schemas:
+    TickData:
+      type: object
+      required:
+        - symbol
+        - timestamp
+        - price
+        - tick_type
+        - source
+      properties:
+        symbol:
+          type: string
+          example: "AAPL"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2025-11-07T10:30:00.123456Z"
+        price:
+          type: number
+          format: decimal
+          example: 150.25
+        volume:
+          type: integer
+          example: 100
+        tick_type:
+          type: string
+          enum: [trade, bid, ask]
+          example: "trade"
+        source:
+          type: string
+          example: "tastyttrade"
+
+    EnrichedData:
+      type: object
+      required:
+        - symbol
+        - interval_start
+        - interval_end
+        - open_price
+        - high_price
+        - low_price
+        - close_price
+        - total_volume
+      properties:
+        symbol:
+          type: string
+          example: "AAPL"
+        interval_start:
+          type: string
+          format: date-time
+        interval_end:
+          type: string
+          format: date-time
+        open_price:
+          type: number
+          format: decimal
+        high_price:
+          type: number
+          format: decimal
+        low_price:
+          type: number
+          format: decimal
+        close_price:
+          type: number
+          format: decimal
+        total_volume:
+          type: integer
+        vwap:
+          type: number
+          format: decimal
+
+    QueryMetadata:
+      type: object
+      properties:
+        query_id:
+          type: string
+          format: uuid
+        response_time_ms:
+          type: integer
+        data_points_returned:
+          type: integer
+        cache_hit:
+          type: boolean
+
+    ServiceStatus:
+      type: object
+      required:
+        - service_name
+        - current_status
+        - last_update_time
+      properties:
+        service_name:
+          type: string
+          example: "ingestion"
+        current_status:
+          type: string
+          enum: [healthy, degraded, down]
+          example: "healthy"
+        last_update_time:
+          type: string
+          format: date-time
+        uptime_percentage:
+          type: number
+          format: decimal
+          minimum: 0
+          maximum: 100
+        error_message:
+          type: string
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key

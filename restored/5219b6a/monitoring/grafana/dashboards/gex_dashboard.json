@@ -1,0 +1,67 @@
+{
+  "annotations": {"list": []},
+  "panels": [
+    {
+      "datasource": null,
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {},
+      "targets": [
+        {"expr": "sum by(ticker) (rate(gex_import_records_total[5m]))", "legendFormat": "{{ticker}}"}
+      ],
+      "title": "Import Throughput (records/sec by ticker)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": null,
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {},
+      "targets": [
+        {"expr": "increase(gex_import_failures_total[1h])", "legendFormat": "failures"}
+      ],
+      "title": "Import Failures (1h)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": null,
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 8},
+      "id": 3,
+      "options": {},
+      "targets": [
+        {"expr": "gex_last_import_timestamp", "legendFormat": "last_import"}
+      ],
+      "title": "Last Import Time (unix)",
+      "type": "stat"
+    },
+    {
+      "datasource": null,
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 8},
+      "id": 4,
+      "options": {},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum(rate(gex_import_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95_import_duration"}
+      ],
+      "title": "Import Duration p95 (s)",
+      "type": "stat"
+    },
+    {
+      "datasource": null,
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 14},
+      "id": 5,
+      "options": {},
+      "targets": [
+        {"expr": "sum(rate(gex_import_records_total[5m]))", "legendFormat": "total_rps"}
+      ],
+      "title": "Total Import Throughput (records/sec)",
+      "type": "timeseries"
+    }
+  ],
+  "title": "GEX Pipeline Overview",
+  "version": 1
+}

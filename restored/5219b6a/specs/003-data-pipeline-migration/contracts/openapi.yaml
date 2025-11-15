@@ -1,0 +1,194 @@
+openapi: 3.0.3
+info:
+  title: Data Pipeline API
+  description: API for capturing and importing GEX data and webhooks
+  version: 1.0.0
+  contact:
+    name: Data Pipeline Team
+
+servers:
+  - url: http://localhost:8877
+    description: Local development server
+
+paths:
+  /gex:
+    post:
+      summary: Capture GEX payload
+      description: Receive and persist GEX (Gamma Exposure) data payload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GEXPayload'
+      responses:
+        '202':
+          description: Payload accepted and processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GEXResponse'
+        '400':
+          description: Invalid payload
+        '500':
+          description: Server error
+
+  /gex_history_url:
+    post:
+      summary: Queue historical data import
+      description: Download and import historical GEX data from provided URL
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HistoryRequest'
+      responses:
+        '202':
+          description: Import queued successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HistoryResponse'
+        '400':
+          description: Invalid request
+        '500':
+          description: Server error
+
+  /uw:
+    post:
+      summary: Receive universal webhook
+      description: Process universal webhook payloads
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Generic webhook payload
+      responses:
+        '200':
+          description: Webhook received
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookResponse'
+        '400':
+          description: Invalid payload
+
+components:
+  schemas:
+    GEXPayload:
+      type: object
+      required:
+        - ticker
+        - timestamp
+      properties:
+        ticker:
+          type: string
+          description: Financial instrument symbol
+        timestamp:
+          type: integer
+          description: Unix timestamp
+        endpoint:
+          type: string
+          description: Data source endpoint
+        spot:
+          type: number
+          format: float
+          description: Current spot price
+        zero_gamma:
+          type: number
+          format: float
+          description: Zero gamma value
+        net_gex_vol:
+          type: number
+          format: float
+          description: Net GEX volume
+        net_gex_oi:
+          type: number
+          format: float
+          description: Net GEX open interest
+        strikes:
+          type: array
+          items:
+            type: array
+            items:
+              oneOf:
+                - type: number
+                - type: array
+            minItems: 2
+            maxItems: 4
+          description: Strike data arrays
+        max_change:
+          type: object
+          description: Maximum changes over time windows
+        max_priors:
+          type: array
+          description: Prior maximum values
+
+    GEXResponse:
+      type: object
+      required:
+        - status
+        - ticker
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        ticker:
+          type: string
+
+    HistoryRequest:
+      type: object
+      required:
+        - url
+        - ticker
+        - endpoint
+      properties:
+        url:
+          type: string
+          format: uri
+          description: URL to download historical data
+        ticker:
+          type: string
+          description: Ticker symbol
+        endpoint:
+          type: string
+          description: Data endpoint
+
+    HistoryResponse:
+      type: object
+      required:
+        - status
+        - id
+        - ticker
+        - endpoint
+      properties:
+        status:
+          type: string
+          enum: [queued]
+        id:
+          type: integer
+          description: Queue ID
+        ticker:
+          type: string
+        endpoint:
+          type: string
+        duckdb_path:
+          type: string
+          description: Path to DuckDB database
+        parquet_dir:
+          type: string
+          description: Base path for Parquet files
+
+    WebhookResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [received]
+        message:
+          type: string

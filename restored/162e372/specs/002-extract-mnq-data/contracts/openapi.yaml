@@ -1,0 +1,54 @@
+openapi: 3.0.3
+info:
+  title: MNQ GEX History Import API
+  version: 1.0.0
+paths:
+  /gex_history_url:
+    post:
+      summary: Trigger GEX data import
+      description: Initiates import of GEX historical data for MNQ futures.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                start_date:
+                  type: string
+                  format: date
+                  description: Start date for import (YYYY-MM-DD)
+                end_date:
+                  type: string
+                  format: date
+                  description: End date for import (YYYY-MM-DD)
+                symbols:
+                  type: array
+                  items:
+                    type: string
+                  description: List of symbols to import (e.g., ["MNQ"])
+              required:
+                - start_date
+                - end_date
+                - symbols
+      responses:
+        '200':
+          description: Import started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  message:
+                    type: string
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string

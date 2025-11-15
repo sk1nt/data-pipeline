@@ -1,0 +1,29 @@
+groups:
+  - name: gex_pipeline_alerts
+    rules:
+      - alert: ImportFailuresDetected
+        expr: increase(gex_import_failures_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GEX import failures detected"
+          description: "There have been import failures in the last 5 minutes. Check importer logs."
+
+      - alert: ImportStalled
+        expr: time() - gex_last_import_timestamp > 3600
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GEX import stalled or no recent imports"
+          description: "No successful import recorded in the last hour. Investigate importer/process availability."
+
+      - alert: LowImportThroughput
+        expr: sum(rate(gex_import_records_total[5m])) < 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low import throughput"
+          description: "Import throughput below 1 record/sec aggregated over 5m. Check upstream sources and importer performance."
