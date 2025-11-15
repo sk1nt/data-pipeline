@@ -12,6 +12,18 @@ A high-performance data pipeline platform designed for financial tick data, prov
 - **Backtesting Support**: Historical data queries for strategy development
 - **Monitoring Dashboard**: Web UI for service status and data sampling
 
+## Schwab Real-Time GEX Feature (Merged from Spec)
+
+This feature integrates Schwab's trading API for real-time market and options data, enabling ultra-low-latency Gamma Exposure (GEX) calculations and streaming support:
+
+- **Schwab API Integration**: Authenticated connection using OAuth2 PKCE, automatic token refresh, and WebSocket streaming for up to 1000 symbols.
+- **Real-Time Data Streaming**: Market and options data streamed into Redis or in-memory cache, with configurable TTL and freshness validation.
+- **In-Memory GEX API**: FastAPI endpoints provide rapid GEX calculations using cached data, supporting 100+ concurrent requests with p95 <200ms.
+- **Resilience & Monitoring**: Handles Schwab rate limits, connection failures, and cache refreshes automatically. All API and cache operations are logged for monitoring.
+- **Entities**: SchwabConnection, MarketData, OptionData, GEXCalculation, CacheEntry.
+- **Success Criteria**: <30s API connect, <50ms cache hit, <100ms GEX response, 99.5% cache hit rate, auto-recovery within 10s, 100 concurrent requests without degradation.
+- **Edge Cases**: Connection loss, rate limiting, stale data, memory management, invalid options data.
+
 ## Architecture
 
 - **Backend**: Python 3.11 with FastAPI, Polars, DuckDB, Redis
