@@ -2,11 +2,11 @@
 
 **Feature**: 003-data-pipeline-migration  
 **Date**: November 9, 2025  
-**Research Focus**: Original torch-market/data-pipeline.py functionality and migration requirements
+**Research Focus**: Original data-pipeline.py functionality and migration requirements
 
 ## Original Implementation Analysis
 
-### Decision: Preserve all core functionality from torch-market/data-pipeline.py
+### Decision: Preserve all core functionality from data-pipeline.py
 **Rationale**: The original server provides comprehensive GEX data capture, historical import queuing, and universal webhook handling. All features must be maintained to ensure identical behavior in the migrated version.
 
 **Alternatives Considered**:
@@ -123,7 +123,7 @@
 
 ## Implementation Notes
 
-- Remove torch-market specific dependencies (depth module, webhook_schemas)
+- Remove legacy-specific dependencies (depth module, webhook_schemas)
 - Adapt database connections to use existing DuckDB setup
 - Preserve all validation logic and error responses
 - Maintain background thread patterns for performance

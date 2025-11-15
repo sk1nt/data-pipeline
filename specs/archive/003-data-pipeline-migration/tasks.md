@@ -69,8 +69,8 @@
 
 ### Implementation for User Story 1
 
-- [ ] T012 [US1] Implement GEX payload validation and processing in src/data_pipeline.py
-- [ ] T013 [US1] Implement DuckDB persistence for GEX snapshots and strikes in src/data_pipeline.py
+- [ ] T012 [US1] Implement GEX payload validation and processing in data-pipeline.py
+- [ ] T013 [US1] Implement DuckDB persistence for GEX snapshots and strikes in data-pipeline.py
 - [ ] T014 [US1] Add /gex POST endpoint with proper response handling
 - [ ] T015 [US1] Add error handling and validation for invalid GEX payloads
 - [ ] T016 [US1] Add logging for GEX data capture operations
@@ -116,8 +116,8 @@
 
 ### Implementation for User Story 3
 
-- [ ] T027 [US3] Implement webhook payload validation and processing in src/data_pipeline.py
-- [ ] T028 [US3] Implement DuckDB persistence for webhook data in src/data_pipeline.py
+- [ ] T027 [US3] Implement webhook payload validation and processing in data-pipeline.py
+- [ ] T028 [US3] Implement DuckDB persistence for webhook data in data-pipeline.py
 - [ ] T029 [US3] Add /uw POST endpoint with topic-based routing
 - [ ] T030 [US3] Add special handling for option trades and GEX webhooks
 - [ ] T031 [US3] Add error handling for invalid webhook payloads
