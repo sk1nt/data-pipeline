@@ -64,7 +64,12 @@ The Schwab streamer ingests tick + level 2 market data directly into the trading
    python scripts/schwab_oauth_helper.py
    ```
    This prints the Schwab consent URL, guides you through login/MFA, and saves the new `SCHWAB_REFRESH_TOKEN` to `.env`.
-4. Run the streamer:
+4. (Optional) Keep tokens fresh automatically:
+   ```bash
+   python scripts/schwab_token_rotator.py --access-interval-minutes 25 --refresh-interval-days 6
+   ```
+   The rotator stores the latest access/refresh pair in `data/schwab_tokens.json` and rewrites `SCHWAB_REFRESH_TOKEN` in `.env` every six days. Leave it running alongside your data services so the streamer always has a valid token.
+5. Run the streamer:
 
 ```bash
 python scripts/run_schwab_streamer.py
