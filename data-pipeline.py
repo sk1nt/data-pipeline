@@ -708,11 +708,12 @@ async def gex_history_endpoint(request: Request, background_tasks: BackgroundTas
                     ticker = candidate.upper()
                     break
 
-    # Try to infer ticker from URL if missing
-    if not ticker and url:
+    # Always prefer ticker inferred from the URL so legacy naming patterns (e.g., NQ_NDX)
+    # propagate consistently even if the client payload uses a shorthand ticker.
+    if url:
         inferred = _extract_ticker_from_url(url)
         if inferred:
-            ticker = inferred
+            ticker = inferred.upper()
 
     if not ticker:
         inferred = _extract_ticker_from_url(url)

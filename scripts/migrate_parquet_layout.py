@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path("data/parquet/gex"),
+        default=Path("data/parquet/gexbot"),
         help="Root directory that contains the legacy year=/month= folders.",
     )
     parser.add_argument(

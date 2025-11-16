@@ -211,7 +211,7 @@ class RedisFlushWorker:
                 if not snapshot_row:
                     continue
                 snapshot_rows.append(snapshot_row)
-                strike_rows.extend(self._build_strike_rows(snapshot, snapshot_row["epoch_ms"]))
+                strike_rows.extend(self._build_strike_rows(snapshot, snapshot_row["timestamp"]))
             if not snapshot_rows:
                 return {"gex_snapshots": 0, "gex_strikes": 0}
             self._write_gex_tables(snapshot_rows, strike_rows)
@@ -281,7 +281,7 @@ class RedisFlushWorker:
         else:
             max_priors_str = None
         return {
-            "epoch_ms": epoch_ms,
+            "timestamp": epoch_ms,
             "ticker": ticker,
             "spot_price": snapshot.get("spot"),
             "zero_gamma": snapshot.get("zero_gamma"),
@@ -322,7 +322,7 @@ class RedisFlushWorker:
                     priors_str = None
             rows.append(
                 {
-                    "epoch_ms": epoch_ms,
+                    "timestamp": epoch_ms,
                     "ticker": ticker,
                     "strike": strike,
                     "gamma": gamma,
@@ -350,7 +350,7 @@ class RedisFlushWorker:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS gex_snapshots (
-                epoch_ms BIGINT,
+                timestamp BIGINT,
                 ticker VARCHAR,
                 spot_price DOUBLE,
                 zero_gamma DOUBLE,
@@ -374,14 +374,14 @@ class RedisFlushWorker:
             DELETE FROM gex_snapshots
             USING gex_snapshots_flush
             WHERE gex_snapshots.ticker = gex_snapshots_flush.ticker
-              AND gex_snapshots.epoch_ms = gex_snapshots_flush.epoch_ms
+              AND gex_snapshots.timestamp = gex_snapshots_flush.timestamp
             """
         )
         conn.execute(
             """
             INSERT INTO gex_snapshots
             SELECT
-                epoch_ms,
+                timestamp,
                 ticker,
                 spot_price,
                 zero_gamma,
@@ -403,7 +403,7 @@ class RedisFlushWorker:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS gex_strikes (
-                    epoch_ms BIGINT,
+                    timestamp BIGINT,
                     ticker VARCHAR,
                     strike DOUBLE,
                     gamma DOUBLE,
@@ -418,14 +418,14 @@ class RedisFlushWorker:
                 DELETE FROM gex_strikes
                 USING gex_strikes_flush
                 WHERE gex_strikes.ticker = gex_strikes_flush.ticker
-                  AND gex_strikes.epoch_ms = gex_strikes_flush.epoch_ms
+                  AND gex_strikes.timestamp = gex_strikes_flush.timestamp
                   AND gex_strikes.strike = gex_strikes_flush.strike
                 """
             )
             conn.execute(
                 """
                 INSERT INTO gex_strikes
-                SELECT epoch_ms, ticker, strike, gamma, oi_gamma, priors
+                SELECT timestamp, ticker, strike, gamma, oi_gamma, priors
                 FROM gex_strikes_flush
                 """
             )

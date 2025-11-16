@@ -14,7 +14,7 @@ class GEXImporter:
 
     def create_table(self):
         schema = """
-        epoch_ms BIGINT,
+        timestamp BIGINT,
         ticker VARCHAR,
         spot_price DOUBLE,
         zero_gamma DOUBLE,
@@ -70,8 +70,7 @@ class GEXImporter:
                 for snapshot in valid_snapshots:
                     d = snapshot.to_dict()
                     epoch_ms = int(snapshot.timestamp.timestamp() * 1000)
-                    d.pop('timestamp', None)
-                    d['epoch_ms'] = epoch_ms
+                    d['timestamp'] = epoch_ms
                     d['strike_data'] = json.dumps(d['strike_data'])
                     data_dicts.append(d)
 
@@ -161,8 +160,7 @@ class GEXImporter:
                 # Convert to dict and serialize strike_data
                 data_dict = snapshot.to_dict()
                 epoch_ms = int(snapshot.timestamp.timestamp() * 1000)
-                data_dict.pop('timestamp', None)
-                data_dict['epoch_ms'] = epoch_ms
+                data_dict['timestamp'] = epoch_ms
                 data_dict['strike_data'] = json.dumps(data_dict['strike_data'])
 
                 with self.db_utils:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import time
+import re
 from pathlib import Path
 import duckdb
 from zoneinfo import ZoneInfo
@@ -30,9 +31,9 @@ def delete_from_gex_data(cutoff_epoch_ms: int, dry_run: bool) -> None:
     conn = duckdb.connect("data/gex_data.db")
     try:
         for table in ["gex_snapshots", "gex_strikes"]:
-            stmt = f"DELETE FROM {table} WHERE epoch_ms < ?"
+            stmt = f"DELETE FROM {table} WHERE timestamp < ?"
             if dry_run:
-                count = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE epoch_ms < ?", [cutoff_epoch_ms]).fetchone()[0]
+                count = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE timestamp < ?", [cutoff_epoch_ms]).fetchone()[0]
                 print(f"[dry-run] {table}: would delete {count:,} rows")
             else:
                 conn.execute(stmt, [cutoff_epoch_ms])
@@ -49,39 +50,35 @@ def delete_from_gex_history(epoch_cutoff: int, dry_run: bool) -> None:
 def prune_parquet(root: Path, cutoff: dt.date, dry_run: bool) -> None:
     if not root.exists():
         return
-    for year_dir in root.iterdir():
-        if not year_dir.is_dir():
+    pattern = re.compile(r"(\d{8})\.strikes\.parquet$")
+    cutoff_epoch = int(cutoff.strftime("%Y%m%d"))
+    for ticker_dir in root.iterdir():
+        if not ticker_dir.is_dir():
             continue
-        try:
-            year = int(year_dir.name)
-        except ValueError:
-            continue
-        for month_dir in year_dir.iterdir():
-            if not month_dir.is_dir():
+        for endpoint_dir in ticker_dir.iterdir():
+            if not endpoint_dir.is_dir():
                 continue
-            try:
-                month = int(month_dir.name)
-            except ValueError:
-                continue
-            dir_date = dt.date(year, month, 1)
-            if dir_date >= dt.date(cutoff.year, cutoff.month, 1):
-                continue
+            for parquet_file in list(endpoint_dir.glob("*.strikes.parquet")):
+                match = pattern.match(parquet_file.name)
+                if not match:
+                    continue
+                file_day = int(match.group(1))
+                if file_day >= cutoff_epoch:
+                    continue
+                if dry_run:
+                    print(f"[dry-run] would remove {parquet_file}")
+                else:
+                    parquet_file.unlink()
+            if not any(endpoint_dir.iterdir()):
+                if dry_run:
+                    print(f"[dry-run] would remove empty {endpoint_dir}")
+                else:
+                    endpoint_dir.rmdir()
+        if not any(ticker_dir.iterdir()):
             if dry_run:
-                print(f"[dry-run] would remove {month_dir}")
+                print(f"[dry-run] would remove empty {ticker_dir}")
             else:
-                for child in month_dir.rglob("*"):
-                    if child.is_file():
-                        child.unlink()
-                for child in sorted(month_dir.rglob("*"), reverse=True):
-                    if child.exists() and child.is_dir():
-                        child.rmdir()
-                month_dir.rmdir()
-                print(f"Removed {month_dir}")
-        if not any(year_dir.iterdir()):
-            if dry_run:
-                print(f"[dry-run] would remove empty {year_dir}")
-            else:
-                year_dir.rmdir()
+                ticker_dir.rmdir()
 
 
 def main() -> None:
@@ -94,7 +91,7 @@ def main() -> None:
 
     delete_from_gex_data(cutoff_epoch_ms, args.dry_run)
     delete_from_gex_history(epoch_cutoff, args.dry_run)
-    prune_parquet(Path("data/parquet/gex"), cutoff_date, args.dry_run)
+    prune_parquet(Path("data/parquet/gexbot"), cutoff_date, args.dry_run)
 
 
 if __name__ == "__main__":
