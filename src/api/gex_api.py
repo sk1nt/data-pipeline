@@ -25,13 +25,13 @@ async def get_gex_data(
             params = [symbol]
 
             if start:
-                query += " AND epoch_ms >= ?"
+                query += " AND timestamp >= ?"
                 params.append(_to_epoch_ms(start))
             if end:
-                query += " AND epoch_ms <= ?"
+                query += " AND timestamp <= ?"
                 params.append(_to_epoch_ms(end))
 
-            query += " ORDER BY epoch_ms LIMIT ?"
+            query += " ORDER BY timestamp LIMIT ?"
             params.append(limit)
 
             results = db.execute_query(query, tuple(params))
@@ -46,9 +46,9 @@ async def get_gex_data(
                 # Parse max_priors JSON if present
                 if 'max_priors' in data and data['max_priors'] and isinstance(data['max_priors'], str):
                     data['max_priors'] = json.loads(data['max_priors'])
-                epoch_ms = data.get('epoch_ms')
-                if epoch_ms is not None:
-                    data['timestamp'] = _format_epoch_ms(epoch_ms)
+                ts_value = data.get('timestamp')
+                if isinstance(ts_value, int):
+                    data['timestamp'] = _format_epoch_ms(ts_value)
                 snapshots.append(GEXSnapshot.from_dict(data))
 
             return snapshots

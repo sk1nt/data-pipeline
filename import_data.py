@@ -52,7 +52,7 @@ class DataImporter:
         self.dry_run = dry_run
         self.db_utils = DuckDBUtils(db_path="data/gex_data.db") if NEW_MODULES_AVAILABLE else None
         self.lineage_tracker = LineageTracker() if NEW_MODULES_AVAILABLE else None
-        self.parquet_output_dir = Path("data/parquet/gex")
+        self.parquet_output_dir = Path("data/parquet/gexbot")
         self.stats = {
             'gex_files_processed': 0,
             'gex_records_imported': 0,
@@ -100,7 +100,7 @@ class DataImporter:
         self.stats['gex_files_processed'] = len(json_files)
 
         snapshot_schema = """
-        epoch_ms BIGINT,
+        timestamp BIGINT,
         ticker VARCHAR,
         spot_price DOUBLE,
         zero_gamma DOUBLE,
@@ -117,7 +117,7 @@ class DataImporter:
         max_priors VARCHAR
         """
         strike_schema = """
-        epoch_ms BIGINT,
+        timestamp BIGINT,
         ticker VARCHAR,
         strike DOUBLE,
         gamma DOUBLE,
@@ -154,7 +154,7 @@ class DataImporter:
             snapshot_insert_template = """
             INSERT INTO gex_snapshots
             SELECT
-                CAST(timestamp * 1000 AS BIGINT) AS epoch_ms,
+                CAST(timestamp * 1000 AS BIGINT) AS timestamp,
                 ticker,
                 spot AS spot_price,
                 zero_gamma,
@@ -175,7 +175,7 @@ class DataImporter:
             strike_insert_template = """
             INSERT INTO gex_strikes
             SELECT
-                CAST(timestamp * 1000 AS BIGINT) AS epoch_ms,
+                CAST(timestamp * 1000 AS BIGINT) AS timestamp,
                 ticker,
                 CAST(strike_array[1] AS DOUBLE) AS strike,
                 CAST(strike_array[2] AS DOUBLE) AS gamma,

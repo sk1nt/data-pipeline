@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     max_import_attempts: int = Field(default=3, env="MAX_IMPORT_ATTEMPTS")
     import_timeout: int = Field(default=300, env="IMPORT_TIMEOUT")  # seconds
     staging_dir: str = Field(default="data/source/gexbot", env="STAGING_DIR")
-    parquet_dir: str = Field(default="data/parquet/gex", env="PARQUET_DIR")
+    parquet_dir: str = Field(default="data/parquet/gexbot", env="PARQUET_DIR")
     redis_retention_ms: int = Field(default=86_400_000, env="REDIS_RETENTION_MS")
     flush_interval_seconds: int = Field(default=600, env="FLUSH_INTERVAL_SECONDS")
     redis_host: str = Field(default="localhost", env="REDIS_HOST")
