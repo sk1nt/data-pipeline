@@ -49,6 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parquet-compression", default="zstd", help="Parquet compression codec (snappy,zstd,gzip)")
     parser.add_argument("--parquet-compression-level", type=int, default=1, help="Parquet compression level (if supported by codec)")
     parser.add_argument("--parquet-row-group-size", type=int, default=0, help="Target parquet row group size in bytes (0 = default chunking)")
+    parser.add_argument("--max-memory-mb", type=int, default=0, help="Optional: maximum memory in MB to allow before flushing (0 = disabled)")
     parser.add_argument("--convert-timestamp-to-ms", action="store_true", help="Add ts_ms epoch milliseconds column (recommended) and keep timestamp")
     parser.add_argument("--atomic-writes", action="store_true", help="Write to a temporary file and then atomically rename to final path on success")
     parser.add_argument("--skip-existing", action="store_true", help="Skip writing if the target parquet file already exists")
@@ -97,6 +98,7 @@ def write_depth_parquet(
     atomic_writes: bool = False,
     skip_existing: bool = False,
     convert_timestamp_to_ms: bool = False,
+    max_memory_mb: int = 0,
 ) -> int:
     from src.lib.depth_parser import SierraChartDepthParser
     import polars as pl
@@ -118,6 +120,21 @@ def write_depth_parquet(
     writer = None
     snapshots = 0
     start = time.time()
+    # Safety cap on chunk size to avoid excessive memory usage.
+    MAX_DEPTH_CHUNK = 200_000
+    if chunk_size > MAX_DEPTH_CHUNK:
+        logger.warning(
+            "Depth chunk_size %d is greater than MAX %d; capping to %d",
+            chunk_size,
+            MAX_DEPTH_CHUNK,
+            MAX_DEPTH_CHUNK,
+        )
+        chunk_size = MAX_DEPTH_CHUNK
+    # Memory-based safety: if available memory is below threshold, flush rows.
+    try:
+        import psutil  # optional dependency for memory checks
+    except Exception:
+        psutil = None
     for snapshot in parser.parse_file(str(depth_path)):
         if snapshot.timestamp.strftime("%Y-%m-%d") != date_str:
             continue
@@ -155,13 +172,24 @@ def write_depth_parquet(
                 record["ts_ms"] = int(val.timestamp() * 1000)
         rows.append(record)
         snapshots += 1
-        if len(rows) >= chunk_size:
+        # Throttle / flush when too many rows accumulated or memory low.
+        mem_low = False
+        if psutil and max_memory_mb and max_memory_mb > 0:
+            try:
+                avail_mb = psutil.virtual_memory().available // (1024 * 1024)
+                if avail_mb < max_memory_mb:
+                    mem_low = True
+            except Exception:
+                mem_low = False
+        if len(rows) >= chunk_size or mem_low:
             tbl = pl.DataFrame(rows)
             arrow_tbl = tbl.to_arrow()
             if writer is None:
                 writer = pq.ParquetWriter(tmp_file, arrow_tbl.schema, compression=parquet_compression)
             writer.write_table(arrow_tbl)
             rows.clear()
+            if snapshots % 100000 == 0:
+                logger.info("Depth: processed %d snapshots", snapshots)
     if rows:
         tbl = pl.DataFrame(rows)
         arrow_tbl = tbl.to_arrow()
@@ -191,6 +219,7 @@ def write_tick_parquet(
     atomic_writes: bool = False,
     skip_existing: bool = False,
     convert_timestamp_to_ms: bool = False,
+    max_memory_mb: int = 0,
 ) -> int:
     from src.lib.scid_parser import parse_scid_file_backwards_generator
     import polars as pl
@@ -211,6 +240,20 @@ def write_tick_parquet(
     writer = None
     ticks = 0
     start = time.time()
+    # Safety cap on chunk size to avoid excessive memory usage.
+    MAX_TICK_CHUNK = 200_000
+    if chunk_size > MAX_TICK_CHUNK:
+        logger.warning(
+            "Tick chunk_size %d is greater than MAX %d; capping to %d",
+            chunk_size,
+            MAX_TICK_CHUNK,
+            MAX_TICK_CHUNK,
+        )
+        chunk_size = MAX_TICK_CHUNK
+    try:
+        import psutil  # optional dependency for memory checks
+    except Exception:
+        psutil = None
     date_filter = datetime.strptime(date_str, "%Y-%m-%d")
     limit = max_per_day if max_per_day > 0 else None
     for record in parse_scid_file_backwards_generator(str(scid_file), date_filter=date_filter, max_records=limit):
@@ -237,13 +280,23 @@ def write_tick_parquet(
                 record_row["ts_ms"] = int(val.timestamp() * 1000)
         rows.append(record_row)
         ticks += 1
-        if len(rows) >= chunk_size:
+        mem_low = False
+        if psutil and max_memory_mb and max_memory_mb > 0:
+            try:
+                avail_mb = psutil.virtual_memory().available // (1024 * 1024)
+                if avail_mb < max_memory_mb:
+                    mem_low = True
+            except Exception:
+                mem_low = False
+        if len(rows) >= chunk_size or mem_low:
             tbl = pl.DataFrame(rows)
             arrow_tbl = tbl.to_arrow()
             if writer is None:
                 writer = pq.ParquetWriter(tmp_file, arrow_tbl.schema, compression=parquet_compression)
             writer.write_table(arrow_tbl)
             rows.clear()
+            if ticks % 100000 == 0:
+                logger.info("Ticks: processed %d ticks", ticks)
     if rows:
         tbl = pl.DataFrame(rows)
         arrow_tbl = tbl.to_arrow()
@@ -293,6 +346,7 @@ def main() -> None:
             atomic_writes=args.atomic_writes,
             skip_existing=args.skip_existing,
             convert_timestamp_to_ms=args.convert_timestamp_to_ms,
+            max_memory_mb=args.max_memory_mb,
         )
 
     def _run_ticks():
@@ -312,6 +366,7 @@ def main() -> None:
             atomic_writes=args.atomic_writes,
             skip_existing=args.skip_existing,
             convert_timestamp_to_ms=args.convert_timestamp_to_ms,
+            max_memory_mb=args.max_memory_mb,
         )
 
     max_workers = 2 if args.emit_tick_parquet else 1
