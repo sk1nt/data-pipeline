@@ -21,6 +21,11 @@ class TradeBot(commands.Bot):
             db=int(os.getenv('REDIS_DB', '0')),
             password=os.getenv('REDIS_PASSWORD')
         )
+        self.uw_option_latest_key = os.getenv('UW_OPTION_LATEST_KEY', 'uw:option_trades_super_algo:latest')
+        self.uw_option_history_key = os.getenv('UW_OPTION_HISTORY_KEY', 'uw:option_trades_super_algo:history')
+        self.uw_market_latest_key = os.getenv('UW_MARKET_LATEST_KEY', 'uw:market_agg_socket:latest')
+        self.uw_market_history_key = os.getenv('UW_MARKET_HISTORY_KEY', 'uw:market_agg_socket:history')
+        self.uw_option_stream_channel = os.getenv('UW_OPTION_STREAM_CHANNEL', 'uw:option_trades_super_algo:stream')
         # Canonical tickers for GEXBot futures endpoints so cache/API reuse shared contracts
         self.ticker_aliases = {
             'NQ': 'NQ_NDX',
@@ -30,6 +35,9 @@ class TradeBot(commands.Bot):
         }
         self.display_zone = ZoneInfo(os.getenv('DISPLAY_TIMEZONE', 'America/New_York'))
         self.redis_snapshot_prefix = os.getenv('GEX_SNAPSHOT_PREFIX', 'gex:snapshot:')
+        self.option_alert_channel_ids = self._init_alert_channels()
+        self._uw_listener_task: Optional[asyncio.Task] = None
+        self._uw_listener_stop = asyncio.Event()
         # Use a path variable and create short-lived connections per query to avoid file locks
         self.duckdb_path = os.getenv('DUCKDB_PATH', '/home/rwest/projects/data-pipeline/data/gex_data.db')
         # Register commands defined as methods on the subclass so prefix commands work
@@ -78,21 +86,51 @@ class TradeBot(commands.Bot):
                 except Exception as e:
                     await ctx.send(f'Error fetching TastyTrade status: {e}')
 
+            async def _market_cmd(ctx):
+                snapshot = await self._fetch_market_snapshot()
+                if not snapshot:
+                    await ctx.send('No market aggregate snapshot available')
+                    return
+                await ctx.send(self.format_market_snapshot(snapshot))
+
+            async def _uwalerts_cmd(ctx):
+                alerts = await self._fetch_option_history(limit=5)
+                if not alerts:
+                    await ctx.send('No option trade alerts yet')
+                    return
+                formatted = "\n".join(self.format_option_trade_alert(alert) for alert in alerts)
+                await ctx.send(formatted)
+
             self.add_command(commands.Command(_ping_cmd, name='ping'))
             self.add_command(commands.Command(_gex_cmd, name='gex'))
             self.add_command(commands.Command(_status_cmd, name='status'))
             self.add_command(commands.Command(_tastytrade_cmd, name='tastytrade'))
+            self.add_command(commands.Command(_market_cmd, name='market'))
+            self.add_command(commands.Command(_uwalerts_cmd, name='uw'))
         except Exception as e:
             # If registration fails (e.g., during import-time tests), print error for debugging
             print(f"Command registration failed: {e}")
 
     async def on_ready(self):
         print(f'Bot logged in as {self.user}')
+        if not self._uw_listener_task:
+            self._uw_listener_stop.clear()
+            self._uw_listener_task = asyncio.create_task(self._listen_option_trade_stream())
 
     async def on_message(self, message):
         if message.author == self.user:
             return
         await super().on_message(message)
+
+    async def close(self):
+        if self._uw_listener_task:
+            self._uw_listener_stop.set()
+            try:
+                await self._uw_listener_task
+            except Exception:
+                pass
+            self._uw_listener_task = None
+        await super().close()
 
     async def ping(self, ctx):
         await ctx.send('Pong!')
@@ -478,6 +516,102 @@ class TradeBot(commands.Bot):
             return False
         return True
 
+    def _init_alert_channels(self) -> List[int]:
+        channels: List[int] = []
+        for cid in (
+            getattr(self.config, 'execution_channel_id', None),
+            getattr(self.config, 'status_channel_id', None),
+            getattr(self.config, 'alert_channel_id', None),
+        ):
+            if cid and cid not in channels:
+                channels.append(cid)
+        allowed = getattr(self.config, 'allowed_channel_ids', None) or ()
+        for cid in allowed:
+            if cid and cid not in channels:
+                channels.append(cid)
+        return channels
+
+    async def _listen_option_trade_stream(self):
+        pubsub = self.redis_client.pubsub(ignore_subscribe_messages=True)
+        try:
+            pubsub.subscribe(self.uw_option_stream_channel)
+        except Exception as exc:
+            print(f"Failed to subscribe to UW stream: {exc}")
+            return
+        try:
+            while not self._uw_listener_stop.is_set():
+                message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
+                if not message:
+                    await asyncio.sleep(0.1)
+                    continue
+                if message.get('type') != 'message':
+                    continue
+                data = message.get('data')
+                if isinstance(data, bytes):
+                    data = data.decode('utf-8')
+                try:
+                    payload = json.loads(data)
+                except Exception as exc:
+                    print(f"Failed to decode UW payload: {exc}")
+                    continue
+                try:
+                    await self._broadcast_option_trade(payload)
+                except Exception as exc:
+                    print(f"Failed to broadcast UW payload: {exc}")
+        finally:
+            try:
+                pubsub.close()
+            except Exception:
+                pass
+
+    async def _broadcast_option_trade(self, payload: dict) -> None:
+        if not self.option_alert_channel_ids:
+            return
+        message = self.format_option_trade_alert(payload)
+        for channel_id in self.option_alert_channel_ids:
+            if not channel_id:
+                continue
+            try:
+                channel = self.get_channel(channel_id)
+                if channel is None:
+                    channel = await self.fetch_channel(channel_id)
+                if channel:
+                    await channel.send(message)
+            except Exception as exc:
+                print(f"Failed to send UW alert to {channel_id}: {exc}")
+
+    async def _fetch_market_snapshot(self) -> Optional[dict]:
+        try:
+            raw = await asyncio.to_thread(self.redis_client.get, self.uw_market_latest_key)
+        except Exception as exc:
+            print(f"Redis error fetching market snapshot: {exc}")
+            return None
+        if not raw:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode('utf-8')
+        try:
+            return json.loads(raw)
+        except Exception as exc:
+            print(f"Failed to decode market snapshot: {exc}")
+            return None
+
+    async def _fetch_option_history(self, limit: int = 5) -> List[dict]:
+        try:
+            entries = await asyncio.to_thread(self.redis_client.lrange, self.uw_option_history_key, 0, limit - 1)
+        except Exception as exc:
+            print(f"Redis error fetching option history: {exc}")
+            return []
+        results: List[dict] = []
+        for entry in entries:
+            if isinstance(entry, bytes):
+                entry = entry.decode('utf-8')
+            try:
+                results.append(json.loads(entry))
+            except Exception:
+                continue
+        return results
+
     def format_gex(self, data):
         dt = data.get('timestamp')
         if isinstance(dt, str):
@@ -681,6 +815,93 @@ class TradeBot(commands.Bot):
         ]
         body = "\n".join(lines)
         return f"```ansi\n{body}\n```"
+
+    def format_option_trade_alert(self, payload: dict) -> str:
+        data = payload.get('data') or payload
+        timestamp = data.get('timestamp') or payload.get('received_at') or 'N/A'
+        if isinstance(timestamp, str):
+            timestamp = timestamp.replace('T', ' ').replace('Z', ' UTC')
+        transaction_types = data.get('transaction_type') or data.get('transaction_types') or []
+        if isinstance(transaction_types, str):
+            transaction_types = [transaction_types]
+        ticker = data.get('ticker') or data.get('symbol') or 'UNKNOWN'
+        side = data.get('side') or data.get('direction') or 'N/A'
+        call_put = data.get('call_put') or data.get('option_type') or ''
+        strike = data.get('strike') or data.get('strike_price') or 'N/A'
+        contract = data.get('contract') or 'n/a'
+        dte = data.get('dte') or data.get('days_to_expiration') or 'N/A'
+        stock_spot = data.get('stock_spot') or data.get('underlying_price') or 'N/A'
+        bid_range = data.get('bid_ask_range') or data.get('bid_range') or 'N/A'
+        option_spot = data.get('option_spot') or data.get('option_price') or 'N/A'
+        size = data.get('size') or data.get('contracts') or 'N/A'
+        premium = data.get('premium') or data.get('notional') or 'N/A'
+        volume = data.get('volume') or 'N/A'
+        oi = data.get('oi') or data.get('open_interest') or 'N/A'
+        chain_bid = data.get('chain_bid') or data.get('bid') or 'N/A'
+        chain_ask = data.get('chain_ask') or data.get('ask') or 'N/A'
+        legs = data.get('legs') or []
+        code = data.get('code') or 'N/A'
+        flags = data.get('flags') or []
+        tags = data.get('tags') or []
+        uw_info = data.get('unusual_whales') or {}
+        uw_id = uw_info.get('alert_id') or 'n/a'
+        uw_score = uw_info.get('score')
+
+        legs_text = ", ".join(
+            f"{leg.get('ratio', 1)}x{leg.get('strike')} {leg.get('type')}"
+            for leg in legs if isinstance(leg, dict)
+        ) or "n/a"
+        flags_text = ", ".join(flags) if flags else "n/a"
+        tags_text = ", ".join(tags) if tags else "n/a"
+        tx_text = ", ".join(transaction_types) if transaction_types else "unknown"
+
+        uw_line = f"UW alert {uw_id}"
+        if uw_score is not None:
+            uw_line += f" score {uw_score}"
+
+        lines = [
+            f"UW option alert  {timestamp}",
+            f"ticker          {ticker}",
+            f"types           {tx_text}",
+            f"contract        {contract}",
+            f"side/strike     {side} {strike} {call_put}  dte {dte}",
+            f"stock spot      {stock_spot}  bid-ask {bid_range}",
+            f"option spot     {option_spot}  size {size}",
+            f"premium         {premium}  volume {volume}  oi {oi}",
+            f"chain bid/ask   {chain_bid} / {chain_ask}",
+            f"legs            {legs_text}",
+            f"code            {code}",
+            f"flags           {flags_text}",
+            f"tags            {tags_text}",
+            uw_line,
+        ]
+        return "```ansi\n" + "\n".join(lines) + "\n```"
+
+    def format_market_snapshot(self, payload: dict) -> str:
+        data = payload.get('data') or payload
+        timestamp = data.get('timestamp') or payload.get('received_at') or 'N/A'
+        ticker = data.get('ticker') or data.get('symbol') or 'INDEX'
+        stock_spot = data.get('stock_spot') or data.get('price') or 'N/A'
+        bid = data.get('bid') or 'N/A'
+        ask = data.get('ask') or 'N/A'
+        volume = data.get('volume') or 'N/A'
+        advancers = data.get('advancers') or 'N/A'
+        decliners = data.get('decliners') or 'N/A'
+        net_flow = data.get('net_flow') or data.get('net') or 'N/A'
+        session = data.get('session') or data.get('market_session') or 'N/A'
+
+        lines = [
+            f"Market aggregate | {ticker}",
+            f"timestamp       {timestamp}",
+            f"spot            {stock_spot}",
+            f"bid / ask       {bid} / {ask}",
+            f"volume          {volume}",
+            f"adv / dec       {advancers} / {decliners}",
+            f"net flow        {net_flow}",
+            f"session         {session}",
+        ]
+        return "```ansi\n" + "\n".join(lines) + "\n```"
+
     def format_status(self, status_data):
         formatted = "**Data Pipeline Status:**\n\n"
         for key, value in status_data.items():
