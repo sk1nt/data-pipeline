@@ -24,15 +24,15 @@ flowchart LR
     SCHWAB -->|auth + market data| TDDB
     SCHWAB -->|options/quotes| GEXDB
 
-    TDDB -.->|future export| TPARQ[[data/parquet/ticks/YYYYMMDD/<symbol>.parquet]]
+    TDDB -.->|future export| TPARQ[[data/parquet/tick/<symbol>/<YYYYMMDD>.parquet]]
 ```
 
 ## Coverage Snapshot (last 45 trading days)
 
 | Dataset | Storage | Primary Source | Observed Range (UTC) | Trading Days Present* | Coverage Notes |
 |---------|---------|----------------|----------------------|----------------------|----------------|
-| MNQ/NQ ticks | `data/tick_data.db::tick_data` | TastyTrade DXFeed, Sierra Chart SCID, Schwab | _None_ (table empty) | **0 / 45** | Ingestion not yet run after repo setup; DuckDB currently has zero rows. Need to hydrate from live feeds or by backfilling SCID files. |
-| MNQ order-book depth (80 levels + last trade) | `data/parquet/depth/YYYYMMDD/mnq_depth.parquet` (via `data/tick_mbo_data.db`) | Sierra Chart SCDD exports | 2025‑09‑19 → 2025‑11‑07 | **36 / 45** | Missing 9 weekday sessions in the 45-day window (the kickoff week 2025‑09‑08→09‑12 plus 2025‑09‑26, 2025‑09‑29‑30). |
+| MNQ/NQ ticks | `data/tick_data.db::tick_data` + view `tick_parquet` (`data/parquet/tick/<symbol>/<YYYYMMDD>.parquet`) | TastyTrade DXFeed, Sierra Chart SCID, Schwab | _None_ (table empty) | **0 / 45** | Ingestion not yet run after repo setup; DuckDB currently has zero rows. Need to hydrate from live feeds or by backfilling SCID files. |
+| MNQ order-book depth (80 levels + last trade) | `data/tick_mbo_data.db::depth_parquet` (`data/parquet/depth/<symbol>/<YYYYMMDD>.parquet`) | Sierra Chart SCDD exports | 2025‑09‑19 → 2025‑11‑07 | **36 / 45** | Missing 9 weekday sessions in the 45-day window (the kickoff week 2025‑09‑08→09‑12 plus 2025‑09‑26, 2025‑09‑29‑30). |
 | NQ_NDX GEX snapshots & strikes | `data/parquet/gexbot/NQ_NDX/<endpoint>/<YYYYMMDD>.strikes.parquet` (mounted via DuckDB view `parquet_gex_strikes`) | GEXBot API/webhooks (runs Mon–Fri, 09:30 ET) | 2025‑09‑02 → 2025‑11‑07 | **45 / 45** | Complete coverage for the last 45 trading days (JSON source retained under `data/source/gexbot/`). |
 | GEX import lineage/history | `data/gex_data.db` (`gex_history_queue`, `import_jobs`, `gex_snapshots`, `gex_strikes`) | GEXBot `/gex_history_url` queue | 2025‑09 onward | N/A (metadata) | Queue + canonical snapshots/strikes (JSON sources retained under `data/source/gexbot/`). |
 | Tick/Depth metadata | `data/tick_mbo_data.db` tables (`mnq_depth_metadata`, `mnq_ticks`) | Sierra Chart | Metadata only | `mnq_depth_metadata` populated; `mnq_ticks` empty | Mirrors the depth export process; does not itself provide tick data. |
@@ -60,6 +60,6 @@ All GEX and futures code now uses canonical ticker formats with automatic normal
 
 ## Next Steps
 
-1. **Ticks**: Run the Schwab/TastyTrade ingestion jobs (or the SCID extractor) to populate `data/tick_data.db`, then export aligned Parquet files under `data/parquet/ticks/`.
+1. **Ticks**: Run the Schwab/TastyTrade ingestion jobs (or the SCID extractor) to populate `data/tick_data.db` plus the `data/parquet/tick/<symbol>/<YYYYMMDD>.parquet` tree.
 2. **Depth**: Backfill the 9 missing MNQ depth trading sessions (2025‑09‑08→09‑12, 2025‑09‑26, 2025‑09‑29‑30) by re-running the SCDD extractor.
 3. **GEX**: Keep `/gex_history_url` jobs scheduled so the next coverage snapshot continues to show a full 45-day window.

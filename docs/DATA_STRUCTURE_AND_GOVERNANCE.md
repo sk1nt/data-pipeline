@@ -22,6 +22,14 @@ Canonical Directory Layout
   - Table: `staging_strikes_<job_id>` used during import; final validated metadata recorded in `strikes` only as transient metadata.
   - Rule: DuckDB is a processing engine, not canonical storage. Parquet is canonical for downstream use.
 
+- `data/tick_data.db`
+  - Canonical manifest + query surface for trade ticks. `tick_data` stores the last flushed trade rows, while the `tick_parquet` view unions every file under `data/parquet/tick/<SYMBOL>/<YYYYMMDD>.parquet`.
+  - Rule: never drop tables automatically during flushes; migrations must run explicitly so investigators can audit historical ticks.
+
+- `data/tick_mbo_data.db`
+  - Metadata for depth snapshots (per symbol/day) with a `depth_parquet` view over `data/parquet/depth/<SYMBOL>/<YYYYMMDD>.parquet`.
+  - Rule: keep manifest rows per day so we can reconcile missing sessions without rescanning Parquet.
+
 - `data/gex_data.db` *(deprecated — history tables now live inside `data/gex_data.db`)*
   - Metadata store for import jobs (table: `import_jobs`). Tracks `id`, `url`, `checksum`, `ticker`, `status`, `records_processed`, `last_error`, `created_at`, `updated_at`.
   - Rule: This is the authoritative job log. Do not manually edit entries except through tooling.
@@ -30,6 +38,10 @@ Canonical Directory Layout
   - Raw history snapshots downloaded from GEXBot (temporary staging).
 - `data/parquet/gexbot/<ticker>/<endpoint>/<YYYYMMDD>.strikes.parquet`
   - Canonical strike history per trading day (mounted via DuckDB view `parquet_gex_strikes`).
+- `data/parquet/tick/<SYMBOL>/<YYYYMMDD>.parquet`
+  - Live-trade parquet files created by `RedisFlushWorker`; each row holds `timestamp_ms`, `symbol`, `source`, `price`, and `size`.
+- `data/parquet/depth/<SYMBOL>/<YYYYMMDD>.parquet`
+  - Level-by-level depth ladders (bid/ask, level, price, size) exported during Redis flushes.
 
 > **Note (2025-11-11):** `gex_bridge_*` tables have been removed. Canonical data lives in
 > `data/parquet/gexbot/<ticker>/<endpoint>/<YYYYMMDD>.strikes.parquet` with DuckDB views,

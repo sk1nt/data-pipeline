@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     redis_password: Optional[str] = Field(default=None, env="REDIS_PASSWORD")
     timeseries_db_path: str = Field(default="data/redis_timeseries.db", env="TIMESERIES_DB_PATH")
     timeseries_parquet_dir: str = Field(default="data/parquet/timeseries", env="TIMESERIES_PARQUET_DIR")
+    tick_db_path: str = Field(default="data/tick_data.db", env="TICK_DB_PATH")
+    depth_db_path: str = Field(default="data/tick_mbo_data.db", env="DEPTH_DB_PATH")
+    tick_parquet_dir: str = Field(default="data/parquet/tick", env="TICK_PARQUET_DIR")
+    depth_parquet_dir: str = Field(default="data/parquet/depth", env="DEPTH_PARQUET_DIR")
     service_control_token: Optional[str] = Field(default=None, env="SERVICE_CONTROL_TOKEN")
 
     # Discord bot control
@@ -173,6 +177,8 @@ class Settings(BaseSettings):
             self.staging_path,
             self.parquet_path,
             Path(self.timeseries_parquet_dir),
+            Path(self.tick_parquet_dir),
+            Path(self.depth_parquet_dir),
         ]
 
         for directory in directories:
