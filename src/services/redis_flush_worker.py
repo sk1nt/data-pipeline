@@ -211,7 +211,7 @@ class RedisFlushWorker:
                 if not snapshot_row:
                     continue
                 snapshot_rows.append(snapshot_row)
-                strike_rows.extend(self._build_strike_rows(snapshot, snapshot_row["timestamp"]))
+                strike_rows.extend(self._build_strike_rows(snapshot, snapshot_row["epoch_ms"]))
             if not snapshot_rows:
                 return {"gex_snapshots": 0, "gex_strikes": 0}
             self._write_gex_tables(snapshot_rows, strike_rows)
@@ -249,25 +249,28 @@ class RedisFlushWorker:
             LOGGER.warning("Failed to decode snapshot for %s", symbol)
             return None
 
-    def _parse_snapshot_timestamp(self, value: Any) -> Optional[datetime]:
+    def _parse_snapshot_epoch_ms(self, value: Any) -> Optional[int]:
         if value is None:
             return None
+        ts: Optional[datetime] = None
         if isinstance(value, datetime):
-            return value.astimezone(timezone.utc).replace(tzinfo=None)
-        if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(float(value), tz=timezone.utc).replace(tzinfo=None)
-        if isinstance(value, str):
+            ts = value.astimezone(timezone.utc)
+        elif isinstance(value, (int, float)):
+            ts = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        elif isinstance(value, str):
             try:
-                dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
             except ValueError:
                 return None
-            return dt.astimezone(timezone.utc).replace(tzinfo=None)
-        return None
+            ts = ts.astimezone(timezone.utc)
+        if ts is None:
+            return None
+        return int(ts.timestamp() * 1000)
 
     def _build_snapshot_row(self, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         ticker = (snapshot.get("symbol") or snapshot.get("ticker") or "").upper()
-        ts = self._parse_snapshot_timestamp(snapshot.get("timestamp"))
-        if not ticker or not ts:
+        epoch_ms = self._parse_snapshot_epoch_ms(snapshot.get("timestamp"))
+        if not ticker or epoch_ms is None:
             return None
         max_priors = snapshot.get("max_priors")
         if max_priors is not None:
@@ -278,7 +281,7 @@ class RedisFlushWorker:
         else:
             max_priors_str = None
         return {
-            "timestamp": ts,
+            "epoch_ms": epoch_ms,
             "ticker": ticker,
             "spot_price": snapshot.get("spot"),
             "zero_gamma": snapshot.get("zero_gamma"),
@@ -295,7 +298,7 @@ class RedisFlushWorker:
             "max_priors": max_priors_str,
         }
 
-    def _build_strike_rows(self, snapshot: Dict[str, Any], ts: datetime) -> List[Dict[str, Any]]:
+    def _build_strike_rows(self, snapshot: Dict[str, Any], epoch_ms: int) -> List[Dict[str, Any]]:
         ticker = (snapshot.get("symbol") or snapshot.get("ticker") or "").upper()
         strikes = snapshot.get("strikes") or []
         rows: List[Dict[str, Any]] = []
@@ -319,7 +322,7 @@ class RedisFlushWorker:
                     priors_str = None
             rows.append(
                 {
-                    "timestamp": ts,
+                    "epoch_ms": epoch_ms,
                     "ticker": ticker,
                     "strike": strike,
                     "gamma": gamma,
@@ -347,7 +350,7 @@ class RedisFlushWorker:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS gex_snapshots (
-                timestamp TIMESTAMP,
+                epoch_ms BIGINT,
                 ticker VARCHAR,
                 spot_price DOUBLE,
                 zero_gamma DOUBLE,
@@ -371,14 +374,14 @@ class RedisFlushWorker:
             DELETE FROM gex_snapshots
             USING gex_snapshots_flush
             WHERE gex_snapshots.ticker = gex_snapshots_flush.ticker
-              AND gex_snapshots.timestamp = gex_snapshots_flush.timestamp
+              AND gex_snapshots.epoch_ms = gex_snapshots_flush.epoch_ms
             """
         )
         conn.execute(
             """
             INSERT INTO gex_snapshots
             SELECT
-                timestamp,
+                epoch_ms,
                 ticker,
                 spot_price,
                 zero_gamma,
@@ -400,7 +403,7 @@ class RedisFlushWorker:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS gex_strikes (
-                    timestamp TIMESTAMP,
+                    epoch_ms BIGINT,
                     ticker VARCHAR,
                     strike DOUBLE,
                     gamma DOUBLE,
@@ -415,14 +418,14 @@ class RedisFlushWorker:
                 DELETE FROM gex_strikes
                 USING gex_strikes_flush
                 WHERE gex_strikes.ticker = gex_strikes_flush.ticker
-                  AND gex_strikes.timestamp = gex_strikes_flush.timestamp
+                  AND gex_strikes.epoch_ms = gex_strikes_flush.epoch_ms
                   AND gex_strikes.strike = gex_strikes_flush.strike
                 """
             )
             conn.execute(
                 """
                 INSERT INTO gex_strikes
-                SELECT timestamp, ticker, strike, gamma, oi_gamma, priors
+                SELECT epoch_ms, ticker, strike, gamma, oi_gamma, priors
                 FROM gex_strikes_flush
                 """
             )

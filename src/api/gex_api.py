@@ -1,9 +1,12 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from src.db.duckdb_utils import DuckDBUtils
 from src.models.gex_snapshot import GEXSnapshot
 import json
+
+NY_TZ = ZoneInfo("America/New_York")
 
 router = APIRouter()
 
@@ -22,13 +25,13 @@ async def get_gex_data(
             params = [symbol]
 
             if start:
-                query += " AND timestamp >= ?"
-                params.append(start)
+                query += " AND epoch_ms >= ?"
+                params.append(_to_epoch_ms(start))
             if end:
-                query += " AND timestamp <= ?"
-                params.append(end)
+                query += " AND epoch_ms <= ?"
+                params.append(_to_epoch_ms(end))
 
-            query += " ORDER BY timestamp LIMIT ?"
+            query += " ORDER BY epoch_ms LIMIT ?"
             params.append(limit)
 
             results = db.execute_query(query, tuple(params))
@@ -43,8 +46,23 @@ async def get_gex_data(
                 # Parse max_priors JSON if present
                 if 'max_priors' in data and data['max_priors'] and isinstance(data['max_priors'], str):
                     data['max_priors'] = json.loads(data['max_priors'])
+                epoch_ms = data.get('epoch_ms')
+                if epoch_ms is not None:
+                    data['timestamp'] = _format_epoch_ms(epoch_ms)
                 snapshots.append(GEXSnapshot.from_dict(data))
 
             return snapshots
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _to_epoch_ms(value: datetime) -> int:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=NY_TZ)
+    else:
+        value = value.astimezone(NY_TZ)
+    return int(value.timestamp() * 1000)
+
+
+def _format_epoch_ms(epoch_ms: int) -> datetime:
+    return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).astimezone(NY_TZ)

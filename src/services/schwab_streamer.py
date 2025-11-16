@@ -12,6 +12,7 @@ from typing import Callable, Optional
 import httpx
 from websocket import WebSocketApp
 from schwab.client import Client as Schwab
+from schwab import auth
 
 from ..config import settings
 from ..lib.logging import get_logger
@@ -64,10 +65,10 @@ class SchwabAuthClient:
         self._tok_path = project_root / ".tokens" / "schwab_token.json"
         
         # Initialize schwab-py client
-        self.schwab = Schwab(
-            client_id=self.client_id,
-            client_secret=self.client_secret,
-            redirect_uri=None,  # Not needed for refresh
+        self.schwab = auth.easy_client(
+            api_key=self.client_id,
+            app_secret=self.client_secret,
+            callback_url='http://127.0.0.1:8182',  # Required for login flow
             token_path=str(self._tok_path)
         )
         

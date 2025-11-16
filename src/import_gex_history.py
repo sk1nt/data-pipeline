@@ -15,8 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Any, Dict, List, Union, Iterable
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timezone
 import datetime as dt
+from urllib.parse import urlsplit
 
 import requests
 import ijson
@@ -49,7 +50,7 @@ class ProcessedRecord:
     payload: GEXPayload
     raw_record: Dict[str, Any]
     endpoint: str
-    timestamp_epoch: int
+    epoch_ms: int
     net_gex_value: Optional[float]
     max_priors_serialized: Optional[str]
 
@@ -100,7 +101,7 @@ class GEXHistoryImporter:
 
     def _download_file(self, url: str, ticker: str, endpoint: str) -> Path:
         """Download file from URL to local storage."""
-        filename = self._build_filename(url, ticker, endpoint)
+        filename = self._build_filename(url)
         ticker_dir = self._safe_name(ticker or "UNKNOWN")
         endpoint_dir = self._safe_name(endpoint or "gex_zero")
         dest_dir = self.source_dir / ticker_dir / endpoint_dir
@@ -128,16 +129,15 @@ class GEXHistoryImporter:
         logger.info(f"Downloaded {size if size is not None else 'unknown'} bytes")
         return local_path
 
-    def _build_filename(self, url: str, ticker: str, endpoint: str) -> str:
-        """Construct filename that preserves the download date if available."""
-        date_match = re.search(r"/(\d{4}-\d{2}-\d{2})_", url)
-        if date_match:
-            day = date_match.group(1)
-        else:
-            day = dt.datetime.utcnow().strftime("%Y-%m-%d")
-        safe_endpoint = (endpoint or "gex_zero").replace("/", "_").replace(" ", "_")
-        safe_ticker = (ticker or "UNKNOWN").replace("/", "_").replace(" ", "_")
-        return f"{day}_{safe_ticker}_{safe_endpoint}_history.json"
+    def _build_filename(self, url: str) -> str:
+        """Preserve the remote file name when downloading to staging."""
+        parsed = urlsplit(url)
+        candidate = Path(parsed.path).name
+        if candidate:
+            return candidate
+        # Fallback to timestamped name if URL has no basename
+        timestamp = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        return f"gex_history_{timestamp}.json"
 
     @staticmethod
     def _safe_name(value: str) -> str:
@@ -188,7 +188,7 @@ class GEXHistoryImporter:
             if 'max_priors' in record_copy and isinstance(record_copy['max_priors'], list):
                 record_copy['max_priors'] = json.dumps(record_copy['max_priors'])
             if 'timestamp' in record_copy and isinstance(record_copy['timestamp'], int):
-                record_copy['timestamp'] = datetime.fromtimestamp(record_copy['timestamp'])
+                record_copy['timestamp'] = datetime.fromtimestamp(record_copy['timestamp'], tz=timezone.utc)
             payload = GEXPayload(**record_copy)
             strikes = []
             if 'strikes' in record and isinstance(record['strikes'], list):
@@ -210,15 +210,15 @@ class GEXHistoryImporter:
             if isinstance(max_priors_serialized, list):
                 max_priors_serialized = json.dumps(max_priors_serialized)
             try:
-                timestamp_epoch = int(payload.timestamp.timestamp())
+                epoch_ms = int(payload.timestamp.timestamp() * 1000)
             except Exception:
-                timestamp_epoch = int(datetime.utcnow().timestamp())
+                epoch_ms = int(datetime.utcnow().timestamp() * 1000)
             processed.append(
                 ProcessedRecord(
                     payload=payload,
                     raw_record=record,
                     endpoint=payload_endpoint,
-                    timestamp_epoch=timestamp_epoch,
+                    epoch_ms=epoch_ms,
                     net_gex_value=net_gex_value,
                     max_priors_serialized=max_priors_serialized,
                 )
@@ -237,7 +237,7 @@ class GEXHistoryImporter:
             payload = item.payload
             rows.append(
                 [
-                    payload.timestamp,
+                    item.epoch_ms,
                     payload.ticker,
                     payload.spot_price,
                     payload.zero_gamma,
@@ -259,7 +259,7 @@ class GEXHistoryImporter:
             conn.executemany(
                 """
                 INSERT INTO gex_snapshots (
-                    timestamp, ticker, spot_price, zero_gamma, net_gex,
+                    epoch_ms, ticker, spot_price, zero_gamma, net_gex,
                     min_dte, sec_min_dte, major_pos_vol, major_pos_oi,
                     major_neg_vol, major_neg_oi, sum_gex_vol, sum_gex_oi,
                     delta_risk_reversal, max_priors
@@ -276,13 +276,13 @@ class GEXHistoryImporter:
         if not strikes:
             return
         endpoint = processed.endpoint or "gex_zero"
-        trade_day = payload.timestamp.date()
+        trade_day = payload.timestamp.astimezone(timezone.utc).date()
         key = (payload.ticker, endpoint, trade_day)
         entries = []
         for strike in strikes:
             entries.append(
                 {
-                    "timestamp": payload.timestamp.isoformat(),
+                    "epoch_ms": processed.epoch_ms,
                     "ticker": payload.ticker,
                     "endpoint": endpoint,
                     "strike": strike.strike,
