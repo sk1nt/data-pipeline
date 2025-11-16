@@ -2,40 +2,62 @@
 
 Generated: 2025-11-09T20:00:39.564114Z
 
-## data/parquet/gex/2025/10/NQ_NDX/unknown/strikes.parquet
-- Size: 2354 bytes
-- Dates:
-  - 2025-10-28
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251027.strikes.parquet
+- Size: 10,203,655 bytes
+- Date: 2025-10-27
 
-## data/parquet/gex/2025/10/_legacy/data_0.parquet
-- Size: 451321861 bytes
-- Dates:
-  - 2025-10-01
-  - 2025-10-02
-  - 2025-10-03
-  - 2025-10-06
-  - 2025-10-07
-  - 2025-10-08
-  - 2025-10-09
-  - 2025-10-10
-  - 2025-10-13
-  - 2025-10-14
-  - 2025-10-15
-  - 2025-10-16
-  - 2025-10-17
-  - 2025-10-20
-  - 2025-10-28
-  - 2025-10-29
-  - 2025-10-30
-  - 2025-10-31
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251028.strikes.parquet
+- Size: 5,870,038 bytes
+- Date: 2025-10-28
 
-## data/parquet/gex/2025/11/NQ_NDX/gex_zero/strikes.parquet
-- Size: 2091 bytes
-- Dates:
-  - 2025-11-09
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251029.strikes.parquet
+- Size: 5,834,127 bytes
+- Date: 2025-10-29
 
-## data/parquet/gex/2025/11/_legacy/data_0.parquet
-- Size: 63152409 bytes
-- Dates:
-  - 2025-11-04
-  - 2025-11-06
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251030.strikes.parquet
+- Size: 13,688,690 bytes
+- Date: 2025-10-30
+
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251031.strikes.parquet
+- Size: 18,327,566 bytes
+- Date: 2025-10-31
+
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251103.strikes.parquet
+- Size: 15,462,941 bytes
+- Date: 2025-11-03
+
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251104.strikes.parquet
+- Size: 16,786,665 bytes
+- Date: 2025-11-04
+
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251105.strikes.parquet
+- Size: 14,187,542 bytes
+- Date: 2025-11-05
+
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251106.strikes.parquet
+- Size: 19,880,926 bytes
+- Date: 2025-11-06
+
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251107.strikes.parquet
+- Size: 20,557,052 bytes
+- Date: 2025-11-07
+
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251110.strikes.parquet
+- Size: 14,060,902 bytes
+- Date: 2025-11-10
+
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251111.strikes.parquet
+- Size: 14,773,763 bytes
+- Date: 2025-11-11
+
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251112.strikes.parquet
+- Size: 16,035,003 bytes
+- Date: 2025-11-12
+
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251113.strikes.parquet
+- Size: 19,806,516 bytes
+- Date: 2025-11-13
+
+## data/parquet/gexbot/NQ_NDX/gex_zero/20251114.strikes.parquet
+- Size: 19,493,426 bytes
+- Date: 2025-11-14

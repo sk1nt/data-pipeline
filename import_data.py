@@ -100,7 +100,7 @@ class DataImporter:
         self.stats['gex_files_processed'] = len(json_files)
 
         snapshot_schema = """
-        timestamp TIMESTAMP,
+        epoch_ms BIGINT,
         ticker VARCHAR,
         spot_price DOUBLE,
         zero_gamma DOUBLE,
@@ -117,7 +117,7 @@ class DataImporter:
         max_priors VARCHAR
         """
         strike_schema = """
-        timestamp TIMESTAMP,
+        epoch_ms BIGINT,
         ticker VARCHAR,
         strike DOUBLE,
         gamma DOUBLE,
@@ -154,7 +154,7 @@ class DataImporter:
             snapshot_insert_template = """
             INSERT INTO gex_snapshots
             SELECT
-                to_timestamp(timestamp) AS timestamp,
+                CAST(timestamp * 1000 AS BIGINT) AS epoch_ms,
                 ticker,
                 spot AS spot_price,
                 zero_gamma,
@@ -175,7 +175,7 @@ class DataImporter:
             strike_insert_template = """
             INSERT INTO gex_strikes
             SELECT
-                to_timestamp(timestamp) AS timestamp,
+                CAST(timestamp * 1000 AS BIGINT) AS epoch_ms,
                 ticker,
                 CAST(strike_array[1] AS DOUBLE) AS strike,
                 CAST(strike_array[2] AS DOUBLE) AS gamma,

@@ -8,6 +8,7 @@ import datetime as dt
 import time
 from pathlib import Path
 import duckdb
+from zoneinfo import ZoneInfo
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,17 +26,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def delete_from_gex_data(cutoff_ts: dt.datetime, dry_run: bool) -> None:
+def delete_from_gex_data(cutoff_epoch_ms: int, dry_run: bool) -> None:
     conn = duckdb.connect("data/gex_data.db")
     try:
         for table in ["gex_snapshots", "gex_strikes"]:
-            stmt = f"DELETE FROM {table} WHERE timestamp < ?"
+            stmt = f"DELETE FROM {table} WHERE epoch_ms < ?"
             if dry_run:
-                count = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE timestamp < ?", [cutoff_ts]).fetchone()[0]
+                count = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE epoch_ms < ?", [cutoff_epoch_ms]).fetchone()[0]
                 print(f"[dry-run] {table}: would delete {count:,} rows")
             else:
-                conn.execute(stmt, [cutoff_ts])
-                print(f"{table}: deleted rows before {cutoff_ts.date()}")
+                conn.execute(stmt, [cutoff_epoch_ms])
+                print(f"{table}: deleted rows before epoch_ms={cutoff_epoch_ms}")
     finally:
         conn.close()
 
@@ -86,10 +87,12 @@ def prune_parquet(root: Path, cutoff: dt.date, dry_run: bool) -> None:
 def main() -> None:
     args = parse_args()
     cutoff_date = dt.datetime.fromisoformat(args.cutoff).date()
-    cutoff_ts = dt.datetime.combine(cutoff_date, dt.time.min)
-    epoch_cutoff = int(cutoff_ts.timestamp())
+    ny_tz = ZoneInfo("America/New_York")
+    cutoff_dt = dt.datetime.combine(cutoff_date, dt.time.min, tzinfo=ny_tz)
+    cutoff_epoch_ms = int(cutoff_dt.astimezone(dt.timezone.utc).timestamp() * 1000)
+    epoch_cutoff = int(cutoff_dt.timestamp())
 
-    delete_from_gex_data(cutoff_ts, args.dry_run)
+    delete_from_gex_data(cutoff_epoch_ms, args.dry_run)
     delete_from_gex_history(epoch_cutoff, args.dry_run)
     prune_parquet(Path("data/parquet/gex"), cutoff_date, args.dry_run)
 

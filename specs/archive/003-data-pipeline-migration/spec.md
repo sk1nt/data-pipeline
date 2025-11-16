@@ -94,7 +94,7 @@ As a developer, I want comprehensive testing for all data sources with data inte
 - **FR-004**: System MUST handle POST requests to /uw for universal webhook payload persistence.
 - **FR-005**: System MUST persist GEX snapshots, strikes, and webhook data to the established gex_data.db DuckDB database (gex_snapshots, gex_strikes, universal_webhooks, option_trades_events tables), and history queue/import metadata to gex_data.db DuckDB database.
 - **FR-006**: System MUST support all configuration options, environment variables, and command-line arguments from the original data-pipeline.py.
-- **FR-007**: System MUST maintain the same directory structure for data storage (data/gex_data.db, data/gex_data.db, data/parquet/gex/, data/source/gexbot/).
+- **FR-007**: System MUST maintain the same directory structure for data storage (data/gex_data.db, data/gex_data.db, data/parquet/gexbot/<ticker>/<endpoint>/<YYYYMMDD>.strikes.parquet, data/source/gexbot/).
 - **FR-008**: System MUST provide data integrity validation and spot checking across timestamps for all data sources (GEX payloads, historical imports, webhooks).
 - **FR-009**: System MUST never overwrite established clean data in data folder during implementation or operation.
 

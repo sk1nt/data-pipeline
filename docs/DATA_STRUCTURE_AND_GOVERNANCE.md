@@ -28,24 +28,20 @@ Canonical Directory Layout
 
 - `data/source/gexbot/<ticker>/<endpoint>/YYYY-MM-DD_*.json`
   - Raw history snapshots downloaded from GEXBot (temporary staging).
-- `data/parquet/gex/YYYY/MM/<ticker>/<endpoint>/<YYYYMMDD>.parquet`
+- `data/parquet/gexbot/<ticker>/<endpoint>/<YYYYMMDD>.strikes.parquet`
   - Canonical strike history per trading day (mounted via DuckDB view `parquet_gex_strikes`).
 
 > **Note (2025-11-11):** `gex_bridge_*` tables have been removed. Canonical data lives in
-> `data/parquet/gex/...` with DuckDB views, while raw JSON remains under `data/source/gexbot/...`.
+> `data/parquet/gexbot/<ticker>/<endpoint>/<YYYYMMDD>.strikes.parquet` with DuckDB views,
+> while raw JSON remains under `data/source/gexbot/...`.
   - Rule: Parquet files are final outputs; downstream services read only from here. All writes must go through the import pipeline.
 
 Import Flow (high-level)
 ------------------------
 1. A job record is created or queued in the history tables (`gex_history_queue` inside `data/gex_data.db`) with `status='pending'` and a `url` pointing to the source JSON.
-2. The import runner (manual CLI: `src/import_gex_history_safe.py` or the HTTP endpoint `/gex_history_url`) picks a `pending` job.
-3. `download_to_staging(url, ticker, endpoint)` downloads the JSON to `data/source/gexbot/` and performs a light JSON parse/validation.
-4. `safe_import(staged_path, duckdb_path, publish=True)`:
-   - Loads JSON into pandas, validates required columns (at minimum `timestamp`, `ticker`, `spot`).
-   - Registers DataFrame as `batch_df` and creates `staging_strikes_<job_id>` in DuckDB.
-   - Runs integrity checks (non-zero records, no null timestamps).
-   - Inserts into `strikes` table in DuckDB (transient metadata) and marks job completed in the job store.
-  - Writes canonical rows into `gex_snapshots` / `gex_strikes` (no Parquet export).
+2. The import runner (manual CLI: `python scripts/import_gex_history.py --url ...` or the HTTP endpoint `/gex_history_url`) picks a `pending` job.
+3. The runner downloads the JSON to `data/source/gexbot/<ticker>/<endpoint>/` and performs light validation of the payload.
+4. `GEXHistoryImporter` streams the JSON through DuckDB, writing canonical `gex_snapshots` / `gex_strikes` rows (stored as UTC epoch milliseconds) and exporting strikes to Parquet.
 5. Job store records `records_processed` and `status` (`completed`|`failed`).
 
 Export Rule
@@ -98,10 +94,10 @@ Change Management
 
 Appendix: Commands
 ------------------
-- Run import CLI (process latest pending job):
+- Run import CLI (process a specific URL without hitting FastAPI):
 
 ```bash
-python src/import_gex_history_safe.py
+python scripts/import_gex_history.py --url https://hist.gex.bot/... --ticker SPX --endpoint gex_zero
 ```
 
 - Run the server (FastAPI) locally:

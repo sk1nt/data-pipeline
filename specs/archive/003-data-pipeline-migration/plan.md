@@ -56,7 +56,7 @@ src/
 
 data/
 ├── gex_data.db          # DuckDB database for imported data
-├── parquet/gex/         # Parquet files for historical data
+├── parquet/gexbot/<ticker>/<endpoint>/<YYYYMMDD>.strikes.parquet  # Parquet files for historical data
 └── source/gexbot/       # Staged downloaded files
 
 tests/

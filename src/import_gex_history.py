@@ -6,53 +6,22 @@ downloads JSON data, parses with full schema support, and stores
 snapshots in DuckDB with strikes exported to Parquet.
 """
 
-import json
-import os
 import re
-import threading
-from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Any, Dict, List, Union, Iterable
-from decimal import Decimal
-from datetime import datetime, timezone
+from datetime import datetime
 import datetime as dt
 from urllib.parse import urlsplit
 
 import requests
-import ijson
-import polars as pl
 
+from .config import settings
 from .lib.gex_history_queue import gex_history_queue
 from .lib.gex_database import gex_db
 from .lib.logging_config import setup_logging
-from .models.api_models import GEXPayload, GEXStrike
 
 # Setup logging
 logger = setup_logging()
 CHUNK_SIZE = 5000
-
-
-def convert_decimals(obj: Any) -> Any:
-    """Recursively convert Decimal objects to floats for JSON serialization."""
-    if isinstance(obj, Decimal):
-        return float(obj)
-    elif isinstance(obj, dict):
-        return {k: convert_decimals(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_decimals(item) for item in obj]
-    else:
-        return obj
-
-
-@dataclass
-class ProcessedRecord:
-    payload: GEXPayload
-    raw_record: Dict[str, Any]
-    endpoint: str
-    epoch_ms: int
-    net_gex_value: Optional[float]
-    max_priors_serialized: Optional[str]
 
 
 class GEXHistoryImporter:
@@ -60,15 +29,12 @@ class GEXHistoryImporter:
 
     def __init__(self):
         """Initialize the importer."""
-        self.data_dir = Path("data")
-        self.source_dir = self.data_dir / "source" / "gexbot"
+        self.data_dir = settings.data_path
+        self.source_dir = settings.staging_path
         self.source_dir.mkdir(parents=True, exist_ok=True)
         self.chunk_size = CHUNK_SIZE
-        self.parquet_dir = self.data_dir / "parquet" / "gex"
+        self.parquet_dir = settings.parquet_path
         self.parquet_dir.mkdir(parents=True, exist_ok=True)
-        self._strike_buffers: Dict[
-            tuple[str, str, dt.date], List[Dict[str, Any]]
-        ] = defaultdict(list)
 
     def process_queue(self) -> None:
         """Process all pending jobs in the history queue."""
@@ -90,9 +56,10 @@ class GEXHistoryImporter:
 
         # Download the data
         local_file = self._download_file(url, ticker, endpoint)
+        trade_day = self._resolve_trade_day(local_file)
 
         # Parse and import the data
-        imported_count = self._import_data(local_file, ticker, endpoint)
+        imported_count = self._import_data(local_file, ticker, endpoint, trade_day)
 
         # Mark job as completed
         gex_history_queue.mark_job_completed(job_id)
@@ -139,33 +106,34 @@ class GEXHistoryImporter:
         timestamp = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         return f"gex_history_{timestamp}.json"
 
+    def _resolve_trade_day(self, local_file: Path) -> dt.date:
+        match = re.search(r"(\d{4}-\d{2}-\d{2})", local_file.name)
+        if match:
+            try:
+                return datetime.strptime(match.group(1), "%Y-%m-%d").date()
+            except ValueError:
+                pass
+        return datetime.utcnow().date()
+
     @staticmethod
     def _safe_name(value: str) -> str:
         return (value or "unknown").replace("/", "_").replace(" ", "_")
 
-    def _import_data(self, file_path: Path, ticker: str, endpoint: str) -> int:
+    def _import_data(self, file_path: Path, ticker: str, endpoint: str, trade_day: dt.date) -> int:
         """Import data from downloaded file."""
         logger.info(f"Importing data from {file_path}")
 
-        imported_count = 0
-        error_logged = False
-
-        path_locks: Dict[Path, threading.Lock] = defaultdict(threading.Lock)
         staging_table = f"staging_raw_{ticker.lower()}_{int(datetime.utcnow().timestamp())}"
         try:
             self._load_into_staging(file_path, staging_table)
-            processed_batch = self._prepare_from_staging(staging_table, endpoint)
-            if processed_batch:
-                self._store_snapshots_batch(processed_batch)
-                for processed in processed_batch:
-                    self._buffer_strikes(processed)
-                imported_count += len(processed_batch)
+            inserted = self._insert_snapshots_from_staging(staging_table, ticker, trade_day)
+            strike_rows = self._insert_strikes_from_staging(staging_table, ticker, trade_day)
+            self._export_strikes_to_parquet(staging_table, ticker, endpoint, trade_day)
+            logger.info("Inserted %s snapshots and %s strikes", inserted, strike_rows)
         finally:
             self._drop_staging(staging_table)
 
-        logger.info(f"Imported {imported_count} snapshots from {file_path}")
-        self._flush_buffered_strikes(path_locks)
-        return imported_count
+        return inserted
 
     def _load_into_staging(self, file_path: Path, table_name: str) -> None:
         with gex_db.gex_data_connection() as conn:
@@ -177,164 +145,117 @@ class GEXHistoryImporter:
                 """
             )
 
-    def _prepare_from_staging(self, table_name: str, endpoint: str) -> List[ProcessedRecord]:
-        processed: List[ProcessedRecord] = []
-        with gex_db.gex_data_connection() as conn:
-            rows = conn.execute(f"SELECT * FROM {table_name}").fetchall()
-            columns = [desc[0] for desc in conn.description]
-        for row in rows:
-            record = dict(zip(columns, row))
-            record_copy = {k: v for k, v in record.items() if k != 'strikes'}
-            if 'max_priors' in record_copy and isinstance(record_copy['max_priors'], list):
-                record_copy['max_priors'] = json.dumps(record_copy['max_priors'])
-            if 'timestamp' in record_copy and isinstance(record_copy['timestamp'], int):
-                record_copy['timestamp'] = datetime.fromtimestamp(record_copy['timestamp'], tz=timezone.utc)
-            payload = GEXPayload(**record_copy)
-            strikes = []
-            if 'strikes' in record and isinstance(record['strikes'], list):
-                for s in record['strikes']:
-                    if isinstance(s, list) and len(s) >= 4:
-                        strikes.append(
-                            GEXStrike(
-                                strike=float(s[0]),
-                                gamma_now=float(s[1]),
-                                vanna=float(s[2]) if len(s) > 2 else None,
-                                history=s[3] if len(s) > 3 and isinstance(s[3], list) else None,
-                            )
-                        )
-            payload.strikes = strikes if strikes else None
-            payload_endpoint = endpoint or payload.endpoint or "gex_zero"
-            payload.endpoint = payload_endpoint
-            net_gex_value = payload.net_gex_vol if payload.net_gex_vol is not None else payload.net_gex
-            max_priors_serialized = payload.max_priors
-            if isinstance(max_priors_serialized, list):
-                max_priors_serialized = json.dumps(max_priors_serialized)
-            try:
-                epoch_ms = int(payload.timestamp.timestamp() * 1000)
-            except Exception:
-                epoch_ms = int(datetime.utcnow().timestamp() * 1000)
-            processed.append(
-                ProcessedRecord(
-                    payload=payload,
-                    raw_record=record,
-                    endpoint=payload_endpoint,
-                    epoch_ms=epoch_ms,
-                    net_gex_value=net_gex_value,
-                    max_priors_serialized=max_priors_serialized,
-                )
-            )
-        return processed
 
     def _drop_staging(self, table_name: str) -> None:
         with gex_db.gex_data_connection() as conn:
             conn.execute(f"DROP TABLE IF EXISTS {table_name}")
 
-    def _store_snapshots_batch(self, batch: List[ProcessedRecord]) -> None:
-        if not batch:
-            return
-        rows = []
-        for item in batch:
-            payload = item.payload
-            rows.append(
-                [
-                    item.epoch_ms,
-                    payload.ticker,
-                    payload.spot_price,
-                    payload.zero_gamma,
-                    item.net_gex_value,
-                    payload.min_dte,
-                    payload.sec_min_dte,
-                    payload.major_pos_vol,
-                    payload.major_pos_oi,
-                    payload.major_neg_vol,
-                    payload.major_neg_oi,
-                    payload.sum_gex_vol,
-                    payload.sum_gex_oi,
-                    payload.delta_risk_reversal,
-                    item.max_priors_serialized,
-                ]
-            )
-
+    def _insert_snapshots_from_staging(self, table_name: str, ticker: str, trade_day: dt.date) -> int:
+        ticker_sql = (ticker or "UNKNOWN").upper()
+        day_str = trade_day.isoformat()
         with gex_db.gex_data_connection() as conn:
-            conn.executemany(
+            conn.execute(
                 """
+                DELETE FROM gex_snapshots
+                WHERE ticker = ? AND CAST(to_timestamp(timestamp/1000.0) AS DATE) = CAST(? AS DATE)
+                """,
+                [ticker_sql, day_str],
+            )
+            conn.execute(
+                f"""
                 INSERT INTO gex_snapshots (
-                    epoch_ms, ticker, spot_price, zero_gamma, net_gex,
+                    timestamp, ticker, spot_price, zero_gamma, net_gex,
                     min_dte, sec_min_dte, major_pos_vol, major_pos_oi,
                     major_neg_vol, major_neg_oi, sum_gex_vol, sum_gex_oi,
                     delta_risk_reversal, max_priors
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-
-
-
-    def _buffer_strikes(self, processed: ProcessedRecord) -> None:
-        payload = processed.payload
-        strikes = payload.strikes or []
-        if not strikes:
-            return
-        endpoint = processed.endpoint or "gex_zero"
-        trade_day = payload.timestamp.astimezone(timezone.utc).date()
-        key = (payload.ticker, endpoint, trade_day)
-        entries = []
-        for strike in strikes:
-            entries.append(
-                {
-                    "epoch_ms": processed.epoch_ms,
-                    "ticker": payload.ticker,
-                    "endpoint": endpoint,
-                    "strike": strike.strike,
-                    "gamma": strike.gamma_now,
-                    "oi_gamma": strike.oi_gamma,
-                    "priors": json.dumps(strike.history) if strike.history else None,
-                }
-            )
-        self._strike_buffers[key].extend(entries)
-
-    def _flush_buffered_strikes(
-        self, path_locks: Dict[Path, threading.Lock]
-    ) -> None:
-        if not self._strike_buffers:
-            return
-
-        for key, rows in self._strike_buffers.items():
-            ticker, endpoint, trade_day = key
-            endpoint_clean = endpoint.replace("/", "_").replace(" ", "_")
-            year = trade_day.year
-            month = f"{trade_day.month:02d}"
-            day_str = trade_day.strftime("%Y%m%d")
-            target_dir = (
-                self.parquet_dir
-                / f"{year}"
-                / month
-                / ticker
-                / endpoint_clean
-            ) / day_str
-            target_dir.mkdir(parents=True, exist_ok=True)
-            parquet_file = target_dir / "strikes.parquet"
-
-            df = pl.DataFrame(rows)
-            lock = path_locks[parquet_file]
-            with lock:
-                if parquet_file.exists():
-                    existing = pl.read_parquet(parquet_file)
-                    df = (
-                        pl.concat([existing, df], how="vertical_relaxed")
-                        .unique(
-                            subset=["timestamp", "ticker", "endpoint", "strike"],
-                            keep="last",
-                        )
-                    )
-                df.write_parquet(str(parquet_file), compression="zstd")
-                logger.info(
-                    "Wrote %s strike rows to %s", len(df), parquet_file
                 )
+                SELECT
+                    CAST(timestamp * 1000 AS BIGINT) AS timestamp,
+                    UPPER(COALESCE(ticker, '{ticker_sql}')) AS ticker,
+                    spot AS spot_price,
+                    zero_gamma,
+                    COALESCE(sum_gex_vol, 0) AS net_gex,
+                    CAST(min_dte AS INTEGER) AS min_dte,
+                    CAST(sec_min_dte AS INTEGER) AS sec_min_dte,
+                    major_pos_vol,
+                    major_pos_oi,
+                    major_neg_vol,
+                    major_neg_oi,
+                    sum_gex_vol,
+                    sum_gex_oi,
+                    delta_risk_reversal,
+                    CASE WHEN max_priors IS NULL THEN NULL ELSE to_json(max_priors) END AS max_priors
+                FROM {table_name}
+                """
+            )
+            inserted = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+        return inserted
 
-        self._strike_buffers.clear()
+    def _insert_strikes_from_staging(self, table_name: str, ticker: str, trade_day: dt.date) -> int:
+        ticker_sql = (ticker or "UNKNOWN").upper()
+        day_str = trade_day.isoformat()
+        with gex_db.gex_data_connection() as conn:
+            conn.execute(
+                """
+                DELETE FROM gex_strikes
+                WHERE ticker = ? AND CAST(to_timestamp(timestamp/1000.0) AS DATE) = CAST(? AS DATE)
+                """,
+                [ticker_sql, day_str],
+            )
+            strike_count = conn.execute(
+                f"SELECT COALESCE(SUM(array_length(strikes)), 0) FROM {table_name}"
+            ).fetchone()[0]
+            conn.execute(
+                f"""
+                INSERT INTO gex_strikes (
+                    timestamp, ticker, strike, gamma, oi_gamma, priors
+                )
+                SELECT
+                    CAST(t.timestamp * 1000 AS BIGINT) AS timestamp,
+                    '{ticker_sql}' AS ticker,
+                    TRY_CAST(strike[1] AS DOUBLE) AS strike,
+                    TRY_CAST(strike[2] AS DOUBLE) AS gamma,
+                    TRY_CAST(strike[3] AS DOUBLE) AS oi_gamma,
+                    CASE WHEN array_length(strike) >= 4 THEN strike[4] ELSE NULL END AS priors
+                FROM {table_name} AS t,
+                     UNNEST(t.strikes) AS strike_entry(strike)
+                WHERE t.strikes IS NOT NULL
+                """
+            )
+        return strike_count
 
-
+    def _export_strikes_to_parquet(
+        self,
+        table_name: str,
+        ticker: str,
+        endpoint: str,
+        trade_day: dt.date,
+    ) -> None:
+        ticker_sql = (ticker or "UNKNOWN").upper()
+        endpoint_clean = (endpoint or "gex_zero").replace("/", "_").replace(" ", "_")
+        day_str = trade_day.strftime("%Y%m%d")
+        target_dir = self.parquet_dir / ticker_sql / endpoint_clean
+        target_dir.mkdir(parents=True, exist_ok=True)
+        parquet_file = target_dir / f"{day_str}.strikes.parquet"
+        if parquet_file.exists():
+            parquet_file.unlink()
+        select_sql = f"""
+            SELECT
+                CAST(t.timestamp * 1000 AS BIGINT) AS timestamp,
+                '{ticker_sql}' AS ticker,
+                '{endpoint_clean}' AS endpoint,
+                TRY_CAST(strike[1] AS DOUBLE) AS strike,
+                TRY_CAST(strike[2] AS DOUBLE) AS gamma,
+                TRY_CAST(strike[3] AS DOUBLE) AS oi_gamma,
+                CASE WHEN array_length(strike) >= 4 THEN strike[4] ELSE NULL END AS priors
+            FROM {table_name} AS t,
+                 UNNEST(t.strikes) AS strike_entry(strike)
+            WHERE t.strikes IS NOT NULL
+        """
+        with gex_db.gex_data_connection() as conn:
+            conn.execute(
+                f"COPY ({select_sql}) TO '{parquet_file.as_posix()}' (FORMAT 'parquet', COMPRESSION 'zstd')"
+            )
 
 def process_historical_imports():
     """Main function to process historical import queue."""
