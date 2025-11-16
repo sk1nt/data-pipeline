@@ -54,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--convert-timestamp-to-ms", action="store_true", help="Emit ts_ms epoch milliseconds column in Parquet instead of or in addition to timestamp")
     parser.add_argument("--atomic-writes", action="store_true", help="Write to temp file and atomically rename to destination once complete")
     parser.add_argument("--skip-existing", action="store_true", help="Skip processing if output file already exists")
+    parser.add_argument("--max-memory-mb", type=int, default=0, help="Optional: maximum memory in MB to allow per-worker before flush (0=disabled)")
     return parser.parse_args()
 
 
@@ -129,6 +130,8 @@ def run_day(python: str, date_str: str, args: argparse.Namespace) -> int:
         cmd.append("--atomic-writes")
     if args.skip_existing:
         cmd.append("--skip-existing")
+    if args.max_memory_mb:
+        cmd.extend(["--max-memory-mb", str(args.max_memory_mb)])
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(Path(".").resolve())

@@ -24,7 +24,7 @@ import logging
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,7 +43,7 @@ if str(PROJECT_ROOT / "src") not in sys.path:
 from src.config import settings
 from src.import_gex_history import process_historical_imports
 from src.lib.gex_history_queue import gex_history_queue
-from src.models.api_models import GEXHistoryRequest
+from src.models.api_models import GEXHistoryRequest, WebhookPayload
 from src.lib.redis_client import RedisClient
 from src.services.gexbot_poller import GEXBotPoller, GEXBotPollerSettings
 from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreamer
@@ -511,6 +511,17 @@ class ServiceManager:
 
 service_manager = ServiceManager()
 
+UW_OPTION_LATEST_KEY = "uw:option_trades_super_algo:latest"
+UW_OPTION_HISTORY_KEY = "uw:option_trades_super_algo:history"
+UW_MARKET_LATEST_KEY = "uw:market_agg_socket:latest"
+UW_MARKET_HISTORY_KEY = "uw:market_agg_socket:history"
+UW_HISTORY_LIMIT = 200
+UW_CACHE_TTL_SECONDS = 900
+SUPPORTED_WEBHOOK_TOPICS = {
+    "option_trades_super_algo",
+    "market_agg_socket",
+}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -754,6 +765,42 @@ async def gex_history_endpoint(request: Request, background_tasks: BackgroundTas
     }
 
 
+@app.post("/uw")
+async def universal_webhook(request: Request):
+    """Accept payloads from monkeyscript/Unusual Whales style webhooks."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+
+    topic = _extract_webhook_topic(body)
+    if not topic:
+        raise HTTPException(status_code=422, detail="Missing topic/object field")
+
+    normalized_topic = topic.lower()
+    if normalized_topic not in SUPPORTED_WEBHOOK_TOPICS:
+        LOGGER.info("/uw received unsupported topic: %s", topic)
+        return {"status": "ignored", "topic": topic}
+
+    redis_client = _get_redis_client()
+
+    stamped_payload = {
+        "topic": normalized_topic,
+        "received_at": datetime.now(timezone.utc).isoformat(),
+        "data": body,
+    }
+
+    if normalized_topic == "option_trades_super_algo":
+        _cache_option_trade(redis_client, stamped_payload)
+    elif normalized_topic == "market_agg_socket":
+        _cache_market_agg(redis_client, stamped_payload)
+
+    return {"status": "received", "topic": normalized_topic}
+
+
 @app.get("/lookup/trades")
 async def lookup_trades(symbol: str, source: str = "tastytrade", limit: int = 100) -> Dict[str, Any]:
     """Return recent trades for a given symbol/source pair."""
@@ -821,6 +868,53 @@ def _normalize_string(value: Optional[Any]) -> str:
     if isinstance(value, str):
         return value.strip()
     return str(value).strip()
+
+
+def _extract_webhook_topic(payload: Dict[str, Any]) -> Optional[str]:
+    """Pull the topic/object indicator out of a webhook payload."""
+    candidate_fields = ("topic", "object", "type", "feed", "kind")
+    for field in candidate_fields:
+        value = payload.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    nested = payload.get('payload') or payload.get('data')
+    if isinstance(nested, dict):
+        for field in candidate_fields:
+            value = nested.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _get_redis_client():
+    """Ensure the Redis client exists and return the underlying connection."""
+    try:
+        service_manager._ensure_redis_clients()
+    except Exception:
+        LOGGER.exception("Failed to initialize Redis client")
+    wrapper = service_manager.redis_client
+    if not wrapper:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+    return wrapper.client
+
+
+def _cache_option_trade(redis_conn, payload: Dict[str, Any]) -> None:
+    serialized = json.dumps(payload, default=str)
+    pipe = redis_conn.pipeline()
+    pipe.setex(UW_OPTION_LATEST_KEY, UW_CACHE_TTL_SECONDS, serialized)
+    pipe.lpush(UW_OPTION_HISTORY_KEY, serialized)
+    pipe.ltrim(UW_OPTION_HISTORY_KEY, 0, UW_HISTORY_LIMIT - 1)
+    pipe.execute()
+
+
+def _cache_market_agg(redis_conn, payload: Dict[str, Any]) -> None:
+    serialized = json.dumps(payload, default=str)
+    pipe = redis_conn.pipeline()
+    pipe.setex(UW_MARKET_LATEST_KEY, UW_CACHE_TTL_SECONDS, serialized)
+    pipe.lpush(UW_MARKET_HISTORY_KEY, serialized)
+    pipe.ltrim(UW_MARKET_HISTORY_KEY, 0, UW_HISTORY_LIMIT - 1)
+    pipe.execute()
 
 
 def _infer_endpoint(url: str) -> str:
