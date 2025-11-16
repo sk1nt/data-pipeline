@@ -31,6 +31,10 @@ class FlushWorkerSettings:
     gex_snapshot_db: Path = settings.data_path / "gex_data.db"
     gex_snapshot_prefix: str = "gex:snapshot:"
     gex_dynamic_key: str = "gexbot:symbols:dynamic"
+    tick_db_path: Path = Path(settings.tick_db_path)
+    depth_db_path: Path = Path(settings.depth_db_path)
+    tick_parquet_dir: Path = Path(settings.tick_parquet_dir)
+    depth_parquet_dir: Path = Path(settings.depth_parquet_dir)
 
 
 class RedisFlushWorker:
@@ -147,8 +151,11 @@ class RedisFlushWorker:
             self._last_summary = summary
             return
         df = pd.DataFrame(new_records, columns=["key", "ts", "value"])
+        df["key"] = df["key"].apply(self._normalize_key)
         df["day"] = pd.to_datetime(df["ts"], unit="ms").dt.date
         self._write_to_duckdb(df)
+        self._write_tick_outputs(df)
+        self._write_depth_outputs(df)
         self._write_parquet(df)
         gex_summary = self._flush_gex_snapshots()
         if last_updates:
@@ -195,6 +202,252 @@ class RedisFlushWorker:
             day_dir.mkdir(parents=True, exist_ok=True)
             filename = day_dir / f"flush_{flush_ts}.parquet"
             group.to_parquet(filename, index=False)
+
+    def _write_tick_outputs(self, df: pd.DataFrame) -> None:
+        if df.empty or "key" not in df:
+            return
+        tick_df = df[df["key"].str.startswith("ts:trade:")].copy()
+        if tick_df.empty:
+            return
+        parts = tick_df["key"].str.split(":", expand=True)
+        if parts.shape[1] < 5:
+            return
+        tick_df["metric"] = parts[2]
+        tick_df["symbol"] = parts[3].str.upper()
+        tick_df["source"] = parts[4].str.upper()
+        pivot = tick_df.pivot_table(
+            index=["symbol", "source", "ts"],
+            columns="metric",
+            values="value",
+            aggfunc="last",
+        ).reset_index()
+        if pivot.empty:
+            return
+        pivot.columns = [col if isinstance(col, str) else col[0] for col in pivot.columns]
+        if "price" not in pivot.columns:
+            return
+        pivot["size"] = pivot.get("size", 0.0).fillna(0.0)
+        pivot["timestamp"] = pd.to_datetime(pivot["ts"], unit="ms", utc=True)
+        pivot["day"] = pivot["timestamp"].dt.strftime("%Y%m%d")
+        parquet_df = pivot[["symbol", "source", "timestamp", "ts", "price", "size", "day"]].rename(
+            columns={"ts": "timestamp_ms"}
+        )
+        self._append_tick_parquet(parquet_df)
+        self._insert_tick_rows(parquet_df)
+
+    def _write_depth_outputs(self, df: pd.DataFrame) -> None:
+        if df.empty or "key" not in df:
+            return
+        depth_df = df[df["key"].str.startswith("ts:depth:")].copy()
+        if depth_df.empty:
+            return
+        parts = depth_df["key"].str.split(":", expand=True)
+        if parts.shape[1] < 7:
+            return
+        depth_df["symbol"] = parts[2].str.upper()
+        depth_df["source"] = parts[3].str.upper()
+        depth_df["side"] = parts[4]
+        depth_df["level"] = pd.to_numeric(parts[5], errors="coerce").astype("Int64")
+        depth_df["field"] = parts[6]
+        depth_df = depth_df.dropna(subset=["level"])
+        if depth_df.empty:
+            return
+        pivot = depth_df.pivot_table(
+            index=["symbol", "source", "ts", "side", "level"],
+            columns="field",
+            values="value",
+            aggfunc="last",
+        ).reset_index()
+        if pivot.empty:
+            return
+        pivot.columns = [col if isinstance(col, str) else col[0] for col in pivot.columns]
+        pivot["price"] = pivot.get("price", pd.NA)
+        pivot["size"] = pivot.get("size", pd.NA)
+        pivot["timestamp"] = pd.to_datetime(pivot["ts"], unit="ms", utc=True)
+        pivot["day"] = pivot["timestamp"].dt.strftime("%Y%m%d")
+        parquet_df = pivot[[
+            "symbol",
+            "source",
+            "side",
+            "level",
+            "timestamp",
+            "ts",
+            "price",
+            "size",
+            "day",
+        ]].rename(columns={"ts": "timestamp_ms"})
+        self._append_depth_parquet(parquet_df)
+
+    def _append_tick_parquet(self, parquet_df: pd.DataFrame) -> None:
+        if parquet_df.empty:
+            return
+        manifests: List[Tuple[str, str, str, str, int, datetime, datetime]] = []
+        parquet_dir = self.settings.tick_parquet_dir
+        parquet_dir.mkdir(parents=True, exist_ok=True)
+        for (symbol, day), group in parquet_df.groupby(["symbol", "day"]):
+            dest = parquet_dir / symbol / f"{day}.parquet"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            subset = group.drop(columns=["day"]).sort_values("timestamp")
+            subset.to_parquet(dest, index=False)
+            manifests.append(
+                (
+                    symbol,
+                    ",".join(sorted(set(subset["source"]))),
+                    day,
+                    dest.as_posix(),
+                    len(subset),
+                    subset["timestamp"].iloc[0].to_pydatetime(),
+                    subset["timestamp"].iloc[-1].to_pydatetime(),
+                )
+            )
+        self._update_tick_manifest(manifests)
+
+    def _append_depth_parquet(self, parquet_df: pd.DataFrame) -> None:
+        if parquet_df.empty:
+            return
+        manifests: List[Tuple[str, str, str, str, int, datetime, datetime]] = []
+        parquet_dir = self.settings.depth_parquet_dir
+        parquet_dir.mkdir(parents=True, exist_ok=True)
+        for (symbol, day), group in parquet_df.groupby(["symbol", "day"]):
+            dest = parquet_dir / symbol / f"{day}.parquet"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            subset = group.drop(columns=["day"]).sort_values(["timestamp", "side", "level"])
+            subset.to_parquet(dest, index=False)
+            manifests.append(
+                (
+                    symbol,
+                    ",".join(sorted(set(subset["source"]))),
+                    day,
+                    dest.as_posix(),
+                    len(subset),
+                    subset["timestamp"].iloc[0].to_pydatetime(),
+                    subset["timestamp"].iloc[-1].to_pydatetime(),
+                )
+            )
+        self._update_depth_manifest(manifests)
+
+    def _insert_tick_rows(self, parquet_df: pd.DataFrame) -> None:
+        if parquet_df.empty:
+            return
+        rows = parquet_df.copy()
+        rows["volume"] = rows["size"].fillna(0).round().astype(int)
+        rows["tick_type"] = "trade"
+        conn = duckdb.connect(str(self.settings.tick_db_path))
+        try:
+            conn.execute("DESCRIBE tick_data")
+        except duckdb.CatalogException:
+            LOGGER.warning("tick_data table missing in %s; skipping tick inserts", self.settings.tick_db_path)
+            conn.close()
+            return
+        conn.register(
+            "tick_flush_df",
+            rows[["symbol", "timestamp", "price", "volume", "tick_type", "source"]],
+        )
+        next_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM tick_data").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO tick_data
+            SELECT
+                row_number() OVER () + ? AS id,
+                symbol,
+                timestamp,
+                price,
+                volume,
+                tick_type,
+                source
+            FROM tick_flush_df
+            """,
+            [next_id],
+        )
+        conn.close()
+
+    def _update_tick_manifest(
+        self,
+        rows: List[Tuple[str, str, str, str, int, datetime, datetime]],
+    ) -> None:
+        if not rows:
+            return
+        conn = duckdb.connect(str(self.settings.tick_db_path))
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tick_parquet_manifest (
+                symbol VARCHAR,
+                sources VARCHAR,
+                day VARCHAR,
+                file_path VARCHAR,
+                rows BIGINT,
+                first_ts TIMESTAMP,
+                last_ts TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (symbol, day)
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO tick_parquet_manifest
+            (symbol, sources, day, file_path, rows, first_ts, last_ts, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            rows,
+        )
+        pattern = (self.settings.tick_parquet_dir / "*" / "*.parquet").as_posix()
+        escaped = pattern.replace("'", "''")
+        conn.execute(
+            f"""
+            CREATE OR REPLACE VIEW tick_parquet AS
+            SELECT *
+            FROM read_parquet('{escaped}', union_by_name=true)
+            """
+        )
+        conn.close()
+
+    def _update_depth_manifest(
+        self,
+        rows: List[Tuple[str, str, str, str, int, datetime, datetime]],
+    ) -> None:
+        if not rows:
+            return
+        conn = duckdb.connect(str(self.settings.depth_db_path))
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS depth_parquet_manifest (
+                symbol VARCHAR,
+                sources VARCHAR,
+                day VARCHAR,
+                file_path VARCHAR,
+                rows BIGINT,
+                first_ts TIMESTAMP,
+                last_ts TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (symbol, day)
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO depth_parquet_manifest
+            (symbol, sources, day, file_path, rows, first_ts, last_ts, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            rows,
+        )
+        pattern = (self.settings.depth_parquet_dir / "*" / "*.parquet").as_posix()
+        escaped = pattern.replace("'", "''")
+        conn.execute(
+            f"""
+            CREATE OR REPLACE VIEW depth_parquet AS
+            SELECT *
+            FROM read_parquet('{escaped}', union_by_name=true)
+            """
+        )
+        conn.close()
+
+    @staticmethod
+    def _normalize_key(key: Any) -> str:
+        if isinstance(key, (bytes, bytearray)):
+            return key.decode()
+        return str(key)
 
     def _flush_gex_snapshots(self) -> Dict[str, int]:
         try:
@@ -347,27 +600,6 @@ class RedisFlushWorker:
         df_snapshots = pd.DataFrame(snapshots)
         df_strikes = pd.DataFrame(strikes) if strikes else None
         conn = duckdb.connect(str(self.settings.gex_snapshot_db))
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS gex_snapshots (
-                timestamp BIGINT,
-                ticker VARCHAR,
-                spot_price DOUBLE,
-                zero_gamma DOUBLE,
-                net_gex DOUBLE,
-                min_dte INTEGER,
-                sec_min_dte INTEGER,
-                major_pos_vol DOUBLE,
-                major_pos_oi DOUBLE,
-                major_neg_vol DOUBLE,
-                major_neg_oi DOUBLE,
-                sum_gex_vol DOUBLE,
-                sum_gex_oi DOUBLE,
-                delta_risk_reversal DOUBLE,
-                max_priors VARCHAR
-            )
-            """
-        )
         conn.register("gex_snapshots_flush", df_snapshots)
         conn.execute(
             """
@@ -400,18 +632,6 @@ class RedisFlushWorker:
             """
         )
         if df_strikes is not None and not df_strikes.empty:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS gex_strikes (
-                    timestamp BIGINT,
-                    ticker VARCHAR,
-                    strike DOUBLE,
-                    gamma DOUBLE,
-                    oi_gamma DOUBLE,
-                    priors VARCHAR
-                )
-                """
-            )
             conn.register("gex_strikes_flush", df_strikes)
             conn.execute(
                 """
