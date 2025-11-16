@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Unified data pipeline server keeping legacy GEX endpoints and new services."""
+"""Data pipeline orchestration entrypoint.
+
+This module wires together the FastAPI surface area, background streamers,
+Redis/DuckDB infrastructure, and auxiliary tools (Discord bot, Schwab trader,
+etc.).  Historically we bolted legacy GEX HTTP handlers onto newer realtime
+services, so the documentation here focuses on how everything fits together to
+make operational debugging less painful.  When adding a new service, keep the
+following mental model in mind:
+
+1. "Service" objects are owned by :class:`ServiceManager` and should expose
+   ``start``/``stop`` coroutines plus a ``status`` callable for observability.
+2. FastAPI's ``lifespan`` hook starts the manager when the process boots and
+   awaits shutdown so in-flight asyncio tasks can flush state to Redis.
+3. Anything that touches Redis time-series should reuse ``RedisTimeSeriesClient``
+   so history, lookup and monitoring endpoints continue to behave consistently.
+"""
 from __future__ import annotations
 
 import argparse
@@ -28,6 +43,7 @@ if str(PROJECT_ROOT / "src") not in sys.path:
 from src.config import settings
 from src.import_gex_history import process_historical_imports
 from src.lib.gex_history_queue import gex_history_queue
+from src.models.api_models import GEXHistoryRequest
 from src.lib.redis_client import RedisClient
 from src.services.gexbot_poller import GEXBotPoller, GEXBotPollerSettings
 from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreamer
@@ -47,6 +63,8 @@ NOISY_STREAM_LOGGERS = [
 
 
 class HistoryPayload(BaseModel):
+    """Body schema for the manual history import endpoint."""
+
     url: str
     ticker: Optional[str] = None
     endpoint: Optional[str] = None
@@ -118,6 +136,8 @@ class SchwabStreamingService:
 
 
 class ServiceManager:
+    """Coordinate lifecycle and telemetry for the long-lived pipeline services."""
+
     def __init__(self) -> None:
         self.tastytrade: Optional[TastyTradeStreamer] = None
         self.gex_poller: Optional[GEXBotPoller] = None
@@ -152,17 +172,20 @@ class ServiceManager:
         return self._loop
 
     def start(self) -> None:
+        """Initialize shared clients and launch enabled background services."""
         self._ensure_event_loop()
         self._ensure_redis_clients()
         self._silence_streamer_logs()
-        for service in ("tastytrade", "schwab", "gex_poller", "redis_flush", "discord_bot"):
+        for service in ("tastytrade", "gex_poller", "redis_flush", "discord_bot"):
             self.start_service(service)
 
     async def stop(self) -> None:
-        for service in ("tastytrade", "schwab", "gex_poller", "redis_flush", "discord_bot"):
+        """Stop all managed services in a best-effort fashion."""
+        for service in ("tastytrade", "gex_poller", "redis_flush", "discord_bot"):
             await self.stop_service(service)
 
     def status(self) -> Dict[str, Any]:
+        """Expose a structured snapshot for the ``/status`` endpoint."""
         tasty_status = {
             "running": bool(self.tastytrade and self.tastytrade.is_running),
             "trade_samples": self.trade_counts.get("tastytrade", self.trade_count),
@@ -207,6 +230,7 @@ class ServiceManager:
             self.lookup_service = LookupService(self.redis_client, self.rts)
 
     def start_service(self, name: str) -> None:
+        """Start a specific service by name if it is enabled via settings."""
         name = name.lower()
         self._ensure_event_loop()
         self._ensure_redis_clients()
@@ -258,6 +282,7 @@ class ServiceManager:
             LOGGER.info("Discord bot started")
 
     async def stop_service(self, name: str) -> None:
+        """Stop a running service and clean up the local reference."""
         name = name.lower()
         if name == "tastytrade" and self.tastytrade:
             await self.tastytrade.stop()
@@ -280,6 +305,7 @@ class ServiceManager:
             self.discord_bot = None
 
     async def restart_service(self, name: str) -> None:
+        """Convenience helper for the ``/control`` endpoint."""
         await self.stop_service(name)
         self.start_service(name)
 
@@ -288,16 +314,19 @@ class ServiceManager:
             logging.getLogger(logger_name).setLevel(logging.WARNING)
 
     async def _handle_trade_event(self, payload: Dict[str, Any], source: str = "tastytrade") -> None:
+        """Persist trade ticks to RedisTimeSeries in a thread so I/O stays async friendly."""
         if not self.rts:
             return
         await asyncio.to_thread(self._write_trade_timeseries, payload, source)
 
     async def _handle_depth_event(self, payload: Dict[str, Any], source: str = "tastytrade") -> None:
+        """Persist depth updates and compute cross-feed comparisons."""
         if not self.rts:
             return
         await asyncio.to_thread(self._write_depth_timeseries, payload, source)
 
     def _write_trade_timeseries(self, payload: Dict[str, Any], source: str) -> None:
+        """Write trade price/size samples and keep per-source counters."""
         symbol = payload.get("symbol", "").upper() or "UNKNOWN"
         timestamp_ms = _timestamp_ms(payload.get("timestamp"))
         price = float(payload.get("price", 0.0))
@@ -325,6 +354,7 @@ class ServiceManager:
         self.last_trade_timestamps[normalized_source] = self.last_trade_ts
 
     def _write_depth_timeseries(self, payload: Dict[str, Any], source: str) -> None:
+        """Write depth ladders per level and update in-memory diffs."""
         symbol = payload.get("symbol", "").upper() or "UNKNOWN"
         timestamp_ms = _timestamp_ms(payload.get("timestamp"))
         bids = payload.get("bids") or []
@@ -409,6 +439,7 @@ class ServiceManager:
         self._record_depth_snapshot(symbol, normalized_source, payload)
 
     def _record_depth_snapshot(self, symbol: str, source: str, payload: Dict[str, Any]) -> None:
+        """Store the latest book for each feed and push comparisons into LookupService."""
         normalized_symbol = symbol.upper()
         symbol_snapshots = self.depth_snapshots.setdefault(normalized_symbol, {})
         symbol_snapshots[source] = payload
@@ -423,6 +454,7 @@ class ServiceManager:
 
     @staticmethod
     def _build_depth_comparison(symbol: str, tasty: Dict[str, Any], schwab: Dict[str, Any]) -> Dict[str, Any]:
+        """Summarize spread/bbo variance between the two live sources."""
         tasty_best_bid = tasty.get("bids", [])[:1]
         tasty_best_ask = tasty.get("asks", [])[:1]
         schwab_best_bid = schwab.get("bids", [])[:1]
@@ -462,6 +494,7 @@ class ServiceManager:
 
     @staticmethod
     def _avg_price_diff(a: List[Dict[str, Any]], b: List[Dict[str, Any]], levels: int) -> Optional[float]:
+        """Return the mean price delta for overlapping depth levels."""
         total = 0.0
         count = 0
         for idx in range(levels):
@@ -481,6 +514,7 @@ service_manager = ServiceManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Ensure ServiceManager starts before handling requests and shuts down cleanly."""
     LOGGER.info("Starting services during FastAPI lifespan")
     service_manager.start()
     try:
@@ -495,16 +529,19 @@ app = FastAPI(title="Data Pipeline", lifespan=lifespan)
 
 @app.get("/")
 async def root() -> Dict[str, str]:
+    """Basic readiness probe for load balancers."""
     return {"status": "ok"}
 
 
 @app.get("/health")
 async def health() -> Dict[str, str]:
+    """Explicit health endpoint used by Kubernetes and dashboards."""
     return {"status": "healthy"}
 
 
 @app.get("/status")
 async def status() -> Dict[str, Any]:
+    """Expose the aggregated ServiceManager telemetry."""
     return service_manager.status()
 
 
@@ -514,6 +551,7 @@ CONTROL_SERVICES = {"tastytrade", "schwab", "gex_poller", "redis_flush", "discor
 
 @app.post("/control/{service}/{action}")
 async def control_service(service: str, action: str, request: Request):
+    """Start/stop/restart managed services after verifying the shared token."""
     if not settings.service_control_token:
         raise HTTPException(status_code=403, detail="Service control disabled")
     token = request.headers.get("X-Service-Token") or request.query_params.get("token")
@@ -604,29 +642,100 @@ STATUS_PAGE = """
 
 @app.get("/status.html", response_class=HTMLResponse)
 async def status_page() -> str:
+    """Serve a lightweight HTML dashboard for ops users."""
     return STATUS_PAGE
 
 
 @app.post("/gex_history_url")
-async def gex_history_endpoint(payload: HistoryPayload, background_tasks: BackgroundTasks):
-    url = payload.url.strip()
-    ticker = _normalize_string(payload.ticker)
-    endpoint = _normalize_string(payload.endpoint)
-    metadata = payload.metadata if isinstance(payload.metadata, dict) else None
+async def gex_history_endpoint(request: Request, background_tasks: BackgroundTasks):
+    """Permissive endpoint for historical GEX imports.
 
-    if not endpoint:
-        endpoint = _infer_endpoint(url)
+    Contract: accept any three-field JSON body where ``url`` points to
+    ``https://hist.gex.bot/...``, another field carries a string matching
+    ``gex_*`` (case-insensitive), and the remaining string is treated as
+    the ticker. This keeps compatibility with bespoke clients that don't
+    use consistent key names.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload format")
+
+    url = (body.get('url') or '').strip()
+    if not url:
+        raise HTTPException(status_code=422, detail="Missing url field")
+    if not url.startswith("https://hist.gex.bot/"):
+        raise HTTPException(status_code=422, detail="URL must start with https://hist.gex.bot/")
+
+    # Surface payloads in logs (with large values sanitized) to mirror caller schema.
+    try:
+        log_snapshot = {k: (v if isinstance(v, (str, int, float, bool)) else type(v).__name__) for k, v in body.items()}
+        LOGGER.debug("/gex_history_url payload: %s", log_snapshot)
+    except Exception:
+        LOGGER.debug("/gex_history_url payload logging failed")
+
+    endpoint = None
+    for value in body.values():
+        if isinstance(value, str):
+            trimmed = value.strip()
+            lowered = trimmed.lower()
+            if lowered.startswith("gex_") or lowered.startswith("gex"):
+                endpoint = trimmed.lower()
+                break
+    if endpoint is None:
+        inferred = _infer_endpoint(url)
+        endpoint = inferred or 'gex_zero'
+
+    ticker = None
+    preferred_keys = ("ticker", "symbol", "underlying")
+    for key in preferred_keys:
+        value = body.get(key)
+        if isinstance(value, str):
+            candidate = value.strip()
+            if candidate and not candidate.lower().startswith("gex_"):
+                ticker = candidate.upper()
+                break
     if not ticker:
-        ticker = _extract_ticker_from_url(url)
+        for key, value in body.items():
+            if key == 'url':
+                continue
+            if isinstance(value, str):
+                candidate = value.strip()
+                if candidate and not candidate.lower().startswith("gex_"):
+                    ticker = candidate.upper()
+                    break
 
-    if not url or not ticker:
-        raise HTTPException(status_code=400, detail="Missing url or ticker")
+    # Try to infer ticker from URL if missing
+    if not ticker and url:
+        inferred = _extract_ticker_from_url(url)
+        if inferred:
+            ticker = inferred
+
+    if not ticker:
+        inferred = _extract_ticker_from_url(url)
+        ticker = (inferred or "UNKNOWN").upper()
+
+    # Accept metadata under several possible keys
+    metadata = None
+    for k in ('metadata', 'payload', 'data'):
+        v = body.get(k)
+        if isinstance(v, dict):
+            metadata = v
+            break
+    if metadata is None:
+        metadata = {}
+
+    # Normalize endpoint default
+    endpoint = endpoint or _infer_endpoint(url) or 'gex_zero'
 
     try:
         queue_id = gex_history_queue.enqueue_request(
             url=url,
             ticker=ticker,
-            endpoint=endpoint or "gex_zero",
+            endpoint=endpoint,
             payload=metadata or {},
         )
     except Exception as exc:
@@ -640,12 +749,13 @@ async def gex_history_endpoint(payload: HistoryPayload, background_tasks: Backgr
         "id": queue_id,
         "url": url,
         "ticker": ticker,
-        "endpoint": endpoint or "gex_zero",
+        "endpoint": endpoint,
     }
 
 
 @app.get("/lookup/trades")
 async def lookup_trades(symbol: str, source: str = "tastytrade", limit: int = 100) -> Dict[str, Any]:
+    """Return recent trades for a given symbol/source pair."""
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
     lookup = service_manager.lookup_service
@@ -666,6 +776,7 @@ async def lookup_history(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Return serialized import records for the requested symbol."""
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
     lookup = service_manager.lookup_service
@@ -682,6 +793,7 @@ async def lookup_history(
 
 @app.get("/lookup/depth_diff")
 async def lookup_depth_diff(symbol: str) -> Dict[str, Any]:
+    """Fetch the latest cross-feed depth comparison snapshot."""
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
     lookup = service_manager.lookup_service
@@ -694,6 +806,7 @@ async def lookup_depth_diff(symbol: str) -> Dict[str, Any]:
 
 
 async def _trigger_queue_processing() -> None:
+    """Kick processing of any queued historical imports on a worker thread."""
     try:
         await asyncio.to_thread(process_historical_imports)
     except Exception:
@@ -701,6 +814,7 @@ async def _trigger_queue_processing() -> None:
 
 
 def _normalize_string(value: Optional[Any]) -> str:
+    """Trim and stringify optionally missing payload values."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -709,6 +823,7 @@ def _normalize_string(value: Optional[Any]) -> str:
 
 
 def _infer_endpoint(url: str) -> str:
+    """Guess the GEX endpoint slug from a legacy URL."""
     import re
 
     match = re.search(r"_((?:gex_zero|gex_one|gex_full))\\.json", url)
@@ -718,15 +833,21 @@ def _infer_endpoint(url: str) -> str:
 
 
 def _extract_ticker_from_url(url: str) -> str:
+    """Parse a ticker symbol from classic history URLs."""
     import re
-
-    match = re.search(r"/(\\d{4}-\\d{2}-\\d{2})_([^_]+_[^_]+)_classic", url)
+    # Match DATE_TICKER_classic where ticker may contain underscores/digits
+    match = re.search(r"/(\d{4}-\d{2}-\d{2})_([A-Z0-9_]+)_classic", url)
     if match:
         return match.group(2)
+    # Fallback: capture token before '_classic'
+    match2 = re.search(r"/([A-Z0-9_]{1,12})_classic", url)
+    if match2:
+        return match2.group(1)
     return ""
 
 
 def _timestamp_ms(value: Optional[str]) -> int:
+    """Normalize timestamps from strings or epoch numbers into ms precision."""
     if isinstance(value, (int, float)):
         return int(float(value))
     if isinstance(value, str) and value:
@@ -739,6 +860,7 @@ def _timestamp_ms(value: Optional[str]) -> int:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for running the uvicorn server."""
     parser = argparse.ArgumentParser(description="Run data pipeline server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8877)
@@ -747,6 +869,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Entry point used both by ``python data-pipeline.py`` and packaging."""
     args = parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level.lower())
