@@ -21,8 +21,8 @@ import argparse
 import asyncio
 import json
 import logging
+import sys
 import threading
-import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,27 +31,25 @@ from typing import Any, Dict, List, Optional
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-import sys
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 if str(PROJECT_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from src.config import settings
-from src.import_gex_history import process_historical_imports
-from src.lib.gex_history_queue import gex_history_queue
-from src.models.api_models import GEXHistoryRequest, WebhookPayload
-from src.lib.redis_client import RedisClient
-from src.services.gexbot_poller import GEXBotPoller, GEXBotPollerSettings
-from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreamer
-from src.services.redis_timeseries import RedisTimeSeriesClient
-from src.services.redis_flush_worker import FlushWorkerSettings, RedisFlushWorker
-from src.services.discord_bot_service import DiscordBotService
-from src.services.lookup_service import LookupService
-from src.services.schwab_streamer import SchwabStreamClient, build_streamer
+from src.config import settings  # noqa: E402
+from src.import_gex_history import process_historical_imports  # noqa: E402
+from src.lib.gex_history_queue import gex_history_queue  # noqa: E402
+from src.lib.redis_client import RedisClient  # noqa: E402
+from src.services.gexbot_poller import GEXBotPoller, GEXBotPollerSettings  # noqa: E402
+from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreamer  # noqa: E402
+from src.services.redis_timeseries import RedisTimeSeriesClient  # noqa: E402
+from src.services.redis_flush_worker import FlushWorkerSettings, RedisFlushWorker  # noqa: E402
+from src.services.discord_bot_service import DiscordBotService  # noqa: E402
+from src.services.lookup_service import LookupService  # noqa: E402
+from src.services.schwab_streamer import SchwabStreamClient, build_streamer  # noqa: E402
 
 LOGGER = logging.getLogger("data_pipeline")
 NOISY_STREAM_LOGGERS = [
@@ -515,6 +513,8 @@ UW_OPTION_LATEST_KEY = "uw:option_trades_super_algo:latest"
 UW_OPTION_HISTORY_KEY = "uw:option_trades_super_algo:history"
 UW_MARKET_LATEST_KEY = "uw:market_agg_socket:latest"
 UW_MARKET_HISTORY_KEY = "uw:market_agg_socket:history"
+UW_OPTION_STREAM_CHANNEL = "uw:option_trades_super_algo:stream"
+UW_MARKET_STREAM_CHANNEL = "uw:market_agg_socket:stream"
 UW_HISTORY_LIMIT = 200
 UW_CACHE_TTL_SECONDS = 900
 SUPPORTED_WEBHOOK_TOPICS = {
@@ -906,6 +906,10 @@ def _cache_option_trade(redis_conn, payload: Dict[str, Any]) -> None:
     pipe.lpush(UW_OPTION_HISTORY_KEY, serialized)
     pipe.ltrim(UW_OPTION_HISTORY_KEY, 0, UW_HISTORY_LIMIT - 1)
     pipe.execute()
+    try:
+        redis_conn.publish(UW_OPTION_STREAM_CHANNEL, serialized)
+    except Exception:
+        LOGGER.exception("Failed to publish option trade alert")
 
 
 def _cache_market_agg(redis_conn, payload: Dict[str, Any]) -> None:
@@ -915,6 +919,10 @@ def _cache_market_agg(redis_conn, payload: Dict[str, Any]) -> None:
     pipe.lpush(UW_MARKET_HISTORY_KEY, serialized)
     pipe.ltrim(UW_MARKET_HISTORY_KEY, 0, UW_HISTORY_LIMIT - 1)
     pipe.execute()
+    try:
+        redis_conn.publish(UW_MARKET_STREAM_CHANNEL, serialized)
+    except Exception:
+        LOGGER.exception("Failed to publish market aggregate update")
 
 
 def _infer_endpoint(url: str) -> str:
