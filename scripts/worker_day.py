@@ -280,6 +280,8 @@ def write_tick_parquet(
                 record_row["ts_ms"] = int(val.timestamp() * 1000)
         rows.append(record_row)
         ticks += 1
+        if ticks == 1:
+            logger.debug("Ticks sample first: %s", record_row)
         mem_low = False
         if psutil and max_memory_mb and max_memory_mb > 0:
             try:
@@ -327,6 +329,8 @@ def main() -> None:
         args.scid_file,
         args.depth_dir,
     )
+    # Log whether tick emission is enabled for diagnostic purposes
+    logger.info("emit_tick_parquet=%s", args.emit_tick_parquet)
 
     depth_dir = Path(args.depth_dir)
     depth_path = _depth_file(depth_dir, args.depth_prefix, date_str)
