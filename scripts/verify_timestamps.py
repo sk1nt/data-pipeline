@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parquet-root", default="data/parquet", help="Parquet root folder")
     parser.add_argument("--out-csv", default=None, help="Optional CSV output path")
     parser.add_argument("--kind", choices=["depth", "tick", "both"], default="both")
-    parser.add_argument("--timestamp-tz", default=None, help="Optional timezone to use when comparing ts_ms via 'AT TIME ZONE' (eg. America/New_York). If omitted, no AT TIME ZONE is applied.")
+    parser.add_argument("--timestamp-tz", default="UTC", help="Optional timezone to use when comparing ts_ms via 'AT TIME ZONE' (eg. America/New_York). Default: UTC.")
     return parser.parse_args()
 
 

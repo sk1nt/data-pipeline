@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--atomic-writes", action="store_true", help="Write to temp file and atomically rename to destination once complete")
     parser.add_argument("--skip-existing", action="store_true", help="Skip processing if output file already exists")
     parser.add_argument("--max-memory-mb", type=int, default=0, help="Optional: maximum memory in MB to allow per-worker before flush (0=disabled)")
-    parser.add_argument("--timestamp-tz", default=None, help="Timezone to assume for timestamps when converting to ts_ms (e.g. America/New_York). If omitted, no timezone coercion is applied.")
+    parser.add_argument("--timestamp-tz", default="UTC", help="Timezone to assume for timestamps when converting to ts_ms (e.g. America/New_York). Defaults to UTC.")
     return parser.parse_args()
 
 
