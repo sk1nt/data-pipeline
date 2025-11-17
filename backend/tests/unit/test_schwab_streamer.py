@@ -13,6 +13,7 @@ import pytest
 from src.services.schwab_streamer import (
     SchwabMessageParser,
     SchwabStreamClient,
+    SchwabAuthClient,
 )
 
 
@@ -121,3 +122,22 @@ def test_streamer_start_stop_and_publish(monkeypatch):
     client.stop()
     assert auth_client.stopped_refresh is True
     assert stream.stopped is True
+
+
+def test_streamer_refresh_tokens_delegates(monkeypatch):
+    auth_client = DummyAuthClient()
+    publisher = DummyPublisher()
+    client = SchwabStreamClient(
+        auth_client=auth_client,
+        publisher=publisher,
+        stream_url='wss://example.com',
+        symbols=['MNQ'],
+        heartbeat_seconds=1,
+    )
+
+    # Ensure auth_client has the original token
+    assert auth_client.access_token == 'x'
+    refreshed = client.refresh_tokens()
+    assert refreshed is not None
+    # After refresh, DummyAuthClient returns 'y'
+    assert auth_client.access_token == 'y'
