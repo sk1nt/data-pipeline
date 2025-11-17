@@ -8,6 +8,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from src.services.schwab_streamer import SchwabAuthClient
+import time
 
 
 def test_schwab_token_file_is_loaded_and_used(tmp_path):
@@ -59,3 +60,47 @@ def test_schwab_token_file_is_loaded_and_used(tmp_path):
             tok_dir.rmdir()
     except Exception:
         pass
+
+
+def test_manual_refresh_persists_tokens_to_file(tmp_path):
+    repo_root = Path(__file__).resolve().parents[3]
+    tok_dir = repo_root / ".tokens"
+    tok_dir.mkdir(parents=True, exist_ok=True)
+    tok_path = tok_dir / "schwab_token.json"
+    # start with empty tokens
+    if tok_path.exists():
+        tok_path.unlink()
+
+    class ManualDummy:
+        def __init__(self):
+            self.tokens = {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
+
+        def refresh_token(self):
+            self.tokens["access_token"] = "b"
+
+        @property
+        def access_token(self):
+            return self.tokens['access_token']
+
+    dummy = ManualDummy()
+    client = SchwabAuthClient(
+        client_id="test",
+        client_secret="secret",
+        refresh_token="r",
+        rest_url="https://api.test",
+        schwab_client=dummy,
+    )
+    try:
+        assert not tok_path.exists()
+        client.refresh_tokens()
+        # read persisted file
+        with open(tok_path, "r") as fh:
+            persisted = json.load(fh)
+        assert persisted.get("access_token") == "b"
+    finally:
+        try:
+            tok_path.unlink()
+            if not any(tok_dir.iterdir()):
+                tok_dir.rmdir()
+        except Exception:
+            pass
