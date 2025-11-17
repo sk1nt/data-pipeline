@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--atomic-writes", action="store_true", help="Write to temp file and atomically rename to destination once complete")
     parser.add_argument("--skip-existing", action="store_true", help="Skip processing if output file already exists")
     parser.add_argument("--max-memory-mb", type=int, default=0, help="Optional: maximum memory in MB to allow per-worker before flush (0=disabled)")
+    parser.add_argument("--timestamp-tz", default=None, help="Timezone to assume for timestamps when converting to ts_ms (e.g. America/New_York). If omitted, no timezone coercion is applied.")
     return parser.parse_args()
 
 
@@ -135,6 +136,8 @@ def run_day(
         cmd.extend(["--parquet-row-group-size", str(args.parquet_row_group_size)])
     if args.convert_timestamp_to_ms:
         cmd.append("--convert-timestamp-to-ms")
+    if args.timestamp_tz:
+        cmd.extend(["--timestamp-tz", args.timestamp_tz])
     if args.atomic_writes:
         cmd.append("--atomic-writes")
     if args.skip_existing and not force_overwrite:
@@ -228,6 +231,8 @@ def run_convert_for_day(python: str, date_str: str, args: argparse.Namespace) ->
                 continue
             # run conversion using our script
             cmd = [python, 'scripts/convert_parquet_to_ts_ms.py', str(p), '--out', str(p)]
+            if args.timestamp_tz:
+                cmd.extend(['--timestamp-tz', args.timestamp_tz])
             if args.convert_parquet_compression:
                 cmd.extend(['--compression', args.convert_parquet_compression])
             if args.atomic_writes:

@@ -18,7 +18,7 @@ import duckdb
 import sys
 
 
-def run_single(input_path: Path, output_path: Path, compression: str = "zstd", atomic: bool = True):
+def run_single(input_path: Path, output_path: Path, compression: str = "zstd", atomic: bool = True, timestamp_tz: str = "UTC"):
     con = duckdb.connect()
     # Check timestamp type
     try:
@@ -32,8 +32,11 @@ def run_single(input_path: Path, output_path: Path, compression: str = "zstd", a
         # Read the input schema to enumerate columns and exclude ts_ms if present
         cols = con.execute(f"SELECT * FROM read_parquet('{input_path}') LIMIT 1").fetchdf().columns.tolist()
         select_cols = ",".join([c for c in cols if c != "ts_ms"])
+        # Use AT TIME ZONE if a timezone is supplied, ensuring DuckDB computes
+        # epoch from the intended timezone rather than the server/system default.
+        tz_expr = f"timestamp AT TIME ZONE '{timestamp_tz}'" if timestamp_tz else "timestamp"
         query = (
-            f"SELECT {select_cols}, CAST(EXTRACT(epoch FROM timestamp) * 1000 AS BIGINT) as ts_ms "
+            f"SELECT {select_cols}, CAST(EXTRACT(epoch FROM {tz_expr}) * 1000 AS BIGINT) as ts_ms "
             f"FROM read_parquet('{input_path}')"
         )
     elif t.upper() in ("INT64", "BIGINT", "INTEGER", "INT"):  # numeric epoch seconds or ms
@@ -48,8 +51,9 @@ def run_single(input_path: Path, output_path: Path, compression: str = "zstd", a
         # Unknown type - attempt to cast
         cols = con.execute(f"SELECT * FROM read_parquet('{input_path}') LIMIT 1").fetchdf().columns.tolist()
         select_cols = ",".join([c for c in cols if c != "ts_ms"])
+        tz_expr = f"timestamp AT TIME ZONE '{timestamp_tz}'" if timestamp_tz else "timestamp"
         query = (
-            f"SELECT {select_cols}, CAST(EXTRACT(epoch FROM timestamp) * 1000 AS BIGINT) as ts_ms "
+            f"SELECT {select_cols}, CAST(EXTRACT(epoch FROM {tz_expr}) * 1000 AS BIGINT) as ts_ms "
             f"FROM read_parquet('{input_path}')"
         )
 
@@ -70,13 +74,14 @@ def main():
     p.add_argument('--out', help='Output parquet file', default=None)
     p.add_argument('--compression', default='zstd')
     p.add_argument('--atomic', action='store_true', default=True)
+    p.add_argument('--timestamp-tz', default='UTC', help='Timezone to use for timestamp->epoch conversion when timestamp is a TIMESTAMP column')
     args = p.parse_args()
     input_path = Path(args.input)
     if not input_path.exists():
         print('Input not found:', input_path)
         sys.exit(2)
     out = Path(args.out) if args.out else input_path
-    run_single(input_path, out, compression=args.compression, atomic=args.atomic)
+    run_single(input_path, out, compression=args.compression, atomic=args.atomic, timestamp_tz=args.timestamp_tz)
 
 if __name__ == '__main__':
     main()

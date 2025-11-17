@@ -51,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parquet-row-group-size", type=int, default=0, help="Target parquet row group size in bytes (0 = default chunking)")
     parser.add_argument("--max-memory-mb", type=int, default=0, help="Optional: maximum memory in MB to allow before flushing (0 = disabled)")
     parser.add_argument("--convert-timestamp-to-ms", action="store_true", help="Add ts_ms epoch milliseconds column (recommended) and keep timestamp")
+    parser.add_argument("--timestamp-tz", default="UTC", help="Timezone name for naive timestamps (e.g. UTC, America/New_York). If timestamp has tzinfo, it will be respected.")
     parser.add_argument("--atomic-writes", action="store_true", help="Write to a temporary file and then atomically rename to final path on success")
     parser.add_argument("--skip-existing", action="store_true", help="Skip writing if the target parquet file already exists")
     return parser.parse_args()
@@ -99,6 +100,7 @@ def write_depth_parquet(
     skip_existing: bool = False,
     convert_timestamp_to_ms: bool = False,
     max_memory_mb: int = 0,
+    timestamp_tz: str = "UTC",
 ) -> int:
     from src.lib.depth_parser import SierraChartDepthParser
     import polars as pl
@@ -135,6 +137,8 @@ def write_depth_parquet(
         import psutil  # optional dependency for memory checks
     except Exception:
         psutil = None
+    if convert_timestamp_to_ms:
+        logger.info("Depth: convert timestamps to ms using tz=%s", timestamp_tz)
     for snapshot in parser.parse_file(str(depth_path)):
         if snapshot.timestamp.strftime("%Y-%m-%d") != date_str:
             continue
@@ -169,6 +173,19 @@ def write_depth_parquet(
                     # small number, assume seconds
                     record["ts_ms"] = int(v * 1000)
             elif isinstance(val, datetime):
+                # If the datetime is naive (no tzinfo), localize it with the supplied
+                # timestamp_tz. Then convert to epoch ms. If it's timezone aware,
+                # Python's timestamp() will return epoch seconds in UTC.
+                if val.tzinfo is None:
+                    try:
+                        from zoneinfo import ZoneInfo
+
+                        tz = ZoneInfo(timestamp_tz)
+                        val = val.replace(tzinfo=tz)
+                    except Exception:
+                        # If ZoneInfo is not available or the tz name invalid,
+                        # fallback to naive timestamp behavior (UTC assumption).
+                        pass
                 record["ts_ms"] = int(val.timestamp() * 1000)
         rows.append(record)
         snapshots += 1
@@ -220,6 +237,7 @@ def write_tick_parquet(
     skip_existing: bool = False,
     convert_timestamp_to_ms: bool = False,
     max_memory_mb: int = 0,
+    timestamp_tz: str = "UTC",
 ) -> int:
     from src.lib.scid_parser import parse_scid_file_backwards_generator
     import polars as pl
@@ -256,6 +274,8 @@ def write_tick_parquet(
         psutil = None
     date_filter = datetime.strptime(date_str, "%Y-%m-%d")
     limit = max_per_day if max_per_day > 0 else None
+    if convert_timestamp_to_ms:
+        logger.info("Ticks: convert timestamps to ms using tz=%s", timestamp_tz)
     for record in parse_scid_file_backwards_generator(str(scid_file), date_filter=date_filter, max_records=limit):
         ts = record["timestamp"]
         if ts.strftime("%Y-%m-%d") != date_str:
@@ -277,6 +297,14 @@ def write_tick_parquet(
                 else:
                     record_row["ts_ms"] = int(v * 1000)
             elif isinstance(val, datetime):
+                if val.tzinfo is None:
+                    try:
+                        from zoneinfo import ZoneInfo
+
+                        tz = ZoneInfo(timestamp_tz)
+                        val = val.replace(tzinfo=tz)
+                    except Exception:
+                        pass
                 record_row["ts_ms"] = int(val.timestamp() * 1000)
         rows.append(record_row)
         ticks += 1
@@ -351,6 +379,7 @@ def main() -> None:
             skip_existing=args.skip_existing,
             convert_timestamp_to_ms=args.convert_timestamp_to_ms,
             max_memory_mb=args.max_memory_mb,
+            timestamp_tz=args.timestamp_tz,
         )
 
     def _run_ticks():
@@ -371,6 +400,7 @@ def main() -> None:
             skip_existing=args.skip_existing,
             convert_timestamp_to_ms=args.convert_timestamp_to_ms,
             max_memory_mb=args.max_memory_mb,
+            timestamp_tz=args.timestamp_tz,
         )
 
     max_workers = 2 if args.emit_tick_parquet else 1

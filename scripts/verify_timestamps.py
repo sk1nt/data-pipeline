@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parquet-root", default="data/parquet", help="Parquet root folder")
     parser.add_argument("--out-csv", default=None, help="Optional CSV output path")
     parser.add_argument("--kind", choices=["depth", "tick", "both"], default="both")
+    parser.add_argument("--timestamp-tz", default=None, help="Optional timezone to use when comparing ts_ms via 'AT TIME ZONE' (eg. America/New_York). If omitted, no AT TIME ZONE is applied.")
     return parser.parse_args()
 
 
@@ -38,8 +39,11 @@ def daterange(start: date, end: date):
         cur = cur + timedelta(days=1)
 
 
+PARQUET_ROOT = Path("data/parquet")
+
+
 def fmt_path(kind: str, symbol: str, dt: date) -> Path:
-    return Path("data/parquet") / kind / symbol / f"{dt.strftime('%Y%m%d')}.parquet"
+    return PARQUET_ROOT / kind / symbol / f"{dt.strftime('%Y%m%d')}.parquet"
 
 
 def check_file(path: Path, kind: str, dt: date):
@@ -86,8 +90,10 @@ def check_file(path: Path, kind: str, dt: date):
         # If ts_ms is present, compare conversions
         if has_ts_ms:
             # ts_ms vs CAST(EXTRACT(EPOCH FROM timestamp) * 1000)
+            # Optionally apply AT TIME ZONE conversion when computing epoch in DuckDB
+            tz_clause = f"AT TIME ZONE '{ARG_TS_TZ}'" if ARG_TS_TZ else ""
             ts_ms_mismatch_q = (
-                f"SELECT COUNT(*) FROM read_parquet('{path}') WHERE ts_ms IS NOT NULL AND ABS(ts_ms - CAST(EXTRACT(epoch FROM timestamp) * 1000 AS BIGINT)) > 5"
+                f"SELECT COUNT(*) FROM read_parquet('{path}') WHERE ts_ms IS NOT NULL AND ABS(ts_ms - CAST(EXTRACT(epoch FROM timestamp {tz_clause}) * 1000 AS BIGINT)) > 5"
             )
             tsms_mismatch = con.execute(ts_ms_mismatch_q).fetchone()[0]
             result["ts_ms_mismatch_rows"] = tsms_mismatch
@@ -122,6 +128,10 @@ def check_file(path: Path, kind: str, dt: date):
 
 def main():
     args = parse_args()
+    global ARG_TS_TZ
+    ARG_TS_TZ = args.timestamp_tz
+    global PARQUET_ROOT
+    PARQUET_ROOT = Path(args.parquet_root)
     start_dt = datetime.strptime(args.start, "%Y-%m-%d").date()
     end_dt = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end else date.today()
 
