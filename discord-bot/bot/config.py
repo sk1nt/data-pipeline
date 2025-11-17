@@ -39,6 +39,7 @@ class BotConfig:
     execution_channel_id: Optional[int]
     status_channel_id: Optional[int]
     alert_channel_id: Optional[int]
+    uw_channel_ids: Optional[Tuple[int, ...]]
 
 def _parse_channel_ids(value: Optional[str]) -> Optional[List[int]]:
     if not value:
@@ -107,6 +108,7 @@ def create_config_from_env() -> BotConfig:
         raise ValueError('TastyTrade is enabled but credentials are missing')
 
     allowed_channels = _parse_channel_ids(os.getenv('DISCORD_ALLOWED_CHANNEL_IDS'))
+    uw_channel_ids = _parse_channel_ids(os.getenv('DISCORD_UW_CHANNEL_IDS'))
     execution_channel_id = int(os.getenv('DISCORD_EXECUTION_CHANNEL_ID', '0')) or None
     status_channel_id = int(os.getenv('DISCORD_STATUS_CHANNEL_ID', '0')) or None
     alert_channel_id = int(os.getenv('DISCORD_ALERT_CHANNEL_ID', '0')) or None
@@ -119,6 +121,7 @@ def create_config_from_env() -> BotConfig:
         status_api_secret=os.getenv('STATUS_API_SECRET'),
         scid_data_directory=os.getenv('SCID_DATA_DIRECTORY'),
         allowed_channel_ids=tuple(allowed_channels) if allowed_channels else None,
+        uw_channel_ids=tuple(uw_channel_ids) if uw_channel_ids else None,
         execution_channel_id=execution_channel_id,
         status_channel_id=status_channel_id,
         alert_channel_id=alert_channel_id

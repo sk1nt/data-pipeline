@@ -813,6 +813,9 @@ class TradeBot(commands.Bot):
         return False
 
     def _init_alert_channels(self) -> List[int]:
+        specific = getattr(self.config, 'uw_channel_ids', None) or ()
+        if specific:
+            return [cid for cid in specific if cid]
         channels: List[int] = []
         for cid in (
             getattr(self.config, 'execution_channel_id', None),
