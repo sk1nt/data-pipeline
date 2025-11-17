@@ -29,6 +29,26 @@ See [specs/001-tick-data-pipeline/quickstart.md](specs/001-tick-data-pipeline/qu
 - Redis server
 - Data source credentials
 
+## Script flags and common options
+
+Some of the helper scripts and the orchestrator can emit a canonical `ts_ms`
+column (epoch milliseconds) for timestamps. Use the `--convert-timestamp-to-ms`
+flag to enable this and `--timestamp-tz` to specify the timezone the source
+timestamps should be interpreted with.
+
+- `--convert-timestamp-to-ms`: Add a `ts_ms` BIGINT column when writing depth/tick Parquet
+- `--timestamp-tz <TZ>`: The timezone name (e.g., `UTC`, `America/New_York`) to
+   treat naive timestamps as. When converting Parquet with `convert_parquet_to_ts_ms.py`
+   the `--timestamp-tz` value is used in the DuckDB `AT TIME ZONE` expression so that
+   `ts_ms` aligns with the intended timezone. Likewise, `verify_timestamps.py` can
+   take the same `--timestamp-tz` flag to ensure comparisons use the same timezone.
+
+Example:
+```bash
+python3 scripts/orchestrator.py --start 2025-11-11 --end 2025-11-12 --workers 2 \
+   --scid-dir /mnt/c/SierraChart/Data --depth-dir /mnt/c/SierraChart/Data/MarketDepthData \
+   --depth-prefix MNQZ25_FUT_CME --convert-timestamp-to-ms --timestamp-tz America/New_York
+```
 ### Installation
 
 ```bash

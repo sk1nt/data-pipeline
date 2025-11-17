@@ -5,9 +5,11 @@ import json
 import os
 import asyncio
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 import httpx
+
+from .tastytrade_client import TastyTradeClient
 
 class TradeBot(commands.Bot):
     def __init__(self, config):
@@ -21,6 +23,9 @@ class TradeBot(commands.Bot):
             db=int(os.getenv('REDIS_DB', '0')),
             password=os.getenv('REDIS_PASSWORD')
         )
+        self.command_admin_ids = self._parse_admin_ids()
+        self.command_admin_names = self._parse_admin_names()
+        self.tastytrade_client = self._init_tastytrade_client()
         self.uw_option_latest_key = os.getenv('UW_OPTION_LATEST_KEY', 'uw:option_trades_super_algo:latest')
         self.uw_option_history_key = os.getenv('UW_OPTION_HISTORY_KEY', 'uw:option_trades_super_algo:history')
         self.uw_market_latest_key = os.getenv('UW_MARKET_LATEST_KEY', 'uw:market_agg_socket:latest')
@@ -56,6 +61,8 @@ class TradeBot(commands.Bot):
                     await ctx.send('GEX data not available')
 
             async def _status_cmd(ctx):
+                if not await self._ensure_privileged(ctx):
+                    return
                 try:
                     async with httpx.AsyncClient() as client:
                         response = await client.get('http://localhost:8877/status')
@@ -68,23 +75,9 @@ class TradeBot(commands.Bot):
                     await ctx.send(f'Error fetching status: {e}')
 
             async def _tastytrade_cmd(ctx):
-                try:
-                    async with httpx.AsyncClient() as client:
-                        response = await client.get('http://localhost:8877/status')
-                        if response.status_code == 200:
-                            status_data = response.json()
-                            tt_status = status_data.get('tastytrade_streamer', {})
-                            formatted = "**TastyTrade Status:**\n"
-                            formatted += f"Running: {tt_status.get('running', False)}\n"
-                            formatted += f"Trade Samples: {tt_status.get('trade_samples', 0)}\n"
-                            formatted += f"Last Trade: {tt_status.get('last_trade_ts', 'N/A')}\n"
-                            formatted += f"Depth Samples: {tt_status.get('depth_samples', 0)}\n"
-                            formatted += f"Last Depth: {tt_status.get('last_depth_ts', 'N/A')}\n"
-                            await ctx.send(formatted)
-                        else:
-                            await ctx.send(f'Failed to fetch status: {response.status_code}')
-                except Exception as e:
-                    await ctx.send(f'Error fetching TastyTrade status: {e}')
+                if not await self._ensure_privileged(ctx):
+                    return
+                await _tt_cmd(ctx)
 
             async def _market_cmd(ctx):
                 snapshot = await self._fetch_market_snapshot()
@@ -101,12 +94,44 @@ class TradeBot(commands.Bot):
                 formatted = "\n".join(self.format_option_trade_alert(alert) for alert in alerts)
                 await ctx.send(formatted)
 
+            async def _tt_cmd(ctx, *args):
+                if not await self._ensure_privileged(ctx):
+                    return
+                if not self.tastytrade_client:
+                    await self._send_dm_or_warn(ctx, 'TastyTrade client is not configured.')
+                    return
+                subcommand = args[0].lower() if args else 'summary'
+                if subcommand == 'status':
+                    overview = await self._fetch_tastytrade_overview()
+                    if overview is None:
+                        await self._send_dm_or_warn(ctx, 'Unable to fetch TastyTrade overview.')
+                        return
+                    message = self.format_tastytrade_overview(overview)
+                    await self._send_dm_or_warn(ctx, message)
+                    return
+                if subcommand == 'account' and len(args) >= 2:
+                    target = args[1]
+                    success = await asyncio.to_thread(self.tastytrade_client.set_active_account, target)
+                    dm_msg = (
+                        f"Active TastyTrade account set to {target}."
+                        if success else f"Account {target} not found."
+                    )
+                    await self._send_dm_or_warn(ctx, dm_msg)
+                    return
+                summary = await self._fetch_tastytrade_summary()
+                if summary is None:
+                    await self._send_dm_or_warn(ctx, 'Unable to fetch TastyTrade summary.')
+                    return
+                message = self.format_tastytrade_summary(summary)
+                await self._send_dm_or_warn(ctx, message)
+
             self.add_command(commands.Command(_ping_cmd, name='ping'))
             self.add_command(commands.Command(_gex_cmd, name='gex'))
             self.add_command(commands.Command(_status_cmd, name='status'))
             self.add_command(commands.Command(_tastytrade_cmd, name='tastytrade'))
             self.add_command(commands.Command(_market_cmd, name='market'))
             self.add_command(commands.Command(_uwalerts_cmd, name='uw'))
+            self.add_command(commands.Command(_tt_cmd, name='tt'))
         except Exception as e:
             # If registration fails (e.g., during import-time tests), print error for debugging
             print(f"Command registration failed: {e}")
@@ -190,6 +215,10 @@ class TradeBot(commands.Bot):
         ticker = self.ticker_aliases.get(display_symbol, display_symbol)
         cache_key = f"gex:{ticker.lower()}:latest"
         snapshot_key = f"{self.redis_snapshot_prefix}{ticker.upper()}"
+        async def finalize(data: dict) -> dict:
+            data.setdefault('display_symbol', display_symbol)
+            await self._populate_wall_ladders(data, ticker, cache_key, snapshot_key)
+            return data
 
         # 1) Try Redis cache (fast)
         try:
@@ -216,15 +245,13 @@ class TradeBot(commands.Bot):
 
                 if age <= 5 and complete:
                     data['_freshness'] = 'current'
-                    data.setdefault('display_symbol', display_symbol)
-                    return data
+                    return await finalize(data)
                 if age <= 30 and complete:
                     # accept stale but attempt background refresh via API
                     data['_freshness'] = 'stale'
-                    data.setdefault('display_symbol', display_symbol)
                     # spawn a background refresh
                     asyncio.create_task(self._refresh_gex_from_api(ticker, cache_key, display_symbol))
-                    return data
+                    return await finalize(data)
                 # cached entry exists but lacks full snapshot; force refresh path
                 await asyncio.to_thread(self.redis_client.delete, cache_key)
         except Exception as e:
@@ -246,15 +273,15 @@ class TradeBot(commands.Bot):
                     if age <= 5:
                         normalized['_freshness'] = 'current'
                         await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(normalized, default=str))
-                        return normalized
+                        return await finalize(normalized)
                     if age <= 30:
                         normalized['_freshness'] = 'stale'
                         await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(normalized, default=str))
                         asyncio.create_task(self._refresh_gex_from_api(ticker, cache_key, display_symbol))
-                        return normalized
+                        return await finalize(normalized)
                     normalized['_freshness'] = 'incomplete'
                     await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(normalized, default=str))
-                    return normalized
+                    return await finalize(normalized)
         except Exception as e:
             print(f"Snapshot redis check failed for {snapshot_key}: {e}")
 
@@ -332,7 +359,7 @@ class TradeBot(commands.Bot):
 
                 # cache result for future
                 await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(data, default=str))
-                return data
+                return await finalize(data)
         except Exception as e:
             print(f"DuckDB query failed: {e}")
 
@@ -343,7 +370,7 @@ class TradeBot(commands.Bot):
                 api_data['_freshness'] = 'current'
                 api_data['display_symbol'] = display_symbol
                 await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(api_data, default=str))
-                return api_data
+                return await finalize(api_data)
         except Exception as e:
             print(f"API fetch failed: {e}")
 
@@ -378,6 +405,7 @@ class TradeBot(commands.Bot):
             'major_neg_oi': None,
             'sum_gex_oi': None,
             'max_priors': [],
+            'strikes': [],
         }
 
         z = responses.get('zero')
@@ -386,6 +414,14 @@ class TradeBot(commands.Bot):
             data['spot_price'] = z.get('spot_price') or z.get('price') or data['spot_price']
             data['zero_gamma'] = z.get('zero_gamma') or z.get('zero_gamma_vol') or data['zero_gamma']
             data['net_gex'] = z.get('net_gex') or z.get('sum_gex') or data['net_gex']
+            data['major_pos_vol'] = z.get('major_pos_vol') or data['major_pos_vol']
+            data['major_neg_vol'] = z.get('major_neg_vol') or data['major_neg_vol']
+            data['major_pos_oi'] = z.get('major_pos_oi') or data['major_pos_oi']
+            data['major_neg_oi'] = z.get('major_neg_oi') or data['major_neg_oi']
+            data['sum_gex_oi'] = z.get('sum_gex_oi') or z.get('net_gex_oi') or data['sum_gex_oi']
+            strikes = z.get('strikes')
+            if strikes:
+                data['strikes'] = strikes
 
         return data
 
@@ -464,6 +500,7 @@ class TradeBot(commands.Bot):
             'sum_gex_oi': payload.get('sum_gex_oi') or payload.get('net_gex_oi'),
             'max_priors': self._extract_max_priors(payload),
             'maxchange': payload.get('maxchange') if isinstance(payload.get('maxchange'), dict) else {},
+            'strikes': payload.get('strikes'),
         }
         return data
 
@@ -516,7 +553,269 @@ class TradeBot(commands.Bot):
             return False
         return True
 
+    async def _populate_wall_ladders(self, data: dict, ticker: str, cache_key: str, snapshot_key: str) -> None:
+        if not isinstance(data, dict) or not ticker:
+            return
+        if data.get('_wall_ladders_ready'):
+            return
+        summary = await self._build_wall_ladders(data, ticker, cache_key, snapshot_key)
+        if summary:
+            data['_wall_ladders'] = summary
+        data['_wall_ladders_ready'] = True
+
+    async def _build_wall_ladders(self, data: dict, ticker: str, cache_key: str, snapshot_key: str) -> Optional[dict]:
+        strikes = self._normalize_strike_entries(data.get('strikes'))
+        source = 'payload' if strikes else None
+        if not strikes:
+            strikes, source = await self._load_strikes_from_cache(ticker, cache_key, snapshot_key)
+        if not strikes:
+            ts_ms = self._timestamp_to_epoch_ms(data.get('timestamp'))
+            if ts_ms is not None:
+                strikes, source = await asyncio.to_thread(self._query_strikes_from_db, ticker, ts_ms)
+        if not strikes:
+            return None
+        summary = {
+            'call': self._summarize_wall_ladder(data.get('major_pos_vol'), strikes, prefer_positive=True),
+            'put': self._summarize_wall_ladder(data.get('major_neg_vol'), strikes, prefer_positive=False),
+        }
+        summary = {k: v for k, v in summary.items() if v}
+        if not summary:
+            return None
+        if source:
+            summary['source'] = source
+        return summary
+
+    async def _load_strikes_from_cache(
+        self,
+        ticker: str,
+        cache_key: str,
+        snapshot_key: str,
+    ) -> Tuple[List[Tuple[float, float]], Optional[str]]:
+        keys = [cache_key, snapshot_key]
+        for key in keys:
+            try:
+                raw = await asyncio.to_thread(self.redis_client.get, key)
+            except Exception:
+                raw = None
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                continue
+            strikes = self._normalize_strike_entries(payload.get('strikes'))
+            if strikes:
+                source = 'redis-cache' if key == cache_key else 'redis-snapshot'
+                return strikes, source
+        return [], None
+
+    def _query_strikes_from_db(self, ticker: str, epoch_ms: int) -> Tuple[List[Tuple[float, float]], Optional[str]]:
+        if not ticker:
+            return [], None
+        query = """
+            SELECT strike, gamma
+            FROM gex_strikes
+            WHERE ticker = ? AND timestamp = ?
+            ORDER BY gamma DESC
+            LIMIT 64
+        """
+        rows: List[Tuple[float, float]] = []
+        source = None
+        conn = None
+        try:
+            import duckdb
+            try:
+                conn = duckdb.connect(self.duckdb_path, read_only=True)
+            except TypeError:
+                conn = duckdb.connect(self.duckdb_path)
+            rows = conn.execute(query, [ticker, epoch_ms]).fetchall()
+            source = 'duckdb'
+        except Exception:
+            rows = []
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        return rows, source
+
+    @staticmethod
+    def _normalize_strike_entries(raw: Any) -> List[Tuple[float, float]]:
+        normalized: List[Tuple[float, float]] = []
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                return normalized
+        if isinstance(raw, list):
+            for entry in raw:
+                strike = None
+                gamma = None
+                if isinstance(entry, (list, tuple)):
+                    if len(entry) >= 1:
+                        try:
+                            strike = float(entry[0])
+                        except (TypeError, ValueError):
+                            strike = None
+                    if len(entry) >= 2:
+                        try:
+                            gamma = float(entry[1])
+                        except (TypeError, ValueError):
+                            gamma = None
+                elif isinstance(entry, dict):
+                    strike = entry.get('strike') or entry.get('strike_price')
+                    gamma = entry.get('gamma') or entry.get('total_gamma')
+                    try:
+                        strike = float(strike)
+                    except (TypeError, ValueError):
+                        strike = None
+                    try:
+                        gamma = float(gamma)
+                    except (TypeError, ValueError):
+                        gamma = None
+                if strike is None or gamma is None:
+                    continue
+                normalized.append((strike, gamma))
+        return normalized
+
+    @staticmethod
+    def _timestamp_to_epoch_ms(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return int(value if value > 1e12 else value * 1000)
+        if isinstance(value, datetime):
+            ts = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            return int(ts.timestamp() * 1000)
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return int(parsed.timestamp() * 1000)
+        return None
+
+    @staticmethod
+    def _summarize_wall_ladder(
+        major_strike: Any,
+        strikes: List[Tuple[float, float]],
+        *,
+        prefer_positive: bool,
+    ) -> Optional[dict]:
+        if not strikes:
+            return None
+        filtered = []
+        for strike, gamma in strikes:
+            if not isinstance(gamma, (int, float)):
+                continue
+            if prefer_positive and gamma <= 0:
+                continue
+            if not prefer_positive and gamma >= 0:
+                continue
+            filtered.append((strike, gamma))
+        if not filtered:
+            return None
+        filtered.sort(key=lambda pair: abs(pair[1]), reverse=True)
+        major_value = None
+        tolerance = 0.51
+        if isinstance(major_strike, (int, float)):
+            for strike, gamma in filtered:
+                if abs(strike - major_strike) <= tolerance:
+                    major_value = (strike, gamma)
+                    break
+        if major_value is None:
+            major_value = filtered[0]
+        major_gamma = major_value[1] or 0
+        ladder_entries = []
+        for strike, gamma in filtered:
+            if abs(strike - major_value[0]) <= tolerance:
+                continue
+            ratio = (abs(gamma) / abs(major_gamma) * 100) if major_gamma else None
+            ladder_entries.append(
+                {
+                    "strike": strike,
+                    "gamma": gamma,
+                    "pct_vs_major": ratio,
+                }
+            )
+            if len(ladder_entries) >= 2:
+                break
+        return {
+            "major_strike": major_value[0],
+            "major_gamma": major_gamma,
+            "entries": ladder_entries,
+        }
+
+    def _parse_admin_ids(self) -> set[int]:
+        ids: set[int] = set()
+        raw = os.getenv('DISCORD_ADMIN_USER_IDS')
+        if raw:
+            for part in raw.split(','):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    ids.add(int(part))
+                except ValueError:
+                    continue
+        owner = os.getenv('DISCORD_OWNER_ID')
+        if owner:
+            try:
+                ids.add(int(owner))
+            except ValueError:
+                pass
+        return ids
+
+    def _parse_admin_names(self) -> set[str]:
+        raw = os.getenv('DISCORD_ADMIN_USERNAMES', 'skint0552')
+        names = {name.strip().lower() for name in raw.split(',') if name.strip()}
+        if not names:
+            names = {'skint0552'}
+        return names
+
+    def _init_tastytrade_client(self) -> Optional[TastyTradeClient]:
+        client_secret = os.getenv('TASTYTRADE_CLIENT_SECRET')
+        refresh_token = os.getenv('TASTYTRADE_REFRESH_TOKEN')
+        if not client_secret or not refresh_token:
+            return None
+        default_account = os.getenv('TASTYTRADE_ACCOUNT')
+        use_sandbox = os.getenv('TASTYTRADE_USE_SANDBOX', 'false').lower() == 'true'
+        try:
+            return TastyTradeClient(
+                client_secret=client_secret,
+                refresh_token=refresh_token,
+                default_account=default_account,
+                use_sandbox=use_sandbox,
+            )
+        except Exception as exc:
+            print(f"Failed to initialize TastyTrade client: {exc}")
+            return None
+
+    def _is_privileged_user(self, ctx) -> bool:
+        try:
+            author_id = int(ctx.author.id)
+        except Exception:
+            author_id = None
+        if author_id is not None and author_id in self.command_admin_ids:
+            return True
+        author_name = getattr(ctx.author, 'name', '') or ''
+        if author_name.lower() in self.command_admin_names:
+            return True
+        return False
+
+    async def _ensure_privileged(self, ctx) -> bool:
+        if self._is_privileged_user(ctx):
+            return True
+        await ctx.send('You are not authorized to use this command.')
+        return False
+
     def _init_alert_channels(self) -> List[int]:
+        specific = getattr(self.config, 'uw_channel_ids', None) or ()
+        if specific:
+            return [cid for cid in specific if cid]
         channels: List[int] = []
         for cid in (
             getattr(self.config, 'execution_channel_id', None),
@@ -612,6 +911,115 @@ class TradeBot(commands.Bot):
                 continue
         return results
 
+    async def _fetch_tastytrade_summary(self):
+        if not self.tastytrade_client:
+            return None
+        try:
+            return await asyncio.to_thread(self.tastytrade_client.get_account_summary)
+        except Exception as exc:
+            print(f"Failed to fetch TastyTrade summary: {exc}")
+            return None
+
+    async def _fetch_tastytrade_overview(self):
+        if not self.tastytrade_client:
+            return None
+        try:
+            return await asyncio.to_thread(self.tastytrade_client.get_account_overview)
+        except Exception as exc:
+            print(f"Failed to fetch TastyTrade overview: {exc}")
+            return None
+
+    async def _send_dm(self, user, content: str) -> bool:
+        try:
+            await user.send(content)
+            return True
+        except discord.Forbidden:
+            return False
+        except Exception as exc:
+            print(f"Failed to DM user: {exc}")
+            return False
+
+    async def _send_dm_or_warn(self, ctx, content: str) -> None:
+        if not await self._send_dm(ctx.author, content):
+            await ctx.send('Unable to DM you. Check your privacy settings.')
+
+    def _format_wall_value_line(
+        self,
+        label_text: str,
+        volume_value,
+        oi_value,
+        fmt_price,
+        *,
+        label_width: int,
+        volume_width: int,
+        gap: str = '',
+    ) -> str:
+        vol = fmt_price(volume_value)
+        oi = fmt_price(oi_value) if oi_value is not None else ''
+        label = f"{label_text:<{label_width}}"
+        spacer = gap if gap is not None else ''
+        return f"{label}{spacer}{vol:<{volume_width}}{oi}"
+
+    def _format_wall_short_line(
+        self,
+        label_text: str,
+        value,
+        fmt_price,
+        *,
+        label_width: int,
+        gap: str = '',
+    ) -> str:
+        spacer = gap if gap is not None else ''
+        return f"{label_text:<{label_width}}{spacer}{fmt_price(value)}"
+
+    def _format_wall_line(
+        self,
+        data: dict,
+        ladder_key: str,
+        label_text: str,
+        fmt_price,
+        *,
+        label_width: int,
+        default_line: Optional[str] = None,
+        gap_override: Optional[str] = None,
+    ) -> str:
+        ladders = data.get('_wall_ladders')
+        summary = ladders.get(ladder_key) if isinstance(ladders, dict) else None
+        if not summary or not summary.get('entries'):
+            fallback_value = data.get('major_pos_vol' if ladder_key == 'call' else 'major_neg_vol')
+            if default_line:
+                return default_line
+            gap = gap_override if gap_override is not None else ''
+            return f"{label_text:<{label_width}}{gap}{fmt_price(fallback_value)}"
+        label = f"{label_text:<{label_width}}"
+        major = fmt_price(summary.get('major_strike') or (data.get('major_pos_vol') if ladder_key == 'call' else data.get('major_neg_vol')))
+        segments = [major]
+        for entry in summary.get('entries', [])[:2]:
+            strike_txt = fmt_price(entry.get('strike'))
+            pct = entry.get('pct_vs_major')
+            pct_txt = f"{pct:.0f}%" if isinstance(pct, (int, float)) else "N/A%"
+            segments.append(f"{strike_txt} {pct_txt}")
+        gap = gap_override if gap_override is not None else '  '
+        return f"{label}{gap}{'  '.join(segments)}"
+
+    def _resolve_gex_source_label(self, data: dict) -> str:
+        ladders = data.get('_wall_ladders')
+        if isinstance(ladders, dict):
+            raw = ladders.get('source')
+            if raw:
+                lowered = str(raw).lower()
+                if 'redis' in lowered:
+                    return 'Redis'
+                if 'duckdb' in lowered:
+                    return 'DuckDB'
+                if 'payload' in lowered:
+                    return 'Payload'
+                return str(raw)
+        freshness = data.get('_freshness')
+        if isinstance(freshness, str):
+            return freshness
+        return 'local'
+
     def format_gex(self, data):
         dt = data.get('timestamp')
         if isinstance(dt, str):
@@ -673,16 +1081,56 @@ class TradeBot(commands.Bot):
                 oi = colorize(ansi.get(oi_color), oi)
             return f"{label:<{label_width}}{vol:<{volume_width}}{oi}"
 
+        source_label = self._resolve_gex_source_label(data)
         header = (
             f"GEX: {colorize(ansi['dim_white'], ticker)} {formatted_time}  "
-            f"{colorize(ansi['dim_white'], fmt_price(data.get('spot_price')))}"
+            f"{colorize(ansi['dim_white'], fmt_price(data.get('spot_price')))}  "
+            f"{colorize(ansi['dim_white'], source_label)}"
+        )
+
+        wall_label_width = max(label_width - 4, 1)
+        call_gap = ' ' * 3
+        put_gap = ' ' * 3
+        call_wall_line = self._format_wall_line(
+            data,
+            'call',
+            'call wall',
+            fmt_price,
+            label_width=wall_label_width,
+            gap_override=call_gap,
+            default_line=self._format_wall_value_line(
+                'call wall',
+                data.get('major_pos_vol'),
+                data.get('major_pos_oi'),
+                fmt_price,
+                label_width=wall_label_width,
+                volume_width=volume_width,
+                gap=call_gap,
+            ),
+        )
+        put_wall_line = self._format_wall_line(
+            data,
+            'put',
+            'put wall',
+            fmt_price,
+            label_width=wall_label_width,
+            gap_override=put_gap,
+            default_line=self._format_wall_value_line(
+                'put wall',
+                data.get('major_neg_vol'),
+                data.get('major_neg_oi'),
+                fmt_price,
+                label_width=wall_label_width,
+                volume_width=volume_width,
+                gap=put_gap,
+            ),
         )
 
         table_lines = [
             "volume                                   oi",
             fmt_pair('zero gamma', data.get('zero_gamma'), volume_color='yellow'),
-            fmt_pair('call wall', data.get('major_pos_vol'), data.get('major_pos_oi')),
-            fmt_pair('put wall', data.get('major_neg_vol'), data.get('major_neg_oi')),
+            call_wall_line,
+            put_wall_line,
             fmt_pair(
                 'net gex',
                 data.get('net_gex'),
@@ -771,9 +1219,40 @@ class TradeBot(commands.Bot):
                 return 'red'
             return neutral
 
-        zero_gamma_line = f"zero gamma          {colorize(ansi['yellow'], fmt_price(data.get('zero_gamma')))}"
-        major_pos_line = f"call wall           {fmt_price(data.get('major_pos_vol'))}"
-        major_neg_line = f"put wall            {fmt_price(data.get('major_neg_vol'))}"
+        zero_gamma_line = f"zero gamma        {colorize(ansi['yellow'], fmt_price(data.get('zero_gamma')))}"
+        wall_label_width = 15
+        call_gap = ' ' * 3
+        put_gap = ' ' * 3
+        major_pos_line = self._format_wall_line(
+            data,
+            'call',
+            'call wall',
+            fmt_price,
+            label_width=wall_label_width,
+            gap_override=call_gap,
+            default_line=self._format_wall_short_line(
+                'call wall',
+                data.get('major_pos_vol'),
+                fmt_price,
+                label_width=wall_label_width,
+                gap=call_gap,
+            ),
+        )
+        major_neg_line = self._format_wall_line(
+            data,
+            'put',
+            'put wall',
+            fmt_price,
+            label_width=wall_label_width,
+            gap_override=put_gap,
+            default_line=self._format_wall_short_line(
+                'put wall',
+                data.get('major_neg_vol'),
+                fmt_price,
+                label_width=wall_label_width,
+                gap=put_gap,
+            ),
+        )
         net_color_code = ansi.get(color_for_value(data.get('net_gex')))
         net_value = colorize(net_color_code, fmt_net_abs(data.get('net_gex')))
 
@@ -798,10 +1277,12 @@ class TradeBot(commands.Bot):
             current_price = 'N/A'
             current_delta = colorize(fallback, 'N/ABn')
 
+        source_label = self._resolve_gex_source_label(data)
         header = (
             f"{ansi['dim_white']}GEX: {ticker}{ansi['reset']}  "
             f"{formatted_time}  "
-            f"{ansi['dim_white']}{fmt_price(data.get('spot_price'))}{ansi['reset']}"
+            f"{ansi['dim_white']}{fmt_price(data.get('spot_price'))}{ansi['reset']}  "
+            f"{ansi['dim_white']}{source_label}{ansi['reset']}"
         )
 
         lines = [
@@ -810,8 +1291,8 @@ class TradeBot(commands.Bot):
             zero_gamma_line,
             major_pos_line,
             major_neg_line,
-            f"net gex             {net_value}",
-            f"current             {current_price:<8}   {current_delta}",
+            f"net gex           {net_value}",
+            f"current           {current_price:<8}   {current_delta}",
         ]
         body = "\n".join(lines)
         return f"```ansi\n{body}\n```"
@@ -913,3 +1394,37 @@ class TradeBot(commands.Bot):
             else:
                 formatted += f"**{key}:** {value}\n\n"
         return formatted
+
+    def format_tastytrade_summary(self, summary) -> str:
+        lines = [
+            "TastyTrade account summary",
+            f"account        {summary.account_number}",
+            f"nickname       {summary.nickname or 'n/a'}",
+            f"type           {summary.account_type}",
+            f"buying power   {summary.buying_power:,.2f}",
+            f"net liq        {summary.net_liq:,.2f}",
+            f"cash balance   {summary.cash_balance:,.2f}",
+        ]
+        return "```ansi\n" + "\n".join(lines) + "\n```"
+
+    def format_tastytrade_overview(self, overview: dict) -> str:
+        def fmt(value):
+            try:
+                return f"{float(value):,.2f}"
+            except (TypeError, ValueError):
+                return str(value)
+
+        lines = [
+            f"TastyTrade status   account {overview.get('account_number', 'n/a')}",
+            f"available funds    {fmt(overview.get('available_trading_funds'))}",
+            f"equity BP          {fmt(overview.get('equity_buying_power'))}",
+            f"derivative BP      {fmt(overview.get('derivative_buying_power'))}",
+            f"day trade BP       {fmt(overview.get('day_trading_buying_power'))}",
+            f"net liq            {fmt(overview.get('net_liquidating_value'))}",
+            f"cash balance       {fmt(overview.get('cash_balance'))}",
+            f"margin equity      {fmt(overview.get('margin_equity'))}",
+            f"maintenance req    {fmt(overview.get('maintenance_requirement'))}",
+            f"day trade excess   {fmt(overview.get('day_trade_excess'))}",
+            f"pending cash       {fmt(overview.get('pending_cash'))}",
+        ]
+        return "```ansi\n" + "\n".join(lines) + "\n```"
