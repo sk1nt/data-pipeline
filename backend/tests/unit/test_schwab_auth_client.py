@@ -17,34 +17,48 @@ class CounterDummy:
         self.calls += 1
 
 
-class QuickAuthClient(SchwabAuthClient):
+class QuickSchwabDummy:
+    """Simple wrapper to expose `schwab` interface for tests"""
     def __init__(self, dummy):
-        # Avoid calling parent __init__ which expects real schwab client and file IO
-        # Initialize minimal fields required by our tests.
-        self.client_id = 'test'
-        self.client_secret = 'secret'
-        self.refresh_token = 'r'
-        self.rest_url = 'https://api.test'
-        import threading
-        self._stop_refresh = threading.Event()
-        self._refresh_thread = None
-        self._lock = Lock()
-        self.schwab = dummy
+        self._dummy = dummy
+        self.tokens = {"access_token": "x", "refresh_token": "r", "expires_in": 3600}
+        self.calls = 0
 
-    def _auto_refresh_loop(self):
-        # Run a short-lived quick loop that will call refresh_token a few times.
-        self._stop_refresh = self._stop_refresh or __import__('threading').Event()
-        count = 0
-        while not self._stop_refresh.is_set() and count < 5:
-            with self._lock:
-                self.schwab.refresh_token()
-            count += 1
-            time.sleep(0.05)
+    def refresh_token(self):
+        # delegate to the dummy refresh to count calls if it implements it
+        try:
+            self._dummy.refresh_token()
+        except Exception:
+            pass
+        # emulate token rotation
+        self.calls += 1
+        # If the wrapped dummy exposed tokens, prefer that to emulate real client
+        if hasattr(self._dummy, "tokens"):
+            self.tokens = self._dummy.tokens
+        else:
+            self.tokens["access_token"] = f"x{self.calls}"
+        if self.calls % 3 == 0:
+            # change refresh token occasionally to emulate rotation
+            self.tokens["refresh_token"] = f"r{self.calls}"
+
+    @property
+    def access_token(self):
+        return self.tokens["access_token"]
+
 
 
 def test_auth_auto_refresh_background_loop():
     dummy = CounterDummy()
-    client = QuickAuthClient(dummy)
+    quick = QuickSchwabDummy(dummy)
+    client = SchwabAuthClient(
+        client_id="test",
+        client_secret="secret",
+        refresh_token="r",
+        rest_url="https://api.test",
+        schwab_client=quick,
+        access_refresh_interval_seconds=0.05,
+        refresh_token_rotate_interval_seconds=0.15,
+    )
     # Ensure not running
     assert dummy.calls == 0
     # Start auto-refresh; this creates a thread that will run our quick loop
@@ -54,6 +68,25 @@ def test_auth_auto_refresh_background_loop():
     time.sleep(0.3)
     client.stop_auto_refresh()
     assert dummy.calls >= 1
+
+
+def test_refresh_token_rotates_scheduled():
+    dummy = CounterDummy()
+    quick = QuickSchwabDummy(dummy)
+    client = SchwabAuthClient(
+        client_id="test",
+        client_secret="secret",
+        refresh_token="r",
+        rest_url="https://api.test",
+        schwab_client=quick,
+        access_refresh_interval_seconds=0.05,
+        refresh_token_rotate_interval_seconds=0.12,
+    )
+    initial_rt = quick.tokens["refresh_token"]
+    client.start_auto_refresh()
+    time.sleep(0.5)
+    client.stop_auto_refresh()
+    assert quick.tokens["refresh_token"] != initial_rt
 
 
 def test_auth_manual_refresh_updates_tokens(monkeypatch):
@@ -72,7 +105,14 @@ def test_auth_manual_refresh_updates_tokens(monkeypatch):
             return self.tokens['access_token']
 
     dummy = ManualDummy()
-    client = QuickAuthClient(dummy)
+    quick = QuickSchwabDummy(dummy)
+    client = SchwabAuthClient(
+        client_id="test",
+        client_secret="secret",
+        refresh_token="r",
+        rest_url="https://api.test",
+        schwab_client=quick,
+    )
     # Simulate manual refresh
     tokens = client.refresh_tokens()
     # We expect the tokens to reflect the manual refresh
