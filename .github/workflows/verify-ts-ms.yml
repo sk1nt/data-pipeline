@@ -1,0 +1,58 @@
+name: Verify Parquet ts_ms
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+jobs:
+  verify-tsms:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Find changed parquet files
+        run: |
+          git fetch origin ${{ github.base_ref }} --depth=1 || true
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '^data/parquet/(depth|tick)/' || true)
+          echo "$CHANGED" > changed_files.txt
+          echo "Changed files:"
+          cat changed_files.txt
+
+      - name: Run verification on changed Parquet files
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHANGED=$(cat changed_files.txt)
+          if [ -z "$CHANGED" ]; then
+            echo "No changed parquet files to verify; skipping job."
+            exit 0
+          fi
+          echo "Verifying changed parquet files..."
+          for f in $CHANGED; do
+            if [[ $f =~ ^data/parquet/(depth|tick)/([^/]+)/([0-9]{8})\.parquet$ ]]; then
+              kind=${BASH_REMATCH[1]}
+              symbol=${BASH_REMATCH[2]}
+              date=${BASH_REMATCH[3]}
+              yyyy=${date:0:4}
+              mm=${date:4:2}
+              dd=${date:6:2}
+              formatted="${yyyy}-${mm}-${dd}"
+              echo "Verifying: $f -> kind=$kind, symbol=$symbol, date=$formatted"
+              python3 scripts/verify_timestamps.py --start $formatted --end $formatted --symbol $symbol --parquet-root . --kind $kind --timestamp-tz UTC
+            else
+              echo "Skipping non-data/parquet or unmatched file: $f"
+            fi
+          done
