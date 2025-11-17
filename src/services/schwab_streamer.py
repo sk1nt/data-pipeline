@@ -51,6 +51,9 @@ class SchwabAuthClient:
         client_secret: str,
         refresh_token: str,
         rest_url: str,
+        schwab_client: Optional[auth.easy_client] = None,
+        access_refresh_interval_seconds: int = 29 * 60,
+        refresh_token_rotate_interval_seconds: int = 6 * 24 * 60 * 60,
     ):
         self.client_id = client_id
         self.client_secret = client_secret
@@ -59,13 +62,19 @@ class SchwabAuthClient:
         self._stop_refresh = threading.Event()
         self._refresh_thread: Optional[threading.Thread] = None
         self._lock = Lock()
+        self._access_refresh_interval = access_refresh_interval_seconds
+        self._refresh_token_rotate_interval = refresh_token_rotate_interval_seconds
+        self._last_refresh_token_rotate = datetime.utcnow()
 
         # token persistence path: project-root/.tokens/schwab_token.json
         project_root = Path(__file__).resolve().parents[2]
         self._tok_path = project_root / ".tokens" / "schwab_token.json"
         
-        # Initialize schwab-py client
-        self.schwab = auth.easy_client(
+        # Initialize schwab-py client (or use provided one for testability)
+        if schwab_client is not None:
+            self.schwab = schwab_client
+        else:
+            self.schwab = auth.easy_client(
             api_key=self.client_id,
             app_secret=self.client_secret,
             callback_url='http://127.0.0.1:8182',  # Required for login flow
@@ -89,6 +98,16 @@ class SchwabAuthClient:
                     }
             except Exception:
                 pass
+
+    def _load_persisted_tokens(self) -> Optional[dict]:
+        """Load persisted tokens from persistent token path if present."""
+        try:
+            if self._tok_path.exists():
+                with open(self._tok_path, "r") as fh:
+                    return json.load(fh)
+        except Exception as e:
+            LOG.debug("Failed to read persisted tokens: %s", e)
+        return None
 
     def start_auto_refresh(self) -> None:
         """Start background thread for automatic token refresh."""
@@ -136,20 +155,38 @@ class SchwabAuthClient:
             )
 
     def _auto_refresh_loop(self) -> None:
-        """Background loop to refresh tokens periodically."""
-        ACCESS_REFRESH_INTERVAL = 29 * 60  # 29 minutes
+        """Background loop to refresh tokens periodically and rotate refresh token less frequently."""
         while not self._stop_refresh.is_set():
+            now = datetime.utcnow()
             try:
                 with self._lock:
+                    # Refresh access token
                     self.schwab.refresh_token()
+                    # Rotate refresh token on longer schedule
+                    if (now - self._last_refresh_token_rotate).total_seconds() >= self._refresh_token_rotate_interval:
+                        LOG.info("Rotating refresh token (scheduled interval reached)")
+                        self.schwab.refresh_token()
+                        self._last_refresh_token_rotate = now
             except Exception as e:
                 LOG.error("Auto-refresh failed: %s", e)
             # Sleep in chunks to be responsive to stop
             slept = 0
-            while slept < ACCESS_REFRESH_INTERVAL and not self._stop_refresh.is_set():
-                chunk = min(10, ACCESS_REFRESH_INTERVAL - slept)
+            while slept < self._access_refresh_interval and not self._stop_refresh.is_set():
+                chunk = min(10, self._access_refresh_interval - slept)
                 time.sleep(chunk)
                 slept += chunk
+
+    def refresh_refresh_token(self) -> Optional[dict]:
+        """Force a refresh_token rotation and update rotation timestamp."""
+        LOG.info("Forcing rotation of Schwab refresh token")
+        try:
+            with self._lock:
+                self.schwab.refresh_token()
+                self._last_refresh_token_rotate = datetime.utcnow()
+                return self.schwab.tokens
+        except Exception as e:  # pragma: no cover - defensive
+            LOG.error("Forced refresh token rotation failed: %s", e)
+            return None
 
 
 class SchwabMessageParser:
