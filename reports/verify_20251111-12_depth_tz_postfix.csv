@@ -1,0 +1,3 @@
+kind,path,date,exists,readable,rows,has_ts_ms,mismatch_rows,ts_ms_mismatch_rows,min_ts,max_ts,min_ts_ms,max_ts_ms,error
+depth,data/parquet/depth/MNQ/20251111.parquet,2025-11-11,True,True,29850955,True,0,0,2025-11-11 00:00:00,2025-11-11 23:59:59.982000,1762837200000,1762923599982,
+depth,data/parquet/depth/MNQ/20251112.parquet,2025-11-12,True,True,38102688,True,0,0,2025-11-12 00:00:00,2025-11-12 23:59:59.982000,1762923600000,1763009999982,
