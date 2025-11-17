@@ -120,3 +120,64 @@ def test_auth_manual_refresh_updates_tokens(monkeypatch):
     # The SchwabAuthClient.refresh_tokens() returns tokens dict
     assert tokens is not None
     assert tokens.get('access_token') == 'b'
+
+
+def test_schwab_auth_client_uses_https_callback_by_default(monkeypatch):
+    captured = {}
+
+    def fake_easy_client(api_key, app_secret, callback_url, token_path=None, **kwargs):
+        captured['api_key'] = api_key
+        captured['app_secret'] = app_secret
+        captured['callback_url'] = callback_url
+        captured['token_path'] = token_path
+        class Dummy:
+            def __init__(self):
+                self.access_token = ''
+                self.tokens = {}
+            def stream(self):
+                return None
+        return Dummy()
+
+    monkeypatch.setattr('src.services.schwab_streamer.auth.easy_client', fake_easy_client)
+    from src.config import settings as cfg
+    old = cfg.schwab_redirect_uri
+    cfg.schwab_redirect_uri = None
+    try:
+        SchwabAuthClient(
+            client_id='k',
+            client_secret='s',
+            refresh_token='r',
+            rest_url='https://api.schwab.com/v1',
+        )
+        assert captured.get('callback_url') == 'https://127.0.0.1:8182'
+    finally:
+        cfg.schwab_redirect_uri = old
+
+
+def test_schwab_auth_client_uses_settings_redirect_uri(monkeypatch):
+    captured = {}
+
+    def fake_easy_client(api_key, app_secret, callback_url, token_path=None, **kwargs):
+        captured['callback_url'] = callback_url
+        class Dummy:
+            def __init__(self):
+                self.access_token = ''
+                self.tokens = {}
+            def stream(self):
+                return None
+        return Dummy()
+
+    monkeypatch.setattr('src.services.schwab_streamer.auth.easy_client', fake_easy_client)
+    from src.config import settings as cfg
+    old = cfg.schwab_redirect_uri
+    cfg.schwab_redirect_uri = 'https://127.0.0.1:8182/callback'
+    try:
+        SchwabAuthClient(
+            client_id='k',
+            client_secret='s',
+            refresh_token='r',
+            rest_url='https://api.schwab.com/v1',
+        )
+        assert captured.get('callback_url') == 'https://127.0.0.1:8182/callback'
+    finally:
+        cfg.schwab_redirect_uri = old

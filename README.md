@@ -81,13 +81,12 @@ The Schwab streamer ingests tick + level 2 market data directly into the trading
 2. Install dependencies: `pip install -e .`
 3. Generate Schwab OAuth tokens (one-time, or whenever consent expires):
    ```bash
-   python scripts/schwab_oauth_helper.py
+   python scripts/schwab_token_manager.py exchange-url --url "<full redirect url>"
    ```
    This prints the Schwab consent URL, guides you through login/MFA, and saves the new `SCHWAB_REFRESH_TOKEN` to `.env`.
 4. (Optional) Keep tokens fresh automatically:
-   ```bash
-   python scripts/schwab_token_rotator.py --access-interval-minutes 25 --refresh-interval-days 6
-   ```
+   - Use the `SchwabAuthClient` built into `src/services/schwab_streamer.py` (recommended) by running the streamer as a long-running process — it will auto-refresh access tokens and rotate refresh tokens periodically.
+   - Or call the manager to rotate manually: `python scripts/schwab_token_manager.py rotate --force`.
    The rotator stores the latest access/refresh pair in `data/schwab_tokens.json` and rewrites `SCHWAB_REFRESH_TOKEN` in `.env` every six days. Leave it running alongside your data services so the streamer always has a valid token.
 5. Run the streamer:
 
@@ -96,6 +95,21 @@ python scripts/run_schwab_streamer.py
 ```
 
 Use `--dry-run` to validate configuration without opening the websocket.
+
+### CI-Friendly / Non-Interactive Login
+
+If you want to run the streamer in CI or any non-interactive environment, avoid logging in manually each time. You can provide tokens via environment variables or persist a token file so the streamer runs without a browser:
+
+- Seed the refresh token as a CI secret: `SCHWAB_REFRESH_TOKEN` and optionally `SCHWAB_ACCESS_TOKEN`.
+- Use the helper script to persist an env-supplied token into the repo tokens path so that non-interactive runs reuse it:
+
+```bash
+export SCHWAB_REFRESH_TOKEN="<refresh token>"
+export SCHWAB_ACCESS_TOKEN="<optional access token>"
+python scripts/schwab_token_manager.py persist-env
+```
+
+Once persisted, `python scripts/run_schwab_streamer_with_tastytrade_symbols.py` can execute without a browser login. If your tokens expire or the refresh token is rotated, update the `SCHWAB_REFRESH_TOKEN` in your CI secrets and re-run the manager or streamer.
 
 ## API Documentation
 
