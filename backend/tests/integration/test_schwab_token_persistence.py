@@ -104,3 +104,54 @@ def test_manual_refresh_persists_tokens_to_file(tmp_path):
                 tok_dir.rmdir()
         except Exception:
             pass
+
+
+def test_auto_refresh_persists_tokens_under_short_interval(tmp_path):
+    """Integration test: a short auto-refresh interval persists updated tokens to disk."""
+    repo_root = Path(__file__).resolve().parents[3]
+    tok_dir = repo_root / ".tokens"
+    tok_dir.mkdir(parents=True, exist_ok=True)
+    tok_path = tok_dir / "schwab_token.json"
+    if tok_path.exists():
+        tok_path.unlink()
+
+    class AutoSchwabDummy:
+        def __init__(self):
+            self.tokens = {"access_token": "initial", "refresh_token": "r", "expires_in": 3600}
+            self.calls = 0
+
+        def refresh_token(self):
+            self.calls += 1
+            self.tokens["access_token"] = f"refreshed_{self.calls}"
+
+        @property
+        def access_token(self):
+            return self.tokens.get("access_token")
+
+    dummy = AutoSchwabDummy()
+    client = SchwabAuthClient(
+        client_id="test",
+        client_secret="secret",
+        refresh_token="r",
+        rest_url="https://api.test",
+        schwab_client=dummy,
+        access_refresh_interval_seconds=0.05,
+        refresh_token_rotate_interval_seconds=10,
+    )
+    try:
+        client.start_auto_refresh()
+        # Allow a few refresh cycles
+        time.sleep(0.3)
+        client.stop_auto_refresh()
+        # tokens file should now exist and reflect a refreshed access_token
+        assert tok_path.exists()
+        with open(tok_path, "r") as fh:
+            persisted = json.load(fh)
+        assert persisted.get("access_token", "") != "initial"
+    finally:
+        try:
+            tok_path.unlink()
+            if not any(tok_dir.iterdir()):
+                tok_dir.rmdir()
+        except Exception:
+            pass
