@@ -134,6 +134,11 @@ class SchwabAuthClient:
                 self.schwab.refresh_token()
                 tokens = self.schwab.tokens
                 LOG.info("Tokens refreshed successfully")
+                try:
+                    if isinstance(tokens, dict):
+                        self._persist_tokens(tokens)
+                except Exception as e:  # pragma: no cover - defensive
+                    LOG.debug("Failed to persist tokens after manual refresh: %s", e)
                 return tokens
         except Exception as e:
             LOG.error("Manual token refresh failed: %s", e)
@@ -162,10 +167,24 @@ class SchwabAuthClient:
                 with self._lock:
                     # Refresh access token
                     self.schwab.refresh_token()
+                    # Immediately persist tokens for safety
+                    tokens = getattr(self.schwab, "tokens", None)
+                    if isinstance(tokens, dict):
+                        try:
+                            self._persist_tokens(tokens)
+                        except Exception as e:  # pragma: no cover - defensive
+                            LOG.debug("Failed to persist tokens after auto refresh: %s", e)
                     # Rotate refresh token on longer schedule
                     if (now - self._last_refresh_token_rotate).total_seconds() >= self._refresh_token_rotate_interval:
                         LOG.info("Rotating refresh token (scheduled interval reached)")
                         self.schwab.refresh_token()
+                        # Persist again after rotation
+                        tokens = getattr(self.schwab, "tokens", None)
+                        if isinstance(tokens, dict):
+                            try:
+                                self._persist_tokens(tokens)
+                            except Exception as e:  # pragma: no cover - defensive
+                                LOG.debug("Failed to persist tokens after rotation: %s", e)
                         self._last_refresh_token_rotate = now
             except Exception as e:
                 LOG.error("Auto-refresh failed: %s", e)
@@ -182,11 +201,30 @@ class SchwabAuthClient:
         try:
             with self._lock:
                 self.schwab.refresh_token()
+                tokens = getattr(self.schwab, "tokens", None)
+                if isinstance(tokens, dict):
+                    try:
+                        self._persist_tokens(tokens)
+                    except Exception:  # pragma: no cover - defensive
+                        pass
                 self._last_refresh_token_rotate = datetime.utcnow()
                 return self.schwab.tokens
         except Exception as e:  # pragma: no cover - defensive
             LOG.error("Forced refresh token rotation failed: %s", e)
             return None
+
+    def _persist_tokens(self, tokens: dict) -> None:
+        """Persist tokens to disk atomically at the configured token path."""
+        try:
+            parent = self._tok_path.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._tok_path.with_suffix(".tmp")
+            with open(tmp, "w") as fh:
+                json.dump(tokens, fh)
+            os.replace(tmp, self._tok_path)
+            LOG.debug("Persisted Schwab tokens to %s", self._tok_path)
+        except Exception as e:  # pragma: no cover - defensive
+            LOG.error("Failed to persist Schwab tokens: %s", e)
 
 
 class SchwabMessageParser:
