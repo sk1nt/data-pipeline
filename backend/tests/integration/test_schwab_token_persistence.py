@@ -302,3 +302,43 @@ def test_env_tokens_are_loaded_and_persisted(tmp_path, monkeypatch, tmp_path_fac
             tok_dir.rmdir()
     except Exception:
         pass
+
+
+def test_append_refresh_token_to_env_on_init(tmp_path, monkeypatch):
+    """If SCHWAB_PERSIST_REFRESH_TO_ENV is enabled, init should append refresh token to .env"""
+    repo_root = Path(__file__).resolve().parents[3]
+    env_path = repo_root / '.env'
+    # Ensure clean env file
+    if env_path.exists():
+        env_path.unlink()
+    monkeypatch.setenv('SCHWAB_PERSIST_REFRESH_TO_ENV', '1')
+    # create dummy client that exposes tokens
+    class Dummy:
+        def __init__(self):
+            self.tokens = {'access_token': 'a', 'refresh_token': 'env_r', 'expires_in': 3600}
+            self.schwab = self
+
+        @property
+        def access_token(self):
+            return self.tokens.get('access_token')
+
+        def refresh_token(self):
+            self.tokens['access_token'] = 'refreshed'
+
+    dummy = Dummy()
+    client = SchwabAuthClient(
+        client_id='k',
+        client_secret='s',
+        refresh_token='r',
+        rest_url='https://api.test',
+        schwab_client=dummy,
+    )
+    # .env should now exist and contain updated SCHWAB_REFRESH_TOKEN
+    assert env_path.exists()
+    text = env_path.read_text()
+    assert 'SCHWAB_REFRESH_TOKEN' in text
+    # cleanup
+    try:
+        env_path.unlink()
+    except Exception:
+        pass
