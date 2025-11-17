@@ -19,6 +19,8 @@ from ..lib.logging import get_logger
 from ..lib.redis_client import RedisClient
 from ..models.market_data import Level2Event, Level2Quote, TickEvent
 from .trading_publisher import TradingEventPublisher
+from schwab import streaming as schwab_streaming
+import asyncio
 
 import os
 import json
@@ -51,6 +53,7 @@ class SchwabAuthClient:
         client_secret: str,
         refresh_token: str,
         rest_url: str,
+        interactive: bool = True,
         schwab_client: Optional[auth.easy_client] = None,
         access_refresh_interval_seconds: int = 29 * 60,
         refresh_token_rotate_interval_seconds: int = 6 * 24 * 60 * 60,
@@ -74,12 +77,43 @@ class SchwabAuthClient:
         if schwab_client is not None:
             self.schwab = schwab_client
         else:
-            self.schwab = auth.easy_client(
-            api_key=self.client_id,
-            app_secret=self.client_secret,
-            callback_url='http://127.0.0.1:8182',  # Required for login flow
-            token_path=str(self._tok_path)
-        )
+            # Prefer redirect URI configured in settings; default to https
+            callback = settings.schwab_redirect_uri or "https://127.0.0.1:8182"
+            try:
+                self.schwab = auth.easy_client(
+                    api_key=self.client_id,
+                    app_secret=self.client_secret,
+                    callback_url=callback,
+                    token_path=str(self._tok_path),
+                    interactive=interactive,
+                )
+            except ValueError as e:
+                # Some older token files are stored in a legacy format and will
+                # cause the schwab lib to raise ValueError. Attempt to rename
+                # the legacy token file and retry creation without token_path
+                # to allow a fresh login flow (this is a best-effort fix).
+                LOG.warning("Schwab easy_client failed to load token file, attempting to rotate legacy token: %s", e)
+                try:
+                    if self._tok_path.exists():
+                        legacy = self._tok_path.with_suffix(".old")
+                        os.replace(self._tok_path, legacy)
+                        LOG.info("Renamed legacy token file to %s", legacy)
+                    # Some older installs use `schwab.token` in the token dir; rotate it too
+                    alt_tok = self._tok_path.with_name("schwab.token")
+                    if alt_tok.exists():
+                        alt_legacy = alt_tok.with_suffix(".old")
+                        os.replace(alt_tok, alt_legacy)
+                        LOG.info("Renamed legacy token file to %s", alt_legacy)
+                except Exception as rename_exc:  # pragma: no cover - defensive
+                    LOG.debug("Failed to rename legacy token file: %s", rename_exc)
+                # Retry without passing token_path (client will manage it)
+                self.schwab = auth.easy_client(
+                    api_key=self.client_id,
+                    app_secret=self.client_secret,
+                    callback_url=callback,
+                    token_path=str(self._tok_path),
+                    interactive=interactive,
+                )
         
         # If we have a refresh token, set it in the schwab client
         if self.refresh_token:
@@ -89,15 +123,62 @@ class SchwabAuthClient:
                 if tokens:
                     self.schwab.tokens = tokens
                 else:
-                    # Set initial tokens
-                    self.schwab.tokens = {
-                        'access_token': '',
-                        'refresh_token': self.refresh_token,
-                        'token_type': 'Bearer',
-                        'expires_in': 0
-                    }
+                    # Attempt to load tokens from environment variables
+                    env_tokens = self._load_tokens_from_env()
+                    if env_tokens:
+                        self.schwab.tokens = env_tokens
+                    else:
+                        # Set initial tokens if only refresh token is present.
+                        # Do not persist an empty access token to avoid creating
+                        # token files when none were provided.
+                        self.schwab.tokens = {
+                            'access_token': os.environ.get('SCHWAB_ACCESS_TOKEN', ''),
+                            'refresh_token': self.refresh_token,
+                            'token_type': 'Bearer',
+                            'expires_in': int(os.environ.get('SCHWAB_EXPIRES_IN', '0')),
+                        }
             except Exception:
                 pass
+
+    def _load_tokens_from_env(self) -> Optional[dict]:
+        """Build token dict from environment variables if present.
+
+        This supports CI-friendly runs and avoids requiring a browser when
+        `SCHWAB_REFRESH_TOKEN` (or `SCHWAB_TOKENS_JSON`) is provided in env.
+        """
+        # First, allow a JSON-encoded token to be supplied via env
+        json_tok = os.environ.get('SCHWAB_TOKENS_JSON')
+        if json_tok:
+            try:
+                parsed = json.loads(json_tok)
+                # If keys are nested under `tokens` (the exchange script format), unwrap
+                if isinstance(parsed, dict) and 'tokens' in parsed:
+                    parsed = parsed['tokens']
+                if isinstance(parsed, dict) and parsed.get('refresh_token'):
+                    # persist for future runs
+                    try:
+                        self._persist_tokens(parsed)
+                    except Exception:
+                        pass
+                    return parsed
+            except Exception:
+                LOG.debug("SCHWAB_TOKENS_JSON present but failed to parse; ignoring")
+
+        # Fallback: use access/refresh tokens as separate env variables
+        rt = os.environ.get('SCHWAB_REFRESH_TOKEN') or os.environ.get('SCHWAB_RTOKEN') or None
+        at = os.environ.get('SCHWAB_ACCESS_TOKEN') or os.environ.get('SCHWAB_ATOKEN') or None
+        if rt or at:
+            tokens = {
+                'access_token': at or '',
+                'refresh_token': rt or '',
+                'token_type': 'Bearer',
+                'expires_in': int(os.environ.get('SCHWAB_EXPIRES_IN', '0')),
+            }
+            try:
+                self._persist_tokens(tokens)
+            except Exception:
+                pass
+            return tokens
 
     def _load_persisted_tokens(self) -> Optional[dict]:
         """Load persisted tokens from persistent token path if present."""
@@ -226,6 +307,63 @@ class SchwabAuthClient:
         except Exception as e:  # pragma: no cover - defensive
             LOG.error("Failed to persist Schwab tokens: %s", e)
 
+    def stream(self):
+        """Return a synchronous stream adapter that wraps schwab-py's StreamClient.
+        The wrapper provides `start(symbols, on_tick, on_level2)` and `stop()`
+        methods to match existing expectations used elsewhere in the codebase.
+        """
+        try:
+            sc = schwab_streaming.StreamClient(self.schwab)
+            return _SchwabStreamAdapter(sc)
+        except Exception as e:
+            LOG.error("Failed to construct StreamClient adapter: %s", e)
+            raise
+
+
+class _SchwabStreamAdapter:
+    """Synchronous adapter over `schwab.streaming.StreamClient`.
+    Implements `start(symbols, on_tick, on_level2)` and `stop()`.
+    """
+    def __init__(self, stream_client: schwab_streaming.StreamClient):
+        self._sc = stream_client
+        self._running = False
+        self._symbols = []
+
+    def start(self, symbols=None, on_tick=None, on_level2=None):
+        symbols = symbols or []
+        self._symbols = symbols
+        # Register handlers that forward raw payload to provided handlers
+        if on_tick:
+            # Attach to both equity and futures level-one handlers as appropriate
+            self._sc.add_level_one_futures_handler(lambda msg: on_tick(msg))
+            self._sc.add_level_one_equity_handler(lambda msg: on_tick(msg))
+        if on_level2:
+            # Attach book handlers
+            self._sc.add_nasdaq_book_handler(lambda msg: on_level2(msg))
+            self._sc.add_nyse_book_handler(lambda msg: on_level2(msg))
+
+        # Login and subscribe for symbols
+        asyncio.run(self._sc.login())
+        # Subscribe to symbol types
+        # Map to futures vs equities
+        futures_symbols = set([s for s in symbols if s.upper() in {"MES", "MNQ", "NQ"}])
+        equity_symbols = [s for s in symbols if s.upper() not in futures_symbols]
+        if futures_symbols:
+            asyncio.run(self._sc.level_one_futures_add(list(futures_symbols)))
+        if equity_symbols:
+            asyncio.run(self._sc.level_one_equity_add(equity_symbols))
+            asyncio.run(self._sc.nasdaq_book_add(equity_symbols))
+            asyncio.run(self._sc.nyse_book_add(equity_symbols))
+        self._running = True
+
+    def stop(self):
+        if self._running:
+            try:
+                asyncio.run(self._sc.logout())
+            except Exception:
+                pass
+            self._running = False
+
 
 class SchwabMessageParser:
     """Convert Schwab payloads into internal models."""
@@ -304,7 +442,10 @@ class SchwabStreamClient:
         self.parser = SchwabMessageParser()
         self._tick_handler = tick_handler
         self._level2_handler = level2_handler
-        self.stream = self.auth_client.schwab.stream()
+        # Expect the auth_client to provide a `stream()` method returning a
+        # streaming wrapper with `start()`/`stop()` methods. The `schwab-py`
+        # Client itself doesn't provide a `stream()` member.
+        self.stream = self.auth_client.stream()
 
     def start(self) -> None:
         """Start streaming loop (blocking)."""
@@ -353,6 +494,8 @@ def build_streamer(
     publisher_factory: Optional[Callable[[RedisClient], TradingEventPublisher]] = None,
     tick_handler: Optional[Callable[[TickEvent], None]] = None,
     level2_handler: Optional[Callable[[Level2Event], None]] = None,
+    use_tastytrade_symbols: bool = False,
+    interactive: bool = True,
 ) -> SchwabStreamClient:
     """Factory to wire dependencies from settings."""
     if not settings.schwab_client_id or not settings.schwab_client_secret or not settings.schwab_refresh_token:
@@ -369,12 +512,14 @@ def build_streamer(
         client_secret=settings.schwab_client_secret,
         refresh_token=settings.schwab_refresh_token,
         rest_url=settings.schwab_rest_url,
+        interactive=interactive,
     )
+    symbols = settings.tastytrade_symbol_list if use_tastytrade_symbols else settings.schwab_symbol_list
     return SchwabStreamClient(
         auth_client=auth_client,
         publisher=publisher,
         stream_url=settings.schwab_stream_url,
-        symbols=settings.schwab_symbol_list,
+        symbols=symbols,
         heartbeat_seconds=settings.schwab_heartbeat_seconds,
         tick_handler=tick_handler,
         level2_handler=level2_handler,

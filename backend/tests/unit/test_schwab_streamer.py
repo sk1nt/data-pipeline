@@ -14,6 +14,7 @@ from src.services.schwab_streamer import (
     SchwabMessageParser,
     SchwabStreamClient,
     SchwabAuthClient,
+    build_streamer,
 )
 
 
@@ -141,3 +142,39 @@ def test_streamer_refresh_tokens_delegates(monkeypatch):
     assert refreshed is not None
     # After refresh, DummyAuthClient returns 'y'
     assert auth_client.access_token == 'y'
+
+
+def test_build_streamer_uses_tastytrade_symbols_when_requested(monkeypatch):
+    # Create a dummy auth and publisher to avoid starting real stream
+    class DummyAuth: pass
+    class DummyPublisher: pass
+    # Use settings to assert the list is passed through
+    # Monkeypatch SchwabAuthClient to avoid real easy_client or token file parsing
+    class TestDummyAuth:
+        def __init__(self, *args, **kwargs):
+            self._stream = DummyStream()
+            self.schwab = self
+        def start_auto_refresh(self):
+            pass
+        def stop_auto_refresh(self):
+            pass
+        def refresh_tokens(self):
+            return {'access_token': 'x', 'refresh_token': 'r', 'expires_in': 3600}
+        def stream(self):
+            return self._stream
+
+    monkeypatch.setattr(
+        'src.services.schwab_streamer.SchwabAuthClient',
+        TestDummyAuth,
+    )
+
+    client = build_streamer(
+        redis_client=None,
+        publisher_factory=lambda rc: DummyPublisher(),
+        tick_handler=None,
+        level2_handler=None,
+        use_tastytrade_symbols=True,
+    )
+    # The `symbols` attribute should equal the tastytrade symbol list
+    from src.config import settings as cfg
+    assert client.symbols == cfg.tastytrade_symbol_list

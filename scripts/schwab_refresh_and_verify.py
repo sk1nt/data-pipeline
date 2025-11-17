@@ -1,17 +1,8 @@
-"""Refresh access token using refresh token in .env or .schwab_tokens.json, then verify API access.
-
-This script will:
-- Read `SCHWAB_REFRESH_TOKEN`, `SCHWAB_CLIENT_ID`, and `SCHWAB_CLIENT_SECRET` from `.env`.
-- POST to the token endpoint with `grant_type=refresh_token` to obtain a new access token.
-- Update `.schwab_tokens.json` with the latest token response.
-- Optionally make a simple authenticated GET request to a Schawb protected endpoint to verify the token works.
-
-Usage:
-  python3 scripts/schwab_refresh_and_verify.py
-
-Note: This script does not start a live streaming websocket. If `Schwabdev` is installed and available in PYTHONPATH,
-it will attempt to import and call a `stream` helper; otherwise it will perform a simple API request to check token validity.
+"""Deprecated helper — use `scripts/schwab_token_manager.py rotate` / `verify` instead.
 """
+import sys
+print('DEPRECATED: use scripts/schwab_token_manager.py rotate or verify')
+sys.exit(1)
 
 import os
 import sys

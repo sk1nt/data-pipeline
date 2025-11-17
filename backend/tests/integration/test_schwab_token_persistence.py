@@ -155,3 +155,150 @@ def test_auto_refresh_persists_tokens_under_short_interval(tmp_path):
                 tok_dir.rmdir()
         except Exception:
             pass
+
+
+def test_legacy_token_file_is_renamed_and_client_created(tmp_path, monkeypatch):
+    """If legacy token file format triggers a ValueError, ensure it is renamed and client is created."""
+    repo_root = Path(__file__).resolve().parents[3]
+    tok_dir = repo_root / ".tokens"
+    tok_dir.mkdir(parents=True, exist_ok=True)
+    tok_path = tok_dir / "schwab_token.json"
+    # Create a legacy token format (non-JSON Python repr) so reading fails
+    with open(tok_path, "w") as fh:
+        fh.write("{'access_token': 'legacy', 'refresh_token': 'r', 'expires_in': 3600}")
+
+    # fake easy_client: first call raises ValueError, second returns a dummy
+    call_count = {"calls": 0}
+
+    def fake_easy_client(api_key, app_secret, callback_url=None, token_path=None, **kwargs):
+        call_count['calls'] += 1
+        if call_count['calls'] == 1:
+            raise ValueError("WARNING: The token format has changed since this token was created.")
+        class Dummy:
+            def __init__(self):
+                self.tokens = {"access_token": "fresh", "refresh_token": "r", "expires_in": 3600}
+            def stream(self):
+                return None
+        return Dummy()
+
+    monkeypatch.setattr('src.services.schwab_streamer.auth.easy_client', fake_easy_client)
+
+    try:
+        client = SchwabAuthClient(
+            client_id="k",
+            client_secret="s",
+            refresh_token="r",
+            rest_url="https://api.test",
+        )
+        # token file should have been renamed to .old
+        assert not tok_path.exists()
+        legacy = tok_path.with_suffix('.old')
+        assert legacy.exists()
+    finally:
+        try:
+            # cleanup
+            if tok_path.exists():
+                tok_path.unlink()
+            legacy = tok_path.with_suffix('.old')
+            if legacy.exists():
+                legacy.unlink()
+            if not any(tok_dir.iterdir()):
+                tok_dir.rmdir()
+        except Exception:
+            pass
+
+
+def test_legacy_token_filename_schwab_token_renamed(tmp_path, monkeypatch):
+    """If legacy `schwab.token` exists, ensure it is renamed and client is created."""
+    repo_root = Path(__file__).resolve().parents[3]
+    tok_dir = repo_root / ".tokens"
+    tok_dir.mkdir(parents=True, exist_ok=True)
+    alt_path = tok_dir / "schwab.token"
+    # Write non-JSON legacy format
+    with open(alt_path, "w") as fh:
+        fh.write("{'access_token': 'legacy', 'refresh_token': 'r', 'expires_in': 3600}")
+
+    # fake easy_client to behave similarly: first call raises, second succeeds
+    call_count = {"calls": 0}
+
+    def fake_easy_client(api_key, app_secret, callback_url=None, token_path=None, **kwargs):
+        call_count['calls'] += 1
+        if call_count['calls'] == 1:
+            raise ValueError("WARNING: The token format has changed since this token was created.")
+        class Dummy:
+            def __init__(self):
+                self.tokens = {"access_token": "fresh", "refresh_token": "r", "expires_in": 3600}
+            def stream(self):
+                return None
+        return Dummy()
+
+    monkeypatch.setattr('src.services.schwab_streamer.auth.easy_client', fake_easy_client)
+
+    try:
+        client = SchwabAuthClient(
+            client_id="k",
+            client_secret="s",
+            refresh_token="r",
+            rest_url="https://api.test",
+        )
+        # alt path should have been renamed
+        assert not alt_path.exists()
+        alt_legacy = alt_path.with_suffix('.old')
+        assert alt_legacy.exists()
+    finally:
+        try:
+            if alt_path.exists():
+                alt_path.unlink()
+            alt_legacy = alt_path.with_suffix('.old')
+            if alt_legacy.exists():
+                alt_legacy.unlink()
+            if not any(tok_dir.iterdir()):
+                tok_dir.rmdir()
+        except Exception:
+            pass
+
+
+def test_env_tokens_are_loaded_and_persisted(tmp_path, monkeypatch, tmp_path_factory):
+    """If tokens are provided via environment variables, they should be persisted and used."""
+    repo_root = Path(__file__).resolve().parents[3]
+    tok_dir = repo_root / '.tokens'
+    tok_dir.mkdir(parents=True, exist_ok=True)
+    tok_path = tok_dir / 'schwab_token.json'
+    # ensure no token file
+    if tok_path.exists():
+        tok_path.unlink()
+
+    monkeypatch.setenv('SCHWAB_REFRESH_TOKEN', 'env_refresh')
+    monkeypatch.setenv('SCHWAB_ACCESS_TOKEN', 'env_access')
+
+    class DummyEnv:
+        def __init__(self):
+            self.tokens = {}
+
+        @property
+        def access_token(self):
+            return self.tokens.get('access_token')
+
+    d = DummyEnv()
+    client = SchwabAuthClient(
+        client_id='test',
+        client_secret='secret',
+        refresh_token='r',
+        rest_url='https://api.test',
+        schwab_client=d,
+    )
+    # After initialization, the dummy tokens should be set from env and persisted
+    assert d.tokens.get('refresh_token') == 'env_refresh'
+    assert d.tokens.get('access_token') == 'env_access'
+    assert tok_path.exists()
+    with open(tok_path, 'r') as fh:
+        persisted = json.load(fh)
+    assert persisted.get('refresh_token') == 'env_refresh'
+    assert persisted.get('access_token') == 'env_access'
+    # cleanup
+    try:
+        tok_path.unlink()
+        if not any(tok_dir.iterdir()):
+            tok_dir.rmdir()
+    except Exception:
+        pass
