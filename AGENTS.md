@@ -6,7 +6,7 @@ Source lives in `src/` plus `backend/src/` (FastAPI `api/`, Redis/DuckDB `servic
 ## Build, Test, and Development Commands
 - `pip install -e .` installs the editable package plus extras used by scripts.
 - `python data-pipeline.py --host 0.0.0.0 --port 8877` starts the orchestration API and monitoring UI.
-- `python scripts/run_schwab_streamer.py --dry-run` validates Schwab credentials and channel wiring before live ticks.
+ - `python scripts/start_schwab_streamer.py --dry-run` validates Schwab credentials and channel wiring before live ticks.
 - `pytest backend/tests` (add `-k pattern` or `-m "not integration"`) drives unit and contract coverage.
 - `ruff check . && ruff format .` enforces lint plus formatter parity with CI.
 
@@ -20,4 +20,4 @@ Prefer pytest fixtures over ad-hoc setup; place shared helpers in `backend/tests
 Follow the existing log style: lowercase Conventional Commit prefixes (`fix(redis_flush_worker): ...`, `chore:`) plus imperative summaries. PRs should link relevant specs or issues, summarize API changes, and attach screenshots or log tails for UI/monitoring tweaks. Include the Ruff + pytest command output (or CI links) in the PR body before requesting review, and document new config keys or folders in `docs/` or `specs/` as part of the same change.
 
 ## Security & Configuration Tips
-Store tokens and client secrets only in `.env` and runtime files under `data/`; rotate Schwab credentials with `python scripts/schwab_oauth_helper.py` instead of manual editing. When experimenting with Redis, namespace keys with your username (for example, `dev_jane_ticks`) to avoid colliding with shared live channels.
+Store tokens and client secrets only in `.env` and runtime files under `data/`; rotate Schwab credentials with `python scripts/schwab_token_manager.py rotate` instead of manual editing. When experimenting with Redis, namespace keys with your username (for example, `dev_jane_ticks`) to avoid colliding with shared live channels.

@@ -91,7 +91,7 @@ The Schwab streamer ingests tick + level 2 market data directly into the trading
 5. Run the streamer:
 
 ```bash
-python scripts/run_schwab_streamer.py
+python scripts/start_schwab_streamer.py
 ```
 
 Use `--dry-run` to validate configuration without opening the websocket.
