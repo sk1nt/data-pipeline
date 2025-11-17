@@ -83,7 +83,13 @@ def resolve_scid_for_date(target: date, args: argparse.Namespace) -> Path:
     raise ValueError("Either --scid-dir or --scid-file must be provided")
 
 
-def run_day(python: str, date_str: str, args: argparse.Namespace) -> int:
+def run_day(
+    python: str,
+    date_str: str,
+    args: argparse.Namespace,
+    ensure_emit_ticks: bool = False,
+    force_overwrite: bool = False,
+) -> int:
     target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     scid_path = resolve_scid_for_date(target_date, args)
     cmd = [
@@ -116,7 +122,10 @@ def run_day(python: str, date_str: str, args: argparse.Namespace) -> int:
         "--threads",
         str(args.worker_threads),
     ]
-    if args.emit_tick_parquet:
+    # If the caller requested to ensure ticks are emitted (e.g. re-source on
+    # corruption) then force the flag in the worker invocation regardless of
+    # whether orchestrator was invoked with --emit-tick-parquet.
+    if args.emit_tick_parquet or ensure_emit_ticks:
         cmd.append("--emit-tick-parquet")
     if args.parquet_compression:
         cmd.extend(["--parquet-compression", args.parquet_compression])
@@ -128,7 +137,7 @@ def run_day(python: str, date_str: str, args: argparse.Namespace) -> int:
         cmd.append("--convert-timestamp-to-ms")
     if args.atomic_writes:
         cmd.append("--atomic-writes")
-    if args.skip_existing:
+    if args.skip_existing and not force_overwrite:
         cmd.append("--skip-existing")
     if args.max_memory_mb:
         cmd.extend(["--max-memory-mb", str(args.max_memory_mb)])
@@ -197,7 +206,16 @@ def run_convert_for_day(python: str, date_str: str, args: argparse.Namespace) ->
             print(f"[orchestrator] parquet corrupt: {p} err={err}")
             if args.recreate_corrupt:
                 print(f"[orchestrator] re-running worker_day to re-source {date_str}")
-                rc = run_day(python, date_str, args)
+                # If the corrupted parquet is the tick file, ensure the
+                # worker re-emits tick parquet by forcing the flag.
+                ensure_ticks = p == out_tick
+                rc = run_day(
+                    python,
+                    date_str,
+                    args,
+                    ensure_emit_ticks=ensure_ticks,
+                    force_overwrite=True,
+                )
                 if rc != 0:
                     print(f"[orchestrator] worker_day failed rc={rc} for {date_str}")
                     rc_total = rc_total or rc
