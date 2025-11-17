@@ -140,6 +140,20 @@ class SchwabAuthClient:
             except Exception:
                 pass
 
+        # After we created/initialized the client, if tokens exist make sure they
+        # are persisted; this covers interactive login flows where the client
+        # wrote its own token storage but also ensures we are consistent.
+        try:
+            tokens = getattr(self.schwab, 'tokens', None)
+            if isinstance(tokens, dict) and tokens.get('refresh_token'):
+                self._persist_tokens(tokens)
+                # Optionally append refresh token to .env if the environment
+                # requests it (useful for CI and local convenience).
+                if os.environ.get('SCHWAB_PERSIST_REFRESH_TO_ENV') in ("1", "true", "yes"):
+                    self._append_refresh_to_env(tokens.get('refresh_token'))
+        except Exception:
+            pass
+
     def _load_tokens_from_env(self) -> Optional[dict]:
         """Build token dict from environment variables if present.
 
@@ -307,6 +321,33 @@ class SchwabAuthClient:
         except Exception as e:  # pragma: no cover - defensive
             LOG.error("Failed to persist Schwab tokens: %s", e)
 
+    def _append_refresh_to_env(self, refresh_token: str) -> None:
+        """Append or replace SCHWAB_REFRESH_TOKEN in .env atomically.
+
+        This helps interactive developers and CI to persist the refresh token
+        in environment files for later non-interactive runs.
+        """
+        try:
+            env_path = Path(__file__).resolve().parents[2] / '.env'
+            env = {}
+            if env_path.exists():
+                with open(env_path, 'r') as fh:
+                    for ln in fh:
+                        ln = ln.strip()
+                        if not ln or ln.startswith('#'):
+                            continue
+                        if '=' in ln:
+                            k, v = ln.split('=', 1)
+                            env[k.strip()] = v.strip().strip('"').strip("'")
+            # Replace or append
+            env['SCHWAB_REFRESH_TOKEN'] = refresh_token
+            lines = [f'{k}="{v}"' for k, v in env.items()]
+            with open(env_path, 'w') as fh:
+                fh.write('\n'.join(lines) + '\n')
+            LOG.info('Updated SCHWAB_REFRESH_TOKEN in %s', env_path)
+        except Exception as e:  # pragma: no cover - defensive
+            LOG.debug('Failed to append refresh token to .env: %s', e)
+
     def stream(self):
         """Return a synchronous stream adapter that wraps schwab-py's StreamClient.
         The wrapper provides `start(symbols, on_tick, on_level2)` and `stop()`
@@ -314,7 +355,7 @@ class SchwabAuthClient:
         """
         try:
             sc = schwab_streaming.StreamClient(self.schwab)
-            return _SchwabStreamAdapter(sc)
+            return _SchwabStreamAdapter(sc, auth_client=self)
         except Exception as e:
             LOG.error("Failed to construct StreamClient adapter: %s", e)
             raise
@@ -324,10 +365,11 @@ class _SchwabStreamAdapter:
     """Synchronous adapter over `schwab.streaming.StreamClient`.
     Implements `start(symbols, on_tick, on_level2)` and `stop()`.
     """
-    def __init__(self, stream_client: schwab_streaming.StreamClient):
+    def __init__(self, stream_client: schwab_streaming.StreamClient, auth_client: Optional[SchwabAuthClient] = None):
         self._sc = stream_client
         self._running = False
         self._symbols = []
+        self._auth_client = auth_client
 
     def start(self, symbols=None, on_tick=None, on_level2=None):
         symbols = symbols or []
@@ -344,6 +386,17 @@ class _SchwabStreamAdapter:
 
         # Login and subscribe for symbols
         asyncio.run(self._sc.login())
+        # After a successful login (which may have rotated tokens), persist
+        # the current tokens from the parent auth client if available
+        try:
+            if self._auth_client and getattr(self._auth_client, 'schwab', None):
+                tokens = getattr(self._auth_client.schwab, 'tokens', None)
+                if isinstance(tokens, dict):
+                    self._auth_client._persist_tokens(tokens)
+                    if os.environ.get('SCHWAB_PERSIST_REFRESH_TO_ENV') in ("1", "true", "yes"):
+                        self._auth_client._append_refresh_to_env(tokens.get('refresh_token'))
+        except Exception:
+            pass
         # Subscribe to symbol types
         # Map to futures vs equities
         futures_symbols = set([s for s in symbols if s.upper() in {"MES", "MNQ", "NQ"}])
