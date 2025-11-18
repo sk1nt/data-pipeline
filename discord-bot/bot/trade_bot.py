@@ -1,13 +1,16 @@
-import discord
-from discord.ext import commands
-import redis
+import asyncio
 import json
 import os
-import asyncio
-from datetime import datetime, timezone
-from typing import Any, List, Optional, Tuple
-from zoneinfo import ZoneInfo
+from collections import defaultdict, deque
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Deque, Dict, List, Optional, Tuple
+
+import discord
 import httpx
+import redis
+from discord.ext import commands
+from zoneinfo import ZoneInfo
 
 from .tastytrade_client import TastyTradeClient
 
@@ -26,11 +29,11 @@ class TradeBot(commands.Bot):
         self.command_admin_ids = self._parse_admin_ids()
         self.command_admin_names = self._parse_admin_names()
         self.tastytrade_client = self._init_tastytrade_client()
-        self.uw_option_latest_key = os.getenv('UW_OPTION_LATEST_KEY', 'uw:option_trades_super_algo:latest')
-        self.uw_option_history_key = os.getenv('UW_OPTION_HISTORY_KEY', 'uw:option_trades_super_algo:history')
-        self.uw_market_latest_key = os.getenv('UW_MARKET_LATEST_KEY', 'uw:market_agg_socket:latest')
-        self.uw_market_history_key = os.getenv('UW_MARKET_HISTORY_KEY', 'uw:market_agg_socket:history')
-        self.uw_option_stream_channel = os.getenv('UW_OPTION_STREAM_CHANNEL', 'uw:option_trades_super_algo:stream')
+        self.uw_option_latest_key = os.getenv('UW_OPTION_LATEST_KEY', 'uw:options-trade:latest')
+        self.uw_option_history_key = os.getenv('UW_OPTION_HISTORY_KEY', 'uw:options-trade:history')
+        self.uw_market_latest_key = os.getenv('UW_MARKET_LATEST_KEY', 'uw:market-state:latest')
+        self.uw_market_history_key = os.getenv('UW_MARKET_HISTORY_KEY', 'uw:market-state:history')
+        self.uw_option_stream_channel = os.getenv('UW_OPTION_STREAM_CHANNEL', 'uw:options-trade:stream')
         # Canonical tickers for GEXBot futures endpoints so cache/API reuse shared contracts
         self.ticker_aliases = {
             'NQ': 'NQ_NDX',
@@ -40,9 +43,24 @@ class TradeBot(commands.Bot):
         }
         self.display_zone = ZoneInfo(os.getenv('DISPLAY_TIMEZONE', 'America/New_York'))
         self.redis_snapshot_prefix = os.getenv('GEX_SNAPSHOT_PREFIX', 'gex:snapshot:')
+        self.allowed_channel_ids = tuple(getattr(config, 'allowed_channel_ids', ()) or ())
+        self.status_channel_id = getattr(config, 'status_channel_id', None)
+        self.status_command_user = os.getenv('DISCORD_STATUS_USER', 'skint0552').lower()
         self.option_alert_channel_ids = self._init_alert_channels()
         self._uw_listener_task: Optional[asyncio.Task] = None
         self._uw_listener_stop = asyncio.Event()
+        self._gex_feed_task: Optional[asyncio.Task] = None
+        self._gex_feed_stop = asyncio.Event()
+        self.gex_feed_enabled = bool(getattr(config, 'gex_feed_enabled', False))
+        self.gex_feed_channel_ids = getattr(config, 'gex_feed_channel_ids', None)
+        self.gex_feed_symbol = (getattr(config, 'gex_feed_symbol', 'NQ_NDX') or 'NQ_NDX').upper()
+        self.gex_feed_update_seconds = max(0.5, float(getattr(config, 'gex_feed_update_seconds', 1.0) or 1.0))
+        self.gex_feed_refresh_minutes = max(1, int(getattr(config, 'gex_feed_refresh_minutes', 5) or 5))
+        self.gex_feed_window_seconds = max(15, int(getattr(config, 'gex_feed_window_seconds', 60) or 60))
+        self.gex_feed_force_window = bool(getattr(config, 'gex_feed_force_window', False))
+        metrics_key = getattr(config, 'gex_feed_metrics_key', 'metrics:gex_feed') or 'metrics:gex_feed'
+        metrics_enabled = bool(getattr(config, 'gex_feed_metrics_enabled', False))
+        self._gex_feed_metrics = RedisGexFeedMetrics(self.redis_client, metrics_key, enabled=metrics_enabled)
         # Use a path variable and create short-lived connections per query to avoid file locks
         self.duckdb_path = os.getenv('DUCKDB_PATH', '/home/rwest/projects/data-pipeline/data/gex_data.db')
         # Register commands defined as methods on the subclass so prefix commands work
@@ -61,7 +79,7 @@ class TradeBot(commands.Bot):
                     await ctx.send('GEX data not available')
 
             async def _status_cmd(ctx):
-                if not await self._ensure_privileged(ctx):
+                if not await self._ensure_status_channel_access(ctx):
                     return
                 try:
                     async with httpx.AsyncClient() as client:
@@ -82,7 +100,7 @@ class TradeBot(commands.Bot):
             async def _market_cmd(ctx):
                 snapshot = await self._fetch_market_snapshot()
                 if not snapshot:
-                    await ctx.send('No market aggregate snapshot available')
+                    await ctx.send('No market state snapshot available')
                     return
                 await ctx.send(self.format_market_snapshot(snapshot))
 
@@ -95,7 +113,7 @@ class TradeBot(commands.Bot):
                 await ctx.send(formatted)
 
             async def _tt_cmd(ctx, *args):
-                if not await self._ensure_privileged(ctx):
+                if not await self._ensure_status_channel_access(ctx):
                     return
                 if not self.tastytrade_client:
                     await self._send_dm_or_warn(ctx, 'TastyTrade client is not configured.')
@@ -141,11 +159,22 @@ class TradeBot(commands.Bot):
         if not self._uw_listener_task:
             self._uw_listener_stop.clear()
             self._uw_listener_task = asyncio.create_task(self._listen_option_trade_stream())
+        if self._should_run_gex_feed() and not self._gex_feed_task:
+            self._gex_feed_stop.clear()
+            self._gex_feed_task = asyncio.create_task(self._run_gex_feed_loop())
 
     async def on_message(self, message):
         if message.author == self.user:
             return
+        if not self._is_allowed_channel(message.channel):
+            return
         await super().on_message(message)
+
+    async def get_context(self, origin, *, cls=commands.Context):
+        ctx = await super().get_context(origin, cls=cls)
+        if ctx and not self._is_allowed_channel(getattr(ctx, 'channel', None)):
+            ctx.command = None
+        return ctx
 
     async def close(self):
         if self._uw_listener_task:
@@ -155,10 +184,159 @@ class TradeBot(commands.Bot):
             except Exception:
                 pass
             self._uw_listener_task = None
+        if self._gex_feed_task:
+            self._gex_feed_stop.set()
+            try:
+                await self._gex_feed_task
+            except Exception:
+                pass
+            self._gex_feed_task = None
         await super().close()
 
     async def ping(self, ctx):
         await ctx.send('Pong!')
+
+    def _should_run_gex_feed(self) -> bool:
+        if not self.gex_feed_enabled:
+            return False
+        if not self.gex_feed_channel_ids:
+            return False
+        return True
+
+    async def _run_gex_feed_loop(self):
+        try:
+            while not self._gex_feed_stop.is_set():
+                if not self._should_run_gex_feed():
+                    await asyncio.sleep(60)
+                    continue
+                now = datetime.now(self.display_zone)
+                start = now.replace(hour=9, minute=35, second=0, microsecond=0)
+                end = now.replace(hour=16, minute=0, second=0, microsecond=0)
+                session_end = end
+                if self.gex_feed_force_window:
+                    session_end = now + timedelta(hours=8)
+                else:
+                    if now >= end:
+                        await self._sleep_with_stop((start + timedelta(days=1) - now).total_seconds())
+                        continue
+                    if now < start:
+                        await self._sleep_with_stop((start - now).total_seconds())
+                        continue
+                channels = await self._resolve_feed_channels()
+                if not channels:
+                    await asyncio.sleep(120)
+                    continue
+                await self._run_gex_feed_session(channels, session_end)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(f"GEX feed loop crashed: {exc}")
+
+    async def _sleep_with_stop(self, seconds: float) -> None:
+        remaining = max(0.0, seconds)
+        while remaining > 0 and not self._gex_feed_stop.is_set():
+            chunk = min(30.0, remaining)
+            await asyncio.sleep(chunk)
+            remaining -= chunk
+
+    async def _resolve_feed_channels(self) -> List[discord.abc.Messageable]:
+        channels = []
+        ids = self.gex_feed_channel_ids or ()
+        for cid in ids:
+            channel = self.get_channel(cid)
+            if channel is None:
+                try:
+                    channel = await self.fetch_channel(cid)
+                except Exception as exc:
+                    print(f"Failed to fetch channel {cid}: {exc}")
+                    continue
+            if hasattr(channel, 'send'):
+                channels.append(channel)
+        return channels
+
+    async def _run_gex_feed_session(self, channels: List[discord.abc.Messageable], session_end: datetime) -> None:
+        tracker = RollingWindowTracker(window_seconds=self.gex_feed_window_seconds)
+        messages: Dict[int, discord.Message] = {}
+        next_refresh = self._next_refresh_boundary(datetime.now(self.display_zone))
+        while not self._gex_feed_stop.is_set():
+            now = datetime.now(self.display_zone)
+            if now >= session_end:
+                break
+            data = await self.get_gex_data(self.gex_feed_symbol)
+            if not data:
+                await self._gex_feed_metrics.record_error(now, reason='no_data')
+                await asyncio.sleep(self.gex_feed_update_seconds)
+                continue
+            delta_map = self._build_feed_delta_map(tracker, data, now)
+            content = self.format_gex_short(data, include_time=False, delta_block=delta_map)
+            if not messages:
+                messages = await self._post_feed_messages(channels, content)
+                await self._gex_feed_metrics.record_update(now, delta_map, refresh=True)
+            else:
+                await self._edit_feed_messages(messages, content)
+                await self._gex_feed_metrics.record_update(now, delta_map, refresh=False)
+            if now >= next_refresh and now < session_end:
+                await self._delete_feed_messages(messages)
+                messages = await self._post_feed_messages(channels, content)
+                await self._gex_feed_metrics.record_update(now, delta_map, refresh=True)
+                next_refresh = self._next_refresh_boundary(now)
+            await asyncio.sleep(self.gex_feed_update_seconds)
+
+    def _next_refresh_boundary(self, current: datetime) -> datetime:
+        minute_block = (current.minute // self.gex_feed_refresh_minutes) * self.gex_feed_refresh_minutes
+        boundary = current.replace(minute=minute_block, second=0, microsecond=0) + timedelta(minutes=self.gex_feed_refresh_minutes)
+        if boundary <= current:
+            boundary += timedelta(minutes=self.gex_feed_refresh_minutes)
+        return boundary
+
+    async def _post_feed_messages(self, channels: List[discord.abc.Messageable], content: str) -> Dict[int, discord.Message]:
+        messages: Dict[int, discord.Message] = {}
+        for channel in channels:
+            try:
+                msg = await channel.send(content)
+            except Exception as exc:
+                print(f"Failed to send GEX feed message to {getattr(channel, 'id', 'unknown')}: {exc}")
+                continue
+            messages[getattr(channel, 'id', id(channel))] = msg
+        return messages
+
+    async def _edit_feed_messages(self, messages: Dict[int, discord.Message], content: str) -> None:
+        stale_ids = []
+        for cid, msg in messages.items():
+            try:
+                await msg.edit(content=content)
+            except discord.HTTPException as exc:
+                if exc.status == 404:
+                    stale_ids.append(cid)
+                else:
+                    print(f"Failed to edit GEX feed message {cid}: {exc}")
+            except Exception as exc:
+                print(f"Failed to edit GEX feed message {cid}: {exc}")
+        for cid in stale_ids:
+            messages.pop(cid, None)
+
+    async def _delete_feed_messages(self, messages: Dict[int, discord.Message]) -> None:
+        target = list(messages.items())
+        for cid, msg in target:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            finally:
+                messages.pop(cid, None)
+
+    def _build_feed_delta_map(self, tracker: 'RollingWindowTracker', data: dict, now: datetime) -> Dict[str, 'MetricSnapshot']:
+        mapping: Dict[str, MetricSnapshot] = {}
+        mapping['spot'] = tracker.update('spot', data.get('spot_price'), now)
+        mapping['zero_gamma'] = tracker.update('zero_gamma', data.get('zero_gamma'), now)
+        mapping['call_wall'] = tracker.update('call_wall', data.get('major_pos_vol'), now)
+        mapping['put_wall'] = tracker.update('put_wall', data.get('major_neg_vol'), now)
+        mapping['net_gex'] = tracker.update('net_gex', data.get('net_gex'), now)
+        mapping['scaled_gamma'] = tracker.update('scaled_gamma', data.get('sum_gex_oi'), now)
+        max_entry = self._extract_current_maxchange_entry(data)
+        max_delta = max_entry[1] if max_entry and isinstance(max_entry[1], (int, float)) else None
+        mapping['maxchange'] = tracker.update('maxchange', max_delta, now)
+        return mapping
 
     async def gex(self, ctx, *args):
         """Get GEX snapshot for a symbol. Uses DuckDB first then GEXBot API fallback."""
@@ -825,18 +1003,35 @@ class TradeBot(commands.Bot):
         if specific:
             return [cid for cid in specific if cid]
         channels: List[int] = []
-        for cid in (
-            getattr(self.config, 'execution_channel_id', None),
-            getattr(self.config, 'status_channel_id', None),
-            getattr(self.config, 'alert_channel_id', None),
-        ):
-            if cid and cid not in channels:
-                channels.append(cid)
-        allowed = getattr(self.config, 'allowed_channel_ids', None) or ()
-        for cid in allowed:
+        if self.status_channel_id:
+            channels.append(self.status_channel_id)
+        for cid in self.allowed_channel_ids:
             if cid and cid not in channels:
                 channels.append(cid)
         return channels
+
+    def _is_allowed_channel(self, channel) -> bool:
+        if not self.allowed_channel_ids:
+            return True
+        if channel is None:
+            return True
+        channel_id = getattr(channel, 'id', None)
+        if channel_id is None:
+            return True
+        return int(channel_id) in self.allowed_channel_ids
+
+    async def _ensure_status_channel_access(self, ctx) -> bool:
+        if not self._is_privileged_user(ctx):
+            await ctx.send('You are not authorized to use this command.')
+            return False
+        if self.status_channel_id and getattr(ctx.channel, 'id', None) != self.status_channel_id:
+            await ctx.send('This command may only be used in the status channel.')
+            return False
+        author_name = (getattr(ctx.author, 'name', '') or '').lower()
+        if author_name != self.status_command_user:
+            await self._send_dm_or_warn(ctx, 'Status commands are restricted to authorized users.')
+            return False
+        return True
 
     async def _listen_option_trade_stream(self):
         pubsub = self.redis_client.pubsub(ignore_subscribe_messages=True)
@@ -1049,6 +1244,25 @@ class TradeBot(commands.Bot):
             return freshness
         return 'local'
 
+    def _extract_current_maxchange_entry(self, data: dict) -> Optional[Tuple[Any, Any]]:
+        maxchange = data.get('maxchange') if isinstance(data.get('maxchange'), dict) else data.get('maxchange')
+        entry = None
+        if isinstance(maxchange, dict):
+            entry = maxchange.get('current')
+        if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
+            priors = data.get('max_priors') or []
+            if priors and isinstance(priors[0], (list, tuple)) and len(priors[0]) >= 3:
+                entry = [priors[0][1], priors[0][2]]
+        if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
+            return None
+        if len(entry) >= 3 and isinstance(entry[1], (int, float)) and isinstance(entry[2], (int, float)):
+            strike_val = entry[1]
+            delta_val = entry[2]
+        else:
+            strike_val = entry[0]
+            delta_val = entry[1]
+        return strike_val, delta_val
+
     def format_gex(self, data):
         dt = data.get('timestamp')
         if isinstance(dt, str):
@@ -1177,12 +1391,7 @@ class TradeBot(commands.Bot):
         ]
 
         maxchange_lines = ["", "max change gex"]
-        maxchange = data.get('maxchange') if isinstance(data.get('maxchange'), dict) else {}
-        current_entry = maxchange.get('current') if isinstance(maxchange, dict) else None
-        if not (isinstance(current_entry, (list, tuple)) and len(current_entry) >= 2):
-            priors = data.get('max_priors') or []
-            if priors and isinstance(priors[0], (list, tuple)) and len(priors[0]) >= 3:
-                current_entry = [priors[0][1], priors[0][2]]
+        current_entry = self._extract_current_maxchange_entry(data)
         def fmt_delta_entry(label: str, entry):
             if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
                 return f"{label:<18}N/A  N/ABn"
@@ -1209,7 +1418,7 @@ class TradeBot(commands.Bot):
         body = "\n".join([header, "", *table_lines, "", *maxchange_lines])
         return f"```ansi\n{body}\n```"
 
-    def format_gex_short(self, data):
+    def format_gex_short(self, data, *, include_time: bool = True, delta_block: Optional[Dict[str, 'MetricSnapshot']] = None):
         dt = data.get('timestamp')
         if isinstance(dt, str):
             try:
@@ -1300,18 +1509,9 @@ class TradeBot(commands.Bot):
         net_color_code = ansi.get(color_for_value(data.get('net_gex')))
         net_value = colorize(net_color_code, fmt_net_gex(data.get('net_gex')))
 
-        maxchange = data.get('maxchange') if isinstance(data.get('maxchange'), dict) else {}
-        current_entry = maxchange.get('current') if isinstance(maxchange, dict) else None
-        if not (isinstance(current_entry, (list, tuple)) and len(current_entry) >= 2):
-            priors = data.get('max_priors') or []
-            if priors and isinstance(priors[0], (list, tuple)) and len(priors[0]) >= 3:
-                current_entry = [priors[0][1], priors[0][2]]
-            else:
-                current_entry = None
-
-        if isinstance(current_entry, (list, tuple)) and len(current_entry) >= 2:
-            price_val = current_entry[0]
-            delta_val = current_entry[1]
+        current_entry = self._extract_current_maxchange_entry(data)
+        if isinstance(current_entry, tuple):
+            price_val, delta_val = current_entry
             current_price = fmt_price(price_val)
             delta_text = fmt_net_gex(delta_val) if isinstance(delta_val, (int, float)) else str(delta_val)
             delta_color = ansi.get(color_for_value(delta_val))
@@ -1322,24 +1522,126 @@ class TradeBot(commands.Bot):
             current_delta = colorize(fallback, 'N/ABn')
 
         source_label = self._resolve_gex_source_label(data)
-        header = (
-            f"{ansi['dim_white']}GEX: {ticker}{ansi['reset']}  "
-            f"{formatted_time}  "
-            f"{ansi['dim_white']}{fmt_price(data.get('spot_price'))}{ansi['reset']}  "
-            f"{ansi['dim_white']}{source_label}{ansi['reset']}"
-        )
+        header_parts = [f"{ansi['dim_white']}GEX: {ticker}{ansi['reset']}"]
+        if include_time:
+            header_parts.append(formatted_time)
+        header_parts.append(f"{ansi['dim_white']}{fmt_price(data.get('spot_price'))}{ansi['reset']}")
+        header_parts.append(f"{ansi['dim_white']}{source_label}{ansi['reset']}")
+        header = "  ".join(header_parts)
 
-        lines = [
-            header,
-            "",
-            zero_gamma_line,
-            major_pos_line,
-            major_neg_line,
-            f"net gex           {net_value}",
-            f"current           {current_price:<8}   {current_delta}",
-        ]
+        if delta_block:
+            lines = self._format_feed_short_lines(
+                header,
+                data,
+                delta_block,
+                ansi,
+                colorize,
+                color_for_value,
+                fmt_price,
+                fmt_net_gex,
+            )
+        else:
+            lines = [
+                header,
+                "",
+                zero_gamma_line,
+                major_pos_line,
+                major_neg_line,
+                f"net gex           {net_value}",
+                f"current           {current_price:<8}   {current_delta}",
+            ]
         body = "\n".join(lines)
         return f"```ansi\n{body}\n```"
+
+    def _format_feed_short_lines(
+        self,
+        header: str,
+        data: dict,
+        delta_block: Dict[str, 'MetricSnapshot'],
+        ansi: Dict[str, str],
+        colorize,
+        color_for_value,
+        fmt_price,
+        fmt_net_gex,
+    ) -> List[str]:
+        def fmt_abs(value, digits: int = 2) -> str:
+            if not isinstance(value, (int, float)):
+                return 'N/A'
+            return f"{abs(value):.{digits}f}"
+
+        def fmt_percent(value) -> str:
+            if not isinstance(value, (int, float)):
+                return 'n/a%'
+            return f"{abs(value):.2f}%"
+
+        def color_for_delta(delta) -> str:
+            if not isinstance(delta, (int, float)):
+                return 'yellow'
+            return 'green' if delta >= 0 else 'red'
+
+        def snapshot(key: str) -> 'MetricSnapshot':
+            snap = delta_block.get(key)
+            if isinstance(snap, MetricSnapshot):
+                return snap
+            return MetricSnapshot(value=None, delta=None, percent=None, previous=None, baseline=None)
+
+        def fmt_prev(value) -> str:
+            if not isinstance(value, (int, float)):
+                return 'n/a'
+            return fmt_abs(value)
+
+        lines = [header, ""]
+
+        spot_snap = snapshot('spot')
+        spot_value = colorize(ansi.get(color_for_delta(spot_snap.delta)), fmt_abs(spot_snap.value))
+        delta_text = fmt_abs(spot_snap.delta) if isinstance(spot_snap.delta, (int, float)) else 'n/a'
+        pct_text = fmt_percent(spot_snap.percent)
+        lines.append(f"spot              {spot_value:<8}  Δ{delta_text:<7}  {pct_text}")
+
+        def append_prev_line(label: str, snap_key: str):
+            snap = snapshot(snap_key)
+            delta = None
+            if isinstance(snap.value, (int, float)) and isinstance(snap.previous, (int, float)):
+                delta = snap.value - snap.previous
+            color = color_for_delta(delta)
+            current_txt = colorize(ansi.get(color), fmt_abs(snap.value))
+            prev_txt = fmt_prev(snap.previous)
+            lines.append(f"{label:<17}{current_txt:<10} ({prev_txt})")
+
+        append_prev_line('zero gamma', 'zero_gamma')
+        append_prev_line('call wall', 'call_wall')
+        append_prev_line('put wall', 'put_wall')
+
+        def fmt_net_change(delta) -> str:
+            if not isinstance(delta, (int, float)):
+                return 'N/ABn'
+            return f"{(abs(delta)/1000):.4f}Bn"
+
+        net_snap = snapshot('net_gex')
+        net_value = colorize(ansi.get(color_for_value(data.get('net_gex'))), fmt_net_gex(data.get('net_gex')))
+        net_change_color = ansi.get(color_for_delta(net_snap.delta))
+        net_change_txt = colorize(net_change_color, fmt_net_change(net_snap.delta))
+        lines.append(f"net gex           {net_value:<10} Δ{net_change_txt}")
+
+        scaled_snap = snapshot('scaled_gamma')
+        scaled_value = fmt_net_gex(data.get('sum_gex_oi'))
+        scaled_change_txt = colorize(ansi.get(color_for_delta(scaled_snap.delta)), fmt_net_change(scaled_snap.delta))
+        lines.append(f"scaled gamma      {scaled_value:<10} Δ{scaled_change_txt}")
+
+        current_entry = self._extract_current_maxchange_entry(data)
+        if current_entry:
+            strike_val, delta_val = current_entry
+            current_price = fmt_price(strike_val)
+            delta_text = fmt_net_gex(delta_val) if isinstance(delta_val, (int, float)) else str(delta_val)
+            delta_color = ansi.get(color_for_value(delta_val))
+            current_delta = colorize(delta_color, delta_text)
+        else:
+            current_price = 'N/A'
+            current_delta = colorize(ansi['yellow'], 'N/ABn')
+        max_snap = snapshot('maxchange')
+        max_change_txt = colorize(ansi.get(color_for_delta(max_snap.delta)), fmt_net_change(max_snap.delta))
+        lines.append(f"current strike    {current_price:<8}   {current_delta}  Δ{max_change_txt}")
+        return lines
 
     def format_option_trade_alert(self, payload: dict) -> str:
         data = payload.get('data') or payload
@@ -1416,7 +1718,7 @@ class TradeBot(commands.Bot):
         session = data.get('session') or data.get('market_session') or 'N/A'
 
         lines = [
-            f"Market aggregate | {ticker}",
+            f"Market state | {ticker}",
             f"timestamp       {timestamp}",
             f"spot            {stock_spot}",
             f"bid / ask       {bid} / {ask}",
@@ -1472,3 +1774,101 @@ class TradeBot(commands.Bot):
             f"pending cash       {fmt(overview.get('pending_cash'))}",
         ]
         return "```ansi\n" + "\n".join(lines) + "\n```"
+
+
+@dataclass
+class MetricSnapshot:
+    value: Optional[float]
+    delta: Optional[float]
+    percent: Optional[float]
+    previous: Optional[float]
+    baseline: Optional[float]
+
+
+class RollingWindowTracker:
+    def __init__(self, window_seconds: int = 60):
+        self.window_seconds = window_seconds
+        self._samples: Dict[str, Deque[Tuple[datetime, float]]] = defaultdict(deque)
+        self._last_value: Dict[str, Optional[float]] = {}
+        self._last_delta: Dict[str, Optional[float]] = {}
+        self._last_percent: Dict[str, Optional[float]] = {}
+
+    def update(self, key: str, value: Any, now: datetime) -> MetricSnapshot:
+        previous_value = self._last_value.get(key)
+        if not isinstance(value, (int, float)):
+            return MetricSnapshot(
+                value=None,
+                delta=self._last_delta.get(key),
+                percent=self._last_percent.get(key),
+                previous=previous_value,
+                baseline=None,
+            )
+        self._last_value[key] = value
+        deque_ref = self._samples.setdefault(key, deque())
+        deque_ref.append((now, value))
+        cutoff = now - timedelta(seconds=self.window_seconds)
+        while len(deque_ref) > 1 and deque_ref[0][0] < cutoff:
+            deque_ref.popleft()
+        baseline = deque_ref[0][1] if deque_ref else value
+        delta = value - baseline if deque_ref else None
+        if delta is None:
+            delta = self._last_delta.get(key)
+        else:
+            self._last_delta[key] = delta
+        percent = None
+        if delta is not None and baseline not in (None, 0):
+            percent = (delta / baseline) * 100
+        if percent is None:
+            percent = self._last_percent.get(key)
+        else:
+            self._last_percent[key] = percent
+        return MetricSnapshot(value=value, delta=delta, percent=percent, previous=previous_value, baseline=baseline)
+
+
+class RedisGexFeedMetrics:
+    def __init__(self, redis_client, key: str, *, enabled: bool = False):
+        self.redis_client = redis_client
+        self.key = key
+        self.enabled = enabled
+        self._update_count = 0
+        self._error_count = 0
+
+    async def record_update(self, now: datetime, delta_map: Dict[str, MetricSnapshot], *, refresh: bool) -> None:
+        if not self.enabled:
+            return
+        self._update_count += 1
+        mapping = {
+            'last_update_ts': now.isoformat(),
+            'update_count': str(self._update_count),
+        }
+        if refresh:
+            mapping['last_refresh_ts'] = now.isoformat()
+        mapping.update(self._flatten_delta_map(delta_map))
+        await asyncio.to_thread(self.redis_client.hset, self.key, mapping=mapping)
+
+    async def record_error(self, now: datetime, *, reason: str) -> None:
+        if not self.enabled:
+            return
+        self._error_count += 1
+        mapping = {
+            'last_error_ts': now.isoformat(),
+            'error_count': str(self._error_count),
+            'last_error_reason': reason,
+        }
+        await asyncio.to_thread(self.redis_client.hset, self.key, mapping=mapping)
+
+    def _flatten_delta_map(self, delta_map: Dict[str, MetricSnapshot]) -> Dict[str, str]:
+        flattened: Dict[str, str] = {}
+        for key, snapshot in (delta_map or {}).items():
+            if not isinstance(snapshot, MetricSnapshot):
+                continue
+            flattened[f'{key}_value'] = self._stringify(snapshot.value)
+            flattened[f'{key}_delta'] = self._stringify(snapshot.delta)
+            flattened[f'{key}_percent'] = self._stringify(snapshot.percent)
+        return flattened
+
+    @staticmethod
+    def _stringify(value: Optional[float]) -> str:
+        if value is None:
+            return ''
+        return f"{value}"

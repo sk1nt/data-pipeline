@@ -64,7 +64,7 @@ Collection of GEX snapshots downloaded from external URLs.
 Generic payload from external webhook sources.
 
 **Fields**:
-- `topic` (string): Webhook topic (e.g., "gex", "option_trades_super_algo")
+- `topic` (string): Webhook topic (e.g., "gex", "options-trade")
 - `event_type` (string): Event type
 - `payload` (object): Event-specific data
 - `received_at` (string): Receipt timestamp
