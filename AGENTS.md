@@ -21,3 +21,5 @@ Follow the existing log style: lowercase Conventional Commit prefixes (`fix(redi
 
 ## Security & Configuration Tips
 Store tokens and client secrets only in `.env` and runtime files under `data/`; rotate Schwab credentials with `python scripts/schwab_token_manager.py rotate` instead of manual editing. When experimenting with Redis, namespace keys with your username (for example, `dev_jane_ticks`) to avoid colliding with shared live channels.
+
+- **DO NOT OVERWRITE THE CONTENTS OF `.env` EVER**: The `.env` file contains secrets and environment-specific configuration. Overwriting it can leak credentials or break local/CI runs; prefer creating `.env.local` or `.env.back` and use `--ensure-env` to copy rather than replacing.
