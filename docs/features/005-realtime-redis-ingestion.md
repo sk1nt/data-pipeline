@@ -9,6 +9,7 @@ Run all real-time services via `data-pipeline.py`, buffering one full trading da
 
 ## Scope
 - TastyTrade DXLink streamer managed by `data-pipeline.py`
+- Schwab streamer co-managed to mirror symbols + compare depth vs TastyTrade
 - GEXBot poller (NQ_NDX, ES_SPX, SPY, QQQ, SPX, NDX) polling every 60s
 - RedisTimeSeries cache with ~24h retention
 - 10-minute batch flush to DuckDB + Parquet
@@ -28,6 +29,7 @@ Run all real-time services via `data-pipeline.py`, buffering one full trading da
 - [ ] Define key schema + retention in docs and config
 - [x] Write trades/depth updates from streamer into RedisTimeSeries
 - [x] Write GEX snapshots/max-change into RedisTimeSeries
+- [x] Persist market-data counters under `metrics:market_data_counts` for Schwab/TastyTrade parity checks
 
 ### 3. Flush Pipeline (10 min)
 - [x] Implement flush worker to read RedisTimeSeries deltas, persist to DuckDB/Parquet
@@ -36,6 +38,7 @@ Run all real-time services via `data-pipeline.py`, buffering one full trading da
 ### 4. FastAPI Lifecycle Wiring
 - [ ] Update `data-pipeline.py` lifespan to start/stop streamer, poller, flush worker
 - [ ] Ensure graceful shutdown (cancel tasks, final flush)
+- [x] Publish `/metrics/market_data` so dashboards can diff Schwab vs TastyTrade depth flow in real time
 
 ### 5. Guardrails & Backups (post-ingestion)
 - [ ] Data quality checker job (volume sanity, missing intervals, GEX coverage)
