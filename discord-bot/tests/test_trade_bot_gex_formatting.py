@@ -7,7 +7,7 @@ import json
 
 # Ensure bot package is importable from discord-bot directory
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from bot.trade_bot import TradeBot
+from bot.trade_bot import TradeBot, MetricSnapshot
 
 
 @pytest.fixture
@@ -62,3 +62,23 @@ def test_format_gex_net_negative_shows_whole_number(bot):
     red = "\u001b[2;31m"
     assert green in out_full or green in out_short
     assert red in bot.format_gex(data) or red in bot.format_gex_short(data)
+
+
+def test_format_gex_short_feed_variant_hides_timestamp(bot):
+    data = mk_data(zero_gamma=15000, net_gex=500.0)
+    data['timestamp'] = '2024-09-01T13:00:00+00:00'
+    delta_map = {
+        'spot': MetricSnapshot(400.0, 1.5, 0.25, 398.5, 398.5),
+        'zero_gamma': MetricSnapshot(15000.0, 25.0, None, 14975.0, 14950.0),
+        'call_wall': MetricSnapshot(16000.0, 10.0, None, 15990.0, 15900.0),
+        'put_wall': MetricSnapshot(14000.0, -15.0, None, 14020.0, 14010.0),
+        'net_gex': MetricSnapshot(500.0, 20.0, None, 480.0, 480.0),
+        'scaled_gamma': MetricSnapshot(200.0, -5.0, None, 205.0, 205.0),
+        'maxchange': MetricSnapshot(30.0, 2.0, None, 28.0, 28.0),
+    }
+    rendered = bot.format_gex_short(data, include_time=False, delta_block=delta_map)
+    assert '09/01/2024' not in rendered
+    assert 'spot' in rendered
+    assert '(14975.00)' in rendered
+    assert 'scaled gamma' in rendered
+    assert 'Δ' in rendered
