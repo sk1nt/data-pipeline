@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import json
 import os
 import threading
 import time
+from concurrent.futures import Future, TimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -368,11 +370,10 @@ class SchwabAuthClient:
         """
         try:
             env_path = Path(__file__).resolve().parents[2] / '.env'
-            # If .env doesn't exist, avoid creating a new file and instead write
-            # the refresh token into `.env.back` to be safe for local environments
-            # and CI that rely on .env contents. We still fallback to writing
-            # `.env.back` in case .env is missing.
-            target_path = env_path if env_path.exists() else env_path.with_suffix('.back')
+            # Never write to `.env` to avoid overwriting developer configurations.
+            # Always write to `.env.back` (or create it) so appended refresh tokens
+            # do not risk leaking or overwriting .env values.
+            target_path = env_path.with_suffix('.back')
 
             # Read current raw lines so we can preserve formatting and comments
             original_lines = []
@@ -445,10 +446,15 @@ class _SchwabStreamAdapter:
         self._running = False
         self._symbols = []
         self._auth_client = auth_client
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread: Optional[threading.Thread] = None
+        self._message_future: Optional[Future] = None
 
     def start(self, symbols=None, on_tick=None, on_level2=None):
         symbols = symbols or []
         self._symbols = symbols
+        self._ensure_loop()
+        LOG.debug("Stream adapter start invoked for %d symbols", len(symbols))
         # Register handlers that forward raw payload to provided handlers
         if on_tick:
             # Attach to both equity and futures level-one handlers as appropriate
@@ -460,7 +466,9 @@ class _SchwabStreamAdapter:
             self._sc.add_nyse_book_handler(lambda msg: on_level2(msg))
 
         # Login and subscribe for symbols
-        asyncio.run(self._sc.login())
+        LOG.debug("Logging into Schwab stream...")
+        self._run_coro(self._sc.login())
+        LOG.debug("Login succeeded; subscribing for symbols")
         # After a successful login (which may have rotated tokens), persist
         # the current tokens from the parent auth client if available
         try:
@@ -474,59 +482,289 @@ class _SchwabStreamAdapter:
             pass
         # Subscribe to symbol types
         # Map to futures vs equities
-        futures_symbols = set([s for s in symbols if s.upper() in {"MES", "MNQ", "NQ"}])
-        equity_symbols = [s for s in symbols if s.upper() not in futures_symbols]
+        futures_symbols = {s for s in symbols if _is_futures_contract(s)}
+        equity_symbols = [s for s in symbols if not _is_futures_contract(s)]
         if futures_symbols:
-            asyncio.run(self._sc.level_one_futures_add(list(futures_symbols)))
+            LOG.debug("Subscribing futures symbols: %s", futures_symbols)
+            futures_list = list(futures_symbols)
+            self._run_coro(self._sc.level_one_futures_add(futures_list))
+            self._subscribe_futures_level2(futures_list)
         if equity_symbols:
-            asyncio.run(self._sc.level_one_equity_add(equity_symbols))
-            asyncio.run(self._sc.nasdaq_book_add(equity_symbols))
-            asyncio.run(self._sc.nyse_book_add(equity_symbols))
+            LOG.debug("Subscribing equity symbols: %s", equity_symbols)
+            self._run_coro(self._sc.level_one_equity_add(equity_symbols))
         self._running = True
+        LOG.debug("Starting Schwab message pump")
+        self._message_future = asyncio.run_coroutine_threadsafe(self._consume_messages(), self._loop)
 
     def stop(self):
         if self._running:
             try:
-                asyncio.run(self._sc.logout())
+                self._run_coro(self._sc.logout())
+                LOG.debug("Logged out of Schwab stream")
             except Exception:
                 pass
             self._running = False
+        if self._message_future:
+            self._message_future.cancel()
+            try:
+                self._message_future.result(timeout=5)
+            except Exception:
+                pass
+            self._message_future = None
+        if self._loop:
+            loop = self._loop
+            loop.call_soon_threadsafe(loop.stop)
+            if self._loop_thread:
+                self._loop_thread.join(timeout=5)
+            loop.close()
+            self._loop = None
+            self._loop_thread = None
+
+    def _subscribe_futures_level2(self, futures_symbols: list[str]) -> None:
+        """Subscribe to futures depth book if supported."""
+        if not futures_symbols:
+            return
+        try:
+            LOG.debug("Subscribing futures symbols to level2 feed: %s", futures_symbols)
+            self._run_coro(self._sc.nasdaq_book_add(futures_symbols))
+        except AttributeError:
+            LOG.warning("Schwab client does not expose NASDAQ level2 subscription; skipping")
+        except Exception as exc:
+            LOG.warning("Failed to subscribe futures level2 feed: %s", exc)
+
+    @property
+    def is_running(self) -> bool:
+        return self._running and self._loop is not None and self._loop.is_running()
+
+    def _ensure_loop(self) -> None:
+        if self._loop and self._loop.is_running():
+            return
+        loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def _run_loop() -> None:
+            asyncio.set_event_loop(loop)
+            ready.set()
+            loop.run_forever()
+
+        thread = threading.Thread(target=_run_loop, name="schwab-stream-loop", daemon=True)
+        thread.start()
+        ready.wait(timeout=2)
+        self._loop = loop
+        self._loop_thread = thread
+
+    def _run_coro(self, coro, timeout: int = 30):
+        if not self._loop:
+            raise RuntimeError("Event loop not initialized")
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            result = future.result(timeout=timeout)
+            LOG.debug("Coroutine %s completed", getattr(coro, '__name__', repr(coro)))
+            return result
+        except TimeoutError:
+            future.cancel()
+            LOG.error("Coroutine %s timed out after %ss", getattr(coro, '__name__', repr(coro)), timeout)
+            raise
+
+    async def _consume_messages(self) -> None:
+        LOG.debug("Message pump loop started")
+        while self._running and self._loop and self._loop.is_running():
+            try:
+                await self._sc.handle_message()
+                LOG.debug("Consumed message from Schwab stream")
+            except asyncio.CancelledError:
+                LOG.debug("Message pump cancelled")
+                break
+            except Exception as exc:
+                LOG.warning("Schwab stream handler error: %s", exc)
+                await asyncio.sleep(1)
 
 
 class SchwabMessageParser:
     """Convert Schwab payloads into internal models."""
+
+    LEVEL_ONE_SERVICES = {"LEVELONE_FUTURES", "LEVELONE_EQUITY"}
+    BOOK_SERVICES = {"NASDAQ_BOOK", "NYSE_BOOK"}
 
     def parse(self, payload: dict) -> list[tuple[str, object]]:
         """Return list of (kind, event) tuples."""
         events: list[tuple[str, object]] = []
         msg_type = (payload.get("type") or payload.get("topic") or "").lower()
         if msg_type in {"tick", "trade"}:
-            event = TickEvent(
-                symbol=payload.get("symbol", payload.get("ticker", "")).upper(),
-                timestamp=self._coerce_ts(payload.get("timestamp")),
-                last=self._safe_float(payload.get("price") or payload.get("last")),
-                bid=self._safe_float(payload.get("bid")),
-                ask=self._safe_float(payload.get("ask")),
-                volume=self._safe_float(payload.get("volume")),
-            )
-            events.append(("tick", event))
+            events.extend(self._parse_legacy_tick(payload))
         elif msg_type in {"level2", "book"}:
-            bids = [
-                Level2Quote(price=self._safe_float(level.get("price", 0.0)), size=self._safe_float(level.get("size", 0.0)))
-                for level in payload.get("bids", [])
-            ]
-            asks = [
-                Level2Quote(price=self._safe_float(level.get("price", 0.0)), size=self._safe_float(level.get("size", 0.0)))
-                for level in payload.get("asks", [])
-            ]
+            events.extend(self._parse_legacy_book(payload))
+        else:
+            entries = []
+            if "data" in payload:
+                entries = payload.get("data", []) or []
+            elif payload.get("service"):
+                entries = [payload]
+            for entry in entries:
+                service = (entry.get("service") or "").upper()
+                if service in self.LEVEL_ONE_SERVICES:
+                    events.extend(self._parse_level_one_entry(entry))
+                elif service in self.BOOK_SERVICES:
+                    events.extend(self._parse_book_entry(entry))
+        return events
+
+    def _parse_legacy_tick(self, payload: dict) -> list[tuple[str, object]]:
+        event = TickEvent(
+            symbol=payload.get("symbol", payload.get("ticker", "")).upper(),
+            timestamp=self._coerce_ts(payload.get("timestamp")),
+            last=self._safe_float(payload.get("price") or payload.get("last")),
+            bid=self._safe_float(payload.get("bid")),
+            ask=self._safe_float(payload.get("ask")),
+            volume=self._safe_float(payload.get("volume")),
+        )
+        return [("tick", event)]
+
+    def _parse_legacy_book(self, payload: dict) -> list[tuple[str, object]]:
+        bids = [
+            Level2Quote(price=self._safe_float(level.get("price", 0.0)), size=self._safe_float(level.get("size", 0.0)) or 0.0)
+            for level in payload.get("bids", [])
+        ]
+        asks = [
+            Level2Quote(price=self._safe_float(level.get("price", 0.0)), size=self._safe_float(level.get("size", 0.0)) or 0.0)
+            for level in payload.get("asks", [])
+        ]
+        event = Level2Event(
+            symbol=payload.get("symbol", payload.get("ticker", "")).upper(),
+            timestamp=self._coerce_ts(payload.get("timestamp")),
+            bids=bids,
+            asks=asks,
+        )
+        return [("level2", event)]
+
+    def _parse_level_one_entry(self, entry: dict) -> list[tuple[str, object]]:
+        events: list[tuple[str, object]] = []
+        timestamp = entry.get("timestamp")
+        for row in entry.get("content", []) or []:
+            symbol = (
+                row.get("symbol")
+                or row.get("SYMBOL")
+                or row.get("key")
+                or entry.get("symbol")
+                or ""
+            )
+            symbol = symbol.strip().upper()
+            if not symbol:
+                continue
+            quote_ts = self._lookup_field(row, "QUOTE_TIME_MILLIS", "TRADE_TIME_MILLIS", "10", "11", timestamp)
+            bid_price = self._safe_float(self._lookup_field(row, "BID_PRICE", "BID", "1"))
+            ask_price = self._safe_float(self._lookup_field(row, "ASK_PRICE", "ASK", "2"))
+            bid_size = self._safe_float(self._lookup_field(row, "BID_SIZE", "BIDSIZE", "BID_VOLUME", "4"))
+            ask_size = self._safe_float(self._lookup_field(row, "ASK_SIZE", "ASKSIZE", "ASK_VOLUME", "5"))
+            last_price = self._safe_float(self._lookup_field(row, "LAST_PRICE", "LAST", "3"))
+            volume = self._safe_float(self._lookup_field(row, "TOTAL_VOLUME", "VOLUME", "LAST_SIZE", "8", "9"))
+            tick = TickEvent(
+                symbol=symbol,
+                timestamp=self._coerce_ts(quote_ts),
+                last=last_price,
+                bid=bid_price,
+                ask=ask_price,
+                volume=volume,
+            )
+            events.append(("tick", tick))
+            # Level-one feeds still expose best bid/ask which we treat as level2 depth level 1.
+            bids = []
+            asks = []
+            if bid_price is not None:
+                bids.append(Level2Quote(price=bid_price, size=bid_size or 0.0))
+            if ask_price is not None:
+                asks.append(Level2Quote(price=ask_price, size=ask_size or 0.0))
+            if bids or asks:
+                events.append(
+                    (
+                        "level2",
+                        Level2Event(
+                            symbol=symbol,
+                            timestamp=tick.timestamp,
+                            bids=bids,
+                            asks=asks,
+                        ),
+                    )
+                )
+        return events
+
+    def _parse_book_entry(self, entry: dict) -> list[tuple[str, object]]:
+        events: list[tuple[str, object]] = []
+        timestamp = entry.get("timestamp")
+        for row in entry.get("content", []) or []:
+            symbol = (
+                row.get("symbol")
+                or row.get("SYMBOL")
+                or row.get("key")
+                or entry.get("symbol")
+                or ""
+            )
+            symbol = symbol.strip().upper()
+            if not symbol:
+                continue
+            bids = self._parse_book_side(row.get("BIDS", []) or [], side="bid")
+            asks = self._parse_book_side(row.get("ASKS", []) or [], side="ask")
+            if not bids and not asks:
+                continue
             event = Level2Event(
-                symbol=payload.get("symbol", payload.get("ticker", "")).upper(),
-                timestamp=self._coerce_ts(payload.get("timestamp")),
+                symbol=symbol,
+                timestamp=self._coerce_ts(row.get("BOOK_TIME") or timestamp),
                 bids=bids,
                 asks=asks,
             )
             events.append(("level2", event))
         return events
+
+    def _parse_book_side(self, ladder: list, *, side: str) -> list[Level2Quote]:
+        quotes: list[Level2Quote] = []
+        for level in ladder:
+            price = self._extract_price(level, side)
+            if price is None:
+                continue
+            size = self._extract_size(level, side)
+            quotes.append(Level2Quote(price=price, size=size or 0.0))
+        return quotes
+
+    @staticmethod
+    def _lookup_field(row: dict, *candidates):
+        for key in candidates:
+            if key is None:
+                continue
+            if key in row and row[key] not in (None, ""):
+                return row[key]
+        return None
+
+    def _extract_price(self, level: dict, side: str) -> Optional[float]:
+        price_keys = ["PRICE", "price"]
+        if side == "bid":
+            price_keys.insert(0, "BID_PRICE")
+        else:
+            price_keys.insert(0, "ASK_PRICE")
+        for key in price_keys:
+            if key in level and level[key] is not None:
+                return self._safe_float(level[key])
+        return None
+
+    def _extract_size(self, level: dict, side: str) -> Optional[float]:
+        size_keys = ["SIZE", "size", "VOLUME", "TOTAL_VOLUME", "TOTAL_SIZE"]
+        if side == "bid":
+            size_keys.insert(0, "BID_VOLUME")
+        else:
+            size_keys.insert(0, "ASK_VOLUME")
+        for key in size_keys:
+            if key in level and level[key] is not None:
+                return self._safe_float(level[key])
+        nested_key = "BIDS" if side == "bid" else "ASKS"
+        nested = level.get(nested_key)
+        if isinstance(nested, list):
+            total = 0.0
+            for entry in nested:
+                vol_key = "BID_VOLUME" if side == "bid" else "ASK_VOLUME"
+                vol = self._safe_float(entry.get(vol_key))
+                if vol:
+                    total += vol
+            if total > 0:
+                return total
+        return None
 
     @staticmethod
     def _coerce_ts(value) -> datetime:
@@ -578,17 +816,32 @@ class SchwabStreamClient:
     def start(self) -> None:
         """Start streaming loop (blocking)."""
         LOG.info("Starting Schwab streamer for symbols: %s", ",".join(self.symbols))
+        tick_channel = getattr(self.publisher, "tick_channel", settings.schwab_tick_channel)
+        LOG.debug("Heartbeat every %ss; Redis tick channel %s", self.heartbeat_seconds, tick_channel)
         self.auth_client.start_auto_refresh()  # Start background token refresh
         self.stream.start(
             symbols=self.symbols,
             on_tick=self._on_tick,
             on_level2=self._on_level2
         )
+        LOG.debug("Stream start returned control to client")
 
     def stop(self) -> None:
         """Signal streaming loop to stop."""
         self.stream.stop()
         self.auth_client.stop_auto_refresh()  # Stop background token refresh
+
+    @property
+    def is_running(self) -> bool:
+        state = getattr(self.stream, "is_running", None)
+        if callable(state):  # pragma: no cover - defensive
+            try:
+                return bool(state())
+            except Exception:
+                return False
+        if state is None:
+            return False
+        return bool(state)
 
     def refresh_tokens(self) -> Optional[dict]:
         """Manually refresh tokens via the auth client."""
@@ -624,7 +877,7 @@ def build_streamer(
     level2_handler: Optional[Callable[[Level2Event], None]] = None,
     use_tastytrade_symbols: bool = False,
     interactive: bool = True,
-) -> SchwabStreamClient:
+    ) -> SchwabStreamClient:
     """Factory to wire dependencies from settings."""
     # Caller (scripts/start_schwab_streamer.py or calling code) should ensure
     # the required SCHWAB_* settings are present. We avoid enforcing them
@@ -643,7 +896,8 @@ def build_streamer(
         rest_url=settings.schwab_rest_url,
         interactive=interactive,
     )
-    symbols = settings.tastytrade_symbol_list if use_tastytrade_symbols else settings.schwab_symbol_list
+    base_symbols = settings.tastytrade_symbol_list if use_tastytrade_symbols else settings.schwab_symbol_list
+    symbols = normalize_stream_symbols(base_symbols)
     return SchwabStreamClient(
         auth_client=auth_client,
         publisher=publisher,
@@ -653,3 +907,82 @@ def build_streamer(
         tick_handler=tick_handler,
         level2_handler=level2_handler,
     )
+
+
+FUTURES_ROOTS = {"MNQ", "MES", "ES", "NQ"}
+FUTURES_MONTH_CODES = {
+    1: "F",
+    2: "G",
+    3: "H",
+    4: "J",
+    5: "K",
+    6: "M",
+    7: "N",
+    8: "Q",
+    9: "U",
+    10: "V",
+    11: "X",
+    12: "Z",
+}
+QUARTER_MONTHS = (3, 6, 9, 12)
+
+
+def normalize_stream_symbols(symbols: list[str]) -> list[str]:
+    """Expand configured symbol list into Schwab-ready identifiers.
+
+    Futures roots (e.g. MNQ) are converted to the current CME contract code
+    with a leading slash: `/MNQZ25`.
+    """
+
+    normalized: list[str] = []
+    for sym in symbols:
+        clean = sym.strip().upper()
+        if not clean:
+            continue
+        if clean.startswith("/"):
+            normalized.append(clean)
+            continue
+        root = clean.lstrip("/")
+        if root in FUTURES_ROOTS:
+            normalized.append(resolve_cme_contract(root))
+        else:
+            normalized.append(clean)
+    return normalized
+
+
+def resolve_cme_contract(root: str, *, as_of: Optional[datetime] = None) -> str:
+    """Return current front-month CME contract for the given root (e.g. MNQ)."""
+
+    now = as_of or datetime.utcnow()
+    year = now.year
+    candidates = []
+    for offset in range(2):  # current year and next year
+        yr = year + offset
+        for month in QUARTER_MONTHS:
+            candidates.append((yr, month))
+    for yr, month in candidates:
+        if yr == now.year and month < now.month:
+            continue
+        expiry = _third_friday(yr, month)
+        if now <= expiry:
+            code = FUTURES_MONTH_CODES[month]
+            return f"/{root}{code}{yr % 100:02d}"
+    # Fallback to March next year if loop above didn't return
+    next_year = now.year + 1
+    return f"/{root}{FUTURES_MONTH_CODES[3]}{next_year % 100:02d}"
+
+
+def _third_friday(year: int, month: int) -> datetime:
+    cal = calendar.monthcalendar(year, month)
+    fridays = [week[calendar.FRIDAY] for week in cal if week[calendar.FRIDAY] != 0]
+    day = fridays[2]  # third Friday
+    return datetime(year, month, day, 23, 59, 59)
+
+
+def _is_futures_contract(symbol: str) -> bool:
+    if not symbol:
+        return False
+    clean = symbol.strip().upper()
+    if clean.startswith("/"):
+        return True
+    return clean in FUTURES_ROOTS

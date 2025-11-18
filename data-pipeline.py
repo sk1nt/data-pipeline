@@ -23,6 +23,7 @@ import json
 import logging
 import sys
 import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +59,7 @@ NOISY_STREAM_LOGGERS = [
     "tastytrade.utils",
     "httpx",
 ]
+MARKET_DATA_METRICS_KEY = "metrics:market_data_counts"
 
 
 class HistoryPayload(BaseModel):
@@ -76,9 +78,12 @@ class SchwabStreamingService:
         self.manager = manager
         self.streamer: Optional[SchwabStreamClient] = None
         self.thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
 
     @property
     def is_running(self) -> bool:
+        if self.streamer and getattr(self.streamer, "is_running", False):
+            return True
         return bool(self.thread and self.thread.is_alive())
 
     def start(self) -> None:
@@ -102,17 +107,34 @@ class SchwabStreamingService:
         except RuntimeError as exc:
             LOGGER.error("Failed to build Schwab streamer: %s", exc)
             return
-        self.thread = threading.Thread(target=self.streamer.start, daemon=True, name="schwab-streamer")
+        self._stop_event.clear()
+        self.thread = threading.Thread(target=self._run_streamer, daemon=True, name="schwab-streamer")
         self.thread.start()
         LOGGER.info("Schwab streamer thread started")
 
     def stop(self) -> None:
         if self.streamer:
+            self._stop_event.set()
             self.streamer.stop()
         if self.thread:
             self.thread.join(timeout=5)
             self.thread = None
         self.streamer = None
+
+    def _run_streamer(self) -> None:
+        if not self.streamer:
+            return
+        try:
+            self.streamer.start()
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.error("Schwab streamer failed to start: %s", exc)
+            return
+        LOGGER.info("Schwab streamer running for symbols: %s", ",".join(self.streamer.symbols))
+        while not self._stop_event.wait(timeout=1):
+            if not self.streamer.is_running:
+                LOGGER.warning("Schwab streamer stopped unexpectedly")
+                break
+        LOGGER.info("Schwab streamer loop exiting")
 
     def _on_tick(self, event) -> None:
         if not self.manager.loop:
@@ -155,6 +177,9 @@ class ServiceManager:
         self.last_depth_timestamps: Dict[str, str] = {}
         self.depth_snapshots: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self.last_depth_comparison: Dict[str, Dict[str, Any]] = {}
+        self.trade_counts_by_symbol: Dict[str, Dict[str, int]] = {}
+        self.depth_counts_by_symbol: Dict[str, Dict[str, int]] = {}
+        self._last_metrics_flush: float = 0.0
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     def _ensure_event_loop(self) -> None:
@@ -174,12 +199,12 @@ class ServiceManager:
         self._ensure_event_loop()
         self._ensure_redis_clients()
         self._silence_streamer_logs()
-        for service in ("tastytrade", "gex_poller", "redis_flush", "discord_bot"):
+        for service in ("tastytrade", "schwab", "gex_poller", "redis_flush", "discord_bot"):
             self.start_service(service)
 
     async def stop(self) -> None:
         """Stop all managed services in a best-effort fashion."""
-        for service in ("tastytrade", "gex_poller", "redis_flush", "discord_bot"):
+        for service in ("tastytrade", "schwab", "gex_poller", "redis_flush", "discord_bot"):
             await self.stop_service(service)
 
     def status(self) -> Dict[str, Any]:
@@ -212,6 +237,7 @@ class ServiceManager:
                 "recent_depth_diffs": list(self.last_depth_comparison.values())[:3],
             },
             "control_enabled": bool(settings.service_control_token),
+            "market_data_metrics": self.metrics_snapshot(),
         }
 
     def _ensure_redis_clients(self) -> None:
@@ -259,6 +285,9 @@ class ServiceManager:
                     symbols=settings.gex_symbol_list,
                     interval_seconds=settings.gex_poll_interval_seconds,
                     aggregation_period=settings.gex_poll_aggregation,
+                    rth_interval_seconds=settings.gex_poll_rth_interval_seconds,
+                    off_hours_interval_seconds=settings.gex_poll_off_hours_interval_seconds,
+                    dynamic_schedule=settings.gex_poll_dynamic_schedule,
                 ),
                 redis_client=self.redis_client,
                 ts_client=self.rts,
@@ -348,8 +377,11 @@ class ServiceManager:
             self.rts.multi_add(samples)
         self.trade_count += 1
         self.trade_counts[normalized_source] = self.trade_counts.get(normalized_source, 0) + 1
+        symbol_trade_counts = self.trade_counts_by_symbol.setdefault(symbol, {})
+        symbol_trade_counts[normalized_source] = symbol_trade_counts.get(normalized_source, 0) + 1
         self.last_trade_ts = payload.get("timestamp") or datetime.utcnow().isoformat()
         self.last_trade_timestamps[normalized_source] = self.last_trade_ts
+        self._maybe_persist_metrics()
 
     def _write_depth_timeseries(self, payload: Dict[str, Any], source: str) -> None:
         """Write depth ladders per level and update in-memory diffs."""
@@ -432,9 +464,12 @@ class ServiceManager:
             self.rts.multi_add(samples)
             self.depth_count += 1
             self.depth_counts[normalized_source] = self.depth_counts.get(normalized_source, 0) + 1
+            symbol_depth_counts = self.depth_counts_by_symbol.setdefault(symbol, {})
+            symbol_depth_counts[normalized_source] = symbol_depth_counts.get(normalized_source, 0) + 1
             self.last_depth_ts = payload.get("timestamp") or datetime.utcnow().isoformat()
             self.last_depth_timestamps[normalized_source] = self.last_depth_ts
         self._record_depth_snapshot(symbol, normalized_source, payload)
+        self._maybe_persist_metrics()
 
     def _record_depth_snapshot(self, symbol: str, source: str, payload: Dict[str, Any]) -> None:
         """Store the latest book for each feed and push comparisons into LookupService."""
@@ -489,6 +524,35 @@ class ServiceManager:
                 "compared_levels": ask_levels,
             },
         }
+
+    def metrics_snapshot(self) -> Dict[str, Any]:
+        """Return in-memory counts for trades and depth samples."""
+        return {
+            "total_trades": self.trade_count,
+            "trades_by_source": dict(self.trade_counts),
+            "trades_by_symbol": {k: dict(v) for k, v in self.trade_counts_by_symbol.items()},
+            "total_level2_samples": self.depth_count,
+            "level2_by_source": dict(self.depth_counts),
+            "level2_by_symbol": {k: dict(v) for k, v in self.depth_counts_by_symbol.items()},
+            "last_trade_timestamps": dict(self.last_trade_timestamps),
+            "last_depth_timestamps": dict(self.last_depth_timestamps),
+            "redis_key": MARKET_DATA_METRICS_KEY,
+        }
+
+    def _maybe_persist_metrics(self) -> None:
+        """Serialize metrics into Redis at a throttled cadence for dashboards."""
+        if not self.redis_client:
+            return
+        now = time.monotonic()
+        if now - self._last_metrics_flush < 1.0:
+            return
+        self._last_metrics_flush = now
+        snapshot = self.metrics_snapshot()
+        snapshot["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            self.redis_client.client.set(MARKET_DATA_METRICS_KEY, json.dumps(snapshot))
+        except Exception:
+            LOGGER.debug("Unable to persist market metrics to Redis", exc_info=True)
 
     @staticmethod
     def _avg_price_diff(a: List[Dict[str, Any]], b: List[Dict[str, Any]], levels: int) -> Optional[float]:
@@ -556,6 +620,12 @@ async def status() -> Dict[str, Any]:
     return service_manager.status()
 
 
+@app.get("/metrics/market_data")
+async def market_data_metrics() -> Dict[str, Any]:
+    """Expose trade + level2 counters for quick Schwab/TastyTrade comparisons."""
+    return service_manager.metrics_snapshot()
+
+
 CONTROL_ACTIONS = {"start", "stop", "restart"}
 CONTROL_SERVICES = {"tastytrade", "schwab", "gex_poller", "redis_flush", "discord_bot"}
 
@@ -611,6 +681,8 @@ STATUS_PAGE = """
     <button onclick=\"controlService('redis_flush','restart')\">Restart Flush Worker</button>
   </div>
   <pre id=\"status\">Loading...</pre>
+  <h2>Market Data Metrics</h2>
+  <pre id=\"metrics\">Loading metrics...</pre>
   <script>
     async function refresh() {
       try {
@@ -619,6 +691,13 @@ STATUS_PAGE = """
         document.getElementById('status').textContent = JSON.stringify(data, null, 2);
       } catch (err) {
         document.getElementById('status').textContent = 'Error: ' + err;
+      }
+      try {
+        const res = await fetch('/metrics/market_data');
+        const data = await res.json();
+        document.getElementById('metrics').textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        document.getElementById('metrics').textContent = 'Error: ' + err;
       }
     }
     async function controlService(service, action) {
