@@ -245,11 +245,13 @@ class TradeBot(commands.Bot):
 
                 if age <= 5 and complete:
                     data['_freshness'] = 'current'
+                    # mark as redis cache-origin
+                    data['_source'] = 'redis-cache'
                     return await finalize(data)
                 if age <= 30 and complete:
                     # accept stale but attempt background refresh via API
                     data['_freshness'] = 'stale'
-                    # spawn a background refresh
+                    data['_source'] = 'redis-cache'
                     asyncio.create_task(self._refresh_gex_from_api(ticker, cache_key, display_symbol))
                     return await finalize(data)
                 # cached entry exists but lacks full snapshot; force refresh path
@@ -272,14 +274,18 @@ class TradeBot(commands.Bot):
                     normalized['display_symbol'] = display_symbol
                     if age <= 5:
                         normalized['_freshness'] = 'current'
+                        # snapshot returned from the pipeline; mark as redis snapshot
+                        normalized['_source'] = 'redis-snapshot'
                         await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(normalized, default=str))
                         return await finalize(normalized)
                     if age <= 30:
                         normalized['_freshness'] = 'stale'
+                        normalized['_source'] = 'redis-snapshot'
                         await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(normalized, default=str))
                         asyncio.create_task(self._refresh_gex_from_api(ticker, cache_key, display_symbol))
                         return await finalize(normalized)
                     normalized['_freshness'] = 'incomplete'
+                    normalized['_source'] = 'redis-snapshot'
                     await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(normalized, default=str))
                     return await finalize(normalized)
         except Exception as e:
@@ -329,6 +335,7 @@ class TradeBot(commands.Bot):
                           'major_pos_vol', 'major_neg_vol', 'major_pos_oi', 'major_neg_oi', 'sum_gex_oi', 'max_priors']
                 data = dict(zip(columns, result))
                 data['display_symbol'] = display_symbol
+                data['_source'] = 'DB'
                 # Normalize timestamp
                 ts = data.get('timestamp')
                 if isinstance(ts, str):
@@ -368,6 +375,7 @@ class TradeBot(commands.Bot):
             api_data = await self._poll_gexbot_api(ticker)
             if api_data:
                 api_data['_freshness'] = 'current'
+                api_data['_source'] = 'API'
                 api_data['display_symbol'] = display_symbol
                 await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(api_data, default=str))
                 return await finalize(api_data)
@@ -1003,18 +1011,39 @@ class TradeBot(commands.Bot):
         return f"{label}{gap}{'  '.join(segments)}"
 
     def _resolve_gex_source_label(self, data: dict) -> str:
+        # Primary: explicit source set on the data (set in get_gex_data)
+        src = data.get('_source')
+        if isinstance(src, str):
+            s = src.strip()
+            if not s:
+                pass
+            else:
+                lowered = s.lower()
+                if lowered == 'cache':
+                    return 'cache'
+                if 'redis' in lowered:
+                    return 'redis'
+                if lowered == 'db' or 'duckdb' in lowered:
+                    return 'DB'
+                if lowered == 'api' or 'payload' in lowered or 'api' in lowered:
+                    return 'API'
+                return s
+
+        # Secondary: derived from wall ladder source (redis-snapshot, redis-cache, duckdb, payload)
         ladders = data.get('_wall_ladders')
         if isinstance(ladders, dict):
             raw = ladders.get('source')
             if raw:
                 lowered = str(raw).lower()
                 if 'redis' in lowered:
-                    return 'Redis'
+                    return 'redis'
                 if 'duckdb' in lowered:
-                    return 'DuckDB'
-                if 'payload' in lowered:
-                    return 'Payload'
+                    return 'DB'
+                if 'payload' in lowered or 'api' in lowered:
+                    return 'API'
                 return str(raw)
+
+        # Fallback: use freshness or 'local'
         freshness = data.get('_freshness')
         if isinstance(freshness, str):
             return freshness
@@ -1040,8 +1069,14 @@ class TradeBot(commands.Bot):
         def fmt_price(x):
             return f"{x:.2f}" if isinstance(x, (int, float)) else "N/A"
 
-        def fmt_net(x):
-            return f"{x:.5f}" if isinstance(x, (int, float)) else "N/A"
+        # Keep gamma display as-is (no scaling)
+
+        # Net GEX formatting: positive values show with Bn suffix, negatives show whole number
+        def fmt_net_gex(x):
+            if not isinstance(x, (int, float)):
+                return "N/A"
+            # Display magnitude scaled by 1000 with Bn suffix for both signs
+            return f"{(abs(x)/1000):.4f}Bn"
 
         def fmt_net_abs(x):
             return f"{abs(x):.5f}" if isinstance(x, (int, float)) else "N/A"
@@ -1128,7 +1163,7 @@ class TradeBot(commands.Bot):
 
         table_lines = [
             "volume                                   oi",
-            fmt_pair('zero gamma', data.get('zero_gamma'), volume_color='yellow'),
+            fmt_pair('zero gamma', data.get('zero_gamma'), volume_color='yellow', formatter=fmt_price),
             call_wall_line,
             put_wall_line,
             fmt_pair(
@@ -1137,7 +1172,7 @@ class TradeBot(commands.Bot):
                 data.get('sum_gex_oi'),
                 volume_color=color_for_value(data.get('net_gex')),
                 oi_color=color_for_value(data.get('sum_gex_oi')),
-                formatter=fmt_net_abs,
+                formatter=fmt_net_gex,
             ),
         ]
 
@@ -1159,7 +1194,7 @@ class TradeBot(commands.Bot):
                 delta = entry[1]
             strike = fmt_price(strike_val) if isinstance(strike_val, (int, float)) else str(strike_val)
             delta_color = ansi.get(color_for_value(delta))
-            delta_text = f"{delta:.4f}Bn" if isinstance(delta, (int, float)) else str(delta)
+            delta_text = fmt_net_gex(delta) if isinstance(delta, (int, float)) else str(delta)
             return f"{label:<18}{strike:<8} {colorize(delta_color, delta_text)}"
 
         maxchange_lines.append(fmt_delta_entry('current', current_entry))
@@ -1193,6 +1228,15 @@ class TradeBot(commands.Bot):
 
         def fmt_price(x):
             return f"{x:.2f}" if isinstance(x, (int, float)) else "N/A"
+
+        # Keep gamma display as-is (no scaling)
+
+        # Net GEX formatting as above
+        def fmt_net_gex(x):
+            if not isinstance(x, (int, float)):
+                return "N/A"
+            # Display magnitude scaled by 1000 with Bn suffix for both signs
+            return f"{(abs(x)/1000):.4f}Bn"
 
         def fmt_net_abs(x):
             return f"{abs(x):.5f}" if isinstance(x, (int, float)) else "N/A"
@@ -1254,7 +1298,7 @@ class TradeBot(commands.Bot):
             ),
         )
         net_color_code = ansi.get(color_for_value(data.get('net_gex')))
-        net_value = colorize(net_color_code, fmt_net_abs(data.get('net_gex')))
+        net_value = colorize(net_color_code, fmt_net_gex(data.get('net_gex')))
 
         maxchange = data.get('maxchange') if isinstance(data.get('maxchange'), dict) else {}
         current_entry = maxchange.get('current') if isinstance(maxchange, dict) else None
@@ -1269,7 +1313,7 @@ class TradeBot(commands.Bot):
             price_val = current_entry[0]
             delta_val = current_entry[1]
             current_price = fmt_price(price_val)
-            delta_text = f"{delta_val:.4f}Bn" if isinstance(delta_val, (int, float)) else str(delta_val)
+            delta_text = fmt_net_gex(delta_val) if isinstance(delta_val, (int, float)) else str(delta_val)
             delta_color = ansi.get(color_for_value(delta_val))
             current_delta = colorize(delta_color, delta_text)
         else:

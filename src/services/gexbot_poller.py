@@ -6,6 +6,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Set
 
 import aiohttp
@@ -24,6 +25,9 @@ class GEXBotPollerSettings:
     symbols: List[str] = field(default_factory=lambda: ["NQ_NDX", "ES_SPX", "SPY", "QQQ", "SPX", "NDX"])
     interval_seconds: int = 60
     aggregation_period: str = "zero"
+    rth_interval_seconds: int = 1
+    off_hours_interval_seconds: int = 300
+    dynamic_schedule: bool = True
 
 
 class GEXBotPoller:
@@ -52,6 +56,7 @@ class GEXBotPoller:
         self._last_supported_refresh: Optional[date] = None
         self.snapshot_count = 0
         self.last_snapshot_ts: Optional[str] = None
+        self._last_interval_setting: Optional[str] = None
 
     def start(self) -> None:
         if self._task and not self._task.done():
@@ -91,13 +96,35 @@ class GEXBotPoller:
                             await self._record_timeseries(snapshot)
                     except Exception:  # pragma: no cover - defensive logging
                         LOGGER.exception("Failed to poll GEXBot for %s", symbol)
+                interval_seconds = self._current_interval_seconds()
+                label = "RTH" if self._is_rth_now() else "off-hours"
+                if label != self._last_interval_setting:
+                    LOGGER.info("GEXBot poller interval set to %ss (%s)", interval_seconds, label)
+                    self._last_interval_setting = label
                 try:
                     await asyncio.wait_for(
-                        self._stop_event.wait(), timeout=self.settings.interval_seconds
+                        self._stop_event.wait(), timeout=interval_seconds
                     )
                 except asyncio.TimeoutError:
                     continue
         LOGGER.info("GEXBot poller stopped")
+
+    def _current_interval_seconds(self) -> int:
+        if not self.settings.dynamic_schedule:
+            return self.settings.interval_seconds
+        if self._is_rth_now():
+            return self.settings.rth_interval_seconds
+        return self.settings.off_hours_interval_seconds
+
+    def _is_rth_now(self) -> bool:
+        try:
+            eastern = ZoneInfo("America/New_York")
+        except Exception:  # pragma: no cover - zoneinfo fallback
+            eastern = timezone.utc
+        now = datetime.now(tz=eastern)
+        start = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        end = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        return start <= now <= end
 
     def add_symbol_for_day(self, symbol: str) -> None:
         """Auto-enroll a symbol for polling until the next midnight."""

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Awaitable, Callable, Dict, List, Optional, Sequence
 
 try:  # pragma: no cover - optional dependency in some environments
@@ -162,8 +162,11 @@ class TastyTradeStreamer:
         return symbol.lstrip("/").split(":", 1)[0].upper()
 
     @staticmethod
-    def _ts_from_ms(value: int) -> str:
+    def _ts_from_ms(value: Optional[int]) -> str:
+        """Return an ISO-8601 UTC timestamp for DXLink millisecond values."""
         try:
-            return datetime.fromtimestamp(value / 1000).isoformat()
+            if not value:
+                raise ValueError("missing timestamp")
+            return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat()
         except Exception:
-            return datetime.utcnow().isoformat()
+            return datetime.now(timezone.utc).isoformat()

@@ -30,6 +30,7 @@ class TradingEventPublisher:
         try:
             payload = json.dumps(event.to_payload())
             self.redis.client.publish(self.tick_channel, payload)
+            LOG.debug("Published tick %s ts=%s", event.symbol, event.timestamp)
             return True
         except Exception as exc:
             LOG.error("Failed to publish tick %s: %s", event.symbol, exc)
@@ -40,6 +41,7 @@ class TradingEventPublisher:
         try:
             payload = json.dumps(event.to_payload())
             self.redis.client.publish(self.level2_channel, payload)
+            LOG.debug("Published level2 %s ts=%s", event.symbol, event.timestamp)
             return True
         except Exception as exc:
             LOG.error("Failed to publish level2 %s: %s", event.symbol, exc)

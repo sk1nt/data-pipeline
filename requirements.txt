@@ -1,0 +1,9 @@
+fastapi
+pydantic
+httpx
+websocket-client
+python-dotenv
+redis
+duckdb
+schwab-py
+pytest
