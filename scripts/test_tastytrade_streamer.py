@@ -20,7 +20,7 @@ async def main() -> None:
             client_secret=settings.tastytrade_client_secret or "",
             refresh_token=settings.tastytrade_refresh_token or "",
             symbols=settings.tastytrade_symbol_list,
-            depth_levels=settings.tastytrade_depth_levels,
+            depth_levels=settings.tastytrade_depth_cap,
         )
     )
     streamer.start()
