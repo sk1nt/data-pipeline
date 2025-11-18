@@ -71,6 +71,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GEXBOT_POLLING_ENABLED"),
     )
     gex_poll_interval_seconds: int = Field(default=60, env="GEXBOT_POLL_INTERVAL_SECONDS")
+    gex_poll_rth_interval_seconds: int = Field(
+        default=1,
+        env="GEXBOT_POLL_RTH_INTERVAL_SECONDS",
+    )
+    gex_poll_off_hours_interval_seconds: int = Field(
+        default=300,
+        env="GEXBOT_POLL_OFF_HOURS_INTERVAL_SECONDS",
+    )
+    gex_poll_dynamic_schedule: bool = Field(
+        default=True,
+        env="GEXBOT_POLL_DYNAMIC_SCHEDULE",
+    )
     gex_poll_symbols: str = Field(
         default="NQ_NDX,ES_SPX,SPY,QQQ,SPX,NDX",
         validation_alias=AliasChoices("GEXBOT_POLL_SYMBOLS"),

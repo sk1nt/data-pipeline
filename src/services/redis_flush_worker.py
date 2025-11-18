@@ -226,6 +226,11 @@ class RedisFlushWorker:
         pivot.columns = [col if isinstance(col, str) else col[0] for col in pivot.columns]
         if "price" not in pivot.columns:
             return
+        before_drop = len(pivot)
+        pivot = pivot.dropna(subset=["price"])
+        if pivot.empty:
+            LOGGER.debug("Skip tick flush slice due to missing price column values (before=%s)", before_drop)
+            return
         pivot["size"] = pivot.get("size", 0.0).fillna(0.0)
         pivot["timestamp"] = pd.to_datetime(pivot["ts"], unit="ms", utc=True)
         pivot["day"] = pivot["timestamp"].dt.strftime("%Y%m%d")
@@ -285,7 +290,8 @@ class RedisFlushWorker:
         parquet_dir = self.settings.tick_parquet_dir
         parquet_dir.mkdir(parents=True, exist_ok=True)
         for (symbol, day), group in parquet_df.groupby(["symbol", "day"]):
-            dest = parquet_dir / symbol / f"{day}.parquet"
+            safe_symbol = self._sanitize_symbol_dir(symbol)
+            dest = parquet_dir / safe_symbol / f"{day}.parquet"
             dest.parent.mkdir(parents=True, exist_ok=True)
             subset = group.drop(columns=["day"]).sort_values("timestamp")
             subset.to_parquet(dest, index=False)
@@ -309,7 +315,8 @@ class RedisFlushWorker:
         parquet_dir = self.settings.depth_parquet_dir
         parquet_dir.mkdir(parents=True, exist_ok=True)
         for (symbol, day), group in parquet_df.groupby(["symbol", "day"]):
-            dest = parquet_dir / symbol / f"{day}.parquet"
+            safe_symbol = self._sanitize_symbol_dir(symbol)
+            dest = parquet_dir / safe_symbol / f"{day}.parquet"
             dest.parent.mkdir(parents=True, exist_ok=True)
             subset = group.drop(columns=["day"]).sort_values(["timestamp", "side", "level"])
             subset.to_parquet(dest, index=False)
@@ -325,6 +332,14 @@ class RedisFlushWorker:
                 )
             )
         self._update_depth_manifest(manifests)
+
+    @staticmethod
+    def _sanitize_symbol_dir(symbol: str) -> str:
+        """Ensure symbol-derived directories remain relative and filesystem-safe."""
+        cleaned = (symbol or "UNKNOWN").strip().replace("/", "_")
+        if not cleaned:
+            return "UNKNOWN"
+        return cleaned
 
     def _insert_tick_rows(self, parquet_df: pd.DataFrame) -> None:
         if parquet_df.empty:
