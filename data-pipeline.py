@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -89,6 +90,9 @@ class SchwabStreamingService:
     def start(self) -> None:
         if not settings.schwab_enabled:
             LOGGER.warning("Schwab streaming disabled (set SCHWAB_ENABLED=true)")
+            return
+        if settings.schwab_stream_paused:
+            LOGGER.warning("Schwab streaming paused (set SCHWAB_STREAM_PAUSED=false to resume)")
             return
         if self.is_running:
             LOGGER.info("Schwab streamer already running")
@@ -218,6 +222,8 @@ class ServiceManager:
         }
         schwab_status = {
             "running": self.schwab_service.is_running,
+            "enabled": settings.schwab_enabled,
+            "paused": settings.schwab_stream_paused,
             "trade_samples": self.trade_counts.get("schwab", 0),
             "depth_samples": self.depth_counts.get("schwab", 0),
             "last_trade_ts": self.last_trade_timestamps.get("schwab"),
@@ -267,7 +273,7 @@ class ServiceManager:
                     client_secret=settings.tastytrade_client_secret or "",
                     refresh_token=settings.tastytrade_refresh_token or "",
                     symbols=settings.tastytrade_symbol_list,
-                    depth_levels=settings.tastytrade_depth_levels,
+                    depth_levels=settings.tastytrade_depth_cap,
                 ),
                 on_trade=self._handle_trade_event,
                 on_depth=self._handle_depth_event,
@@ -391,7 +397,7 @@ class ServiceManager:
         asks = payload.get("asks") or []
         normalized_source = source.lower()
         samples = []
-        depth_levels = settings.tastytrade_depth_levels
+        depth_levels = settings.tastytrade_depth_cap
         for idx, level in enumerate(bids[:depth_levels], start=1):
             price = float(level.get("price", 0.0))
             size = float(level.get("size", 0.0))
@@ -500,8 +506,8 @@ class ServiceManager:
         tasty_ask_price, tasty_ask_size = _best(tasty_best_ask)
         schwab_bid_price, schwab_bid_size = _best(schwab_best_bid)
         schwab_ask_price, schwab_ask_size = _best(schwab_best_ask)
-        bid_levels = min(len(tasty.get("bids", [])), len(schwab.get("bids", [])), settings.tastytrade_depth_levels)
-        ask_levels = min(len(tasty.get("asks", [])), len(schwab.get("asks", [])), settings.tastytrade_depth_levels)
+        bid_levels = min(len(tasty.get("bids", [])), len(schwab.get("bids", [])), settings.tastytrade_depth_cap)
+        ask_levels = min(len(tasty.get("asks", [])), len(schwab.get("asks", [])), settings.tastytrade_depth_cap)
         return {
             "symbol": symbol,
             "timestamp": datetime.utcnow().isoformat(),
@@ -577,13 +583,17 @@ UW_OPTION_LATEST_KEY = "uw:option_trades_super_algo:latest"
 UW_OPTION_HISTORY_KEY = "uw:option_trades_super_algo:history"
 UW_MARKET_LATEST_KEY = "uw:market_agg_socket:latest"
 UW_MARKET_HISTORY_KEY = "uw:market_agg_socket:history"
+UW_MARKET_STATE_LATEST_KEY = "uw:market_state:latest"
+UW_MARKET_STATE_HISTORY_KEY = "uw:market_state:history"
 UW_OPTION_STREAM_CHANNEL = "uw:option_trades_super_algo:stream"
 UW_MARKET_STREAM_CHANNEL = "uw:market_agg_socket:stream"
+UW_MARKET_STATE_STREAM_CHANNEL = "uw:market_state:stream"
 UW_HISTORY_LIMIT = 200
 UW_CACHE_TTL_SECONDS = 900
 SUPPORTED_WEBHOOK_TOPICS = {
     "option_trades_super_algo",
     "market_agg_socket",
+    "market-state",
 }
 
 
@@ -600,6 +610,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Data Pipeline", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://unusualwhales.com"],
+    allow_methods=["POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/")
@@ -844,38 +860,59 @@ async def gex_history_endpoint(request: Request, background_tasks: BackgroundTas
     }
 
 
-@app.post("/uw")
+@app.api_route("/uw", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
 async def universal_webhook(request: Request):
-    """Accept payloads from monkeyscript/Unusual Whales style webhooks."""
+    """Temporarily accept all webhook payloads for review before tightening validation."""
+    raw_body = await request.body()
+
+    payload: Dict[str, Any]
     try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+        payload = json.loads(raw_body) if raw_body else {}
+    except json.JSONDecodeError:
+        payload = {
+            "__raw_text__": raw_body.decode("utf-8", errors="replace"),
+        }
 
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    if not payload and request.method == "GET":
+        payload = dict(request.query_params.multi_items())
 
-    topic = _extract_webhook_topic(body)
-    if not topic:
-        raise HTTPException(status_code=422, detail="Missing topic/object field")
+    if not isinstance(payload, dict):
+        payload = {"__raw_payload__": payload}
 
-    normalized_topic = topic.lower()
-    if normalized_topic not in SUPPORTED_WEBHOOK_TOPICS:
-        LOGGER.info("/uw received unsupported topic: %s", topic)
-        return {"status": "ignored", "topic": topic}
+    topic = _extract_webhook_topic(payload)
+    normalized_topic = topic.lower() if topic else None
+
+    if not normalized_topic:
+        LOGGER.info("/uw temporarily accepting payload without topic: %s", payload)
+        return {
+            "status": "received",
+            "topic": "unknown",
+            "note": "topic missing; captured for review",
+        }
 
     redis_client = _get_redis_client()
 
     stamped_payload = {
         "topic": normalized_topic,
         "received_at": datetime.now(timezone.utc).isoformat(),
-        "data": body,
+        "data": payload,
+        "method": request.method,
     }
 
-    if normalized_topic == "option_trades_super_algo":
-        _cache_option_trade(redis_client, stamped_payload)
-    elif normalized_topic == "market_agg_socket":
-        _cache_market_agg(redis_client, stamped_payload)
+    if normalized_topic in SUPPORTED_WEBHOOK_TOPICS:
+        if normalized_topic == "option_trades_super_algo":
+            _cache_option_trade(redis_client, stamped_payload)
+        elif normalized_topic == "market_agg_socket":
+            _cache_market_agg(redis_client, stamped_payload)
+            _cache_market_state(redis_client, stamped_payload)
+        elif normalized_topic == "market-state":
+            _cache_market_state(redis_client, stamped_payload)
+    else:
+        LOGGER.info(
+            "/uw temporarily accepting unsupported topic %s via %s",
+            normalized_topic,
+            request.method,
+        )
 
     return {"status": "received", "topic": normalized_topic}
 
@@ -1002,6 +1039,19 @@ def _cache_market_agg(redis_conn, payload: Dict[str, Any]) -> None:
         redis_conn.publish(UW_MARKET_STREAM_CHANNEL, serialized)
     except Exception:
         LOGGER.exception("Failed to publish market aggregate update")
+
+
+def _cache_market_state(redis_conn, payload: Dict[str, Any]) -> None:
+    serialized = json.dumps(payload, default=str)
+    pipe = redis_conn.pipeline()
+    pipe.setex(UW_MARKET_STATE_LATEST_KEY, UW_CACHE_TTL_SECONDS, serialized)
+    pipe.lpush(UW_MARKET_STATE_HISTORY_KEY, serialized)
+    pipe.ltrim(UW_MARKET_STATE_HISTORY_KEY, 0, UW_HISTORY_LIMIT - 1)
+    pipe.execute()
+    try:
+        redis_conn.publish(UW_MARKET_STATE_STREAM_CHANNEL, serialized)
+    except Exception:
+        LOGGER.exception("Failed to publish market state update")
 
 
 def _infer_endpoint(url: str) -> str:

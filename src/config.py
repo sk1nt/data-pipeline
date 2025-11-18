@@ -95,6 +95,7 @@ class Settings(BaseSettings):
 
     # Schwab streaming
     schwab_enabled: bool = Field(default=False, env="SCHWAB_ENABLED")
+    schwab_stream_paused: bool = Field(default=True, env="SCHWAB_STREAM_PAUSED")
     schwab_client_id: Optional[str] = Field(
         default=None,
         validation_alias=AliasChoices("SCHWAB_CLIENT_ID", "SCHWAB_APPKEY"),
@@ -168,6 +169,11 @@ class Settings(BaseSettings):
     @property
     def tastytrade_symbol_list(self) -> list[str]:
         return [symbol.strip().upper() for symbol in self.tastytrade_symbols.split(",") if symbol.strip()]
+
+    @property
+    def tastytrade_depth_cap(self) -> int:
+        """Return the enforced depth level limit; temporarily capped at 5."""
+        return max(1, min(self.tastytrade_depth_levels, 5))
 
     @property
     def gex_symbol_list(self) -> list[str]:
