@@ -46,3 +46,9 @@
 - MVP: Complete all US1 tasks (streaming session)
 - Incremental delivery: US2 (token management), then US3 (market data validation)
 - Polish phase for logging, safety, and docs
+
+## Discord GEX Feed Notes
+- Trading window: 09:35-16:00 America/New_York. The Discord bot posts GEX short-format feed updates to every channel id listed in `DISCORD_GEX_FEED_CHANNEL_IDS`, refreshes/editing every second, and deletes/reposts on wall-clock `GEX_FEED_REFRESH_MINUTES` (default 5) marks. The final 4 PM message is left intact.
+- Formatting: uses the short formatter without timestamps plus rolling-window deltas (configurable via `GEX_FEED_WINDOW_SECONDS`, default 60). Spot shows net/percent change, zero gamma + call/put walls show current vs previous values with green/red coloring, net gex/scaled gamma/current max change add scaled `Δ` values.
+- Env vars: toggle with `GEX_FEED_ENABLED=true`, choose symbol via `GEX_FEED_SYMBOL`, control cadence with `GEX_FEED_UPDATE_SECONDS`, and emit Redis telemetry hashes at `metrics:gex_feed` when `GEX_FEED_METRICS_ENABLED=true` (override key via `GEX_FEED_METRICS_KEY`).
+- Testing override: set `GEX_FEED_FORCE_WINDOW=true` to bypass the 09:35-16:00 ET trading window so you can replay historical snapshots or Redis simulations after-hours without the bot idling.

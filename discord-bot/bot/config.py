@@ -36,10 +36,17 @@ class BotConfig:
     status_api_secret: Optional[str]
     scid_data_directory: Optional[str]
     allowed_channel_ids: Optional[Tuple[int, ...]]
-    execution_channel_id: Optional[int]
     status_channel_id: Optional[int]
-    alert_channel_id: Optional[int]
     uw_channel_ids: Optional[Tuple[int, ...]]
+    gex_feed_enabled: bool = False
+    gex_feed_channel_ids: Optional[Tuple[int, ...]] = None
+    gex_feed_symbol: str = 'NQ_NDX'
+    gex_feed_update_seconds: float = 1.0
+    gex_feed_refresh_minutes: int = 5
+    gex_feed_window_seconds: int = 60
+    gex_feed_metrics_enabled: bool = False
+    gex_feed_metrics_key: str = 'metrics:gex_feed'
+    gex_feed_force_window: bool = False
 
 def _parse_channel_ids(value: Optional[str]) -> Optional[List[int]]:
     if not value:
@@ -109,9 +116,17 @@ def create_config_from_env() -> BotConfig:
 
     allowed_channels = _parse_channel_ids(os.getenv('DISCORD_ALLOWED_CHANNEL_IDS'))
     uw_channel_ids = _parse_channel_ids(os.getenv('DISCORD_UW_CHANNEL_IDS'))
-    execution_channel_id = int(os.getenv('DISCORD_EXECUTION_CHANNEL_ID', '0')) or None
     status_channel_id = int(os.getenv('DISCORD_STATUS_CHANNEL_ID', '0')) or None
-    alert_channel_id = int(os.getenv('DISCORD_ALERT_CHANNEL_ID', '0')) or None
+    gex_feed_channel_ids = _parse_channel_ids(os.getenv('DISCORD_GEX_FEED_CHANNEL_IDS'))
+
+    gex_feed_enabled = os.getenv('GEX_FEED_ENABLED', 'false').lower() == 'true'
+    gex_feed_symbol = os.getenv('GEX_FEED_SYMBOL', 'NQ_NDX')
+    gex_feed_update_seconds = float(os.getenv('GEX_FEED_UPDATE_SECONDS', '1.0'))
+    gex_feed_refresh_minutes = int(os.getenv('GEX_FEED_REFRESH_MINUTES', '5'))
+    gex_feed_window_seconds = int(os.getenv('GEX_FEED_WINDOW_SECONDS', '60'))
+    gex_feed_metrics_enabled = os.getenv('GEX_FEED_METRICS_ENABLED', 'false').lower() == 'true'
+    gex_feed_metrics_key = os.getenv('GEX_FEED_METRICS_KEY', 'metrics:gex_feed')
+    gex_feed_force_window = os.getenv('GEX_FEED_FORCE_WINDOW', 'false').lower() == 'true'
 
     return BotConfig(
         discord_token=discord_token,
@@ -122,7 +137,14 @@ def create_config_from_env() -> BotConfig:
         scid_data_directory=os.getenv('SCID_DATA_DIRECTORY'),
         allowed_channel_ids=tuple(allowed_channels) if allowed_channels else None,
         uw_channel_ids=tuple(uw_channel_ids) if uw_channel_ids else None,
-        execution_channel_id=execution_channel_id,
         status_channel_id=status_channel_id,
-        alert_channel_id=alert_channel_id
+        gex_feed_enabled=gex_feed_enabled,
+        gex_feed_channel_ids=tuple(gex_feed_channel_ids) if gex_feed_channel_ids else None,
+        gex_feed_symbol=gex_feed_symbol,
+        gex_feed_update_seconds=gex_feed_update_seconds,
+        gex_feed_refresh_minutes=gex_feed_refresh_minutes,
+        gex_feed_window_seconds=gex_feed_window_seconds,
+        gex_feed_metrics_enabled=gex_feed_metrics_enabled,
+        gex_feed_metrics_key=gex_feed_metrics_key,
+        gex_feed_force_window=gex_feed_force_window,
     )

@@ -579,20 +579,16 @@ class ServiceManager:
 
 service_manager = ServiceManager()
 
-UW_OPTION_LATEST_KEY = "uw:option_trades_super_algo:latest"
-UW_OPTION_HISTORY_KEY = "uw:option_trades_super_algo:history"
-UW_MARKET_LATEST_KEY = "uw:market_agg_socket:latest"
-UW_MARKET_HISTORY_KEY = "uw:market_agg_socket:history"
-UW_MARKET_STATE_LATEST_KEY = "uw:market_state:latest"
-UW_MARKET_STATE_HISTORY_KEY = "uw:market_state:history"
-UW_OPTION_STREAM_CHANNEL = "uw:option_trades_super_algo:stream"
-UW_MARKET_STREAM_CHANNEL = "uw:market_agg_socket:stream"
-UW_MARKET_STATE_STREAM_CHANNEL = "uw:market_state:stream"
+UW_OPTION_LATEST_KEY = "uw:options-trade:latest"
+UW_OPTION_HISTORY_KEY = "uw:options-trade:history"
+UW_MARKET_LATEST_KEY = "uw:market-state:latest"
+UW_MARKET_HISTORY_KEY = "uw:market-state:history"
+UW_OPTION_STREAM_CHANNEL = "uw:options-trade:stream"
+UW_MARKET_STREAM_CHANNEL = "uw:market-state:stream"
 UW_HISTORY_LIMIT = 200
 UW_CACHE_TTL_SECONDS = 900
 SUPPORTED_WEBHOOK_TOPICS = {
-    "option_trades_super_algo",
-    "market_agg_socket",
+    "options-trade",
     "market-state",
 }
 
@@ -697,8 +693,6 @@ STATUS_PAGE = """
     <button onclick=\"controlService('redis_flush','restart')\">Restart Flush Worker</button>
   </div>
   <pre id=\"status\">Loading...</pre>
-  <h2>Market Data Metrics</h2>
-  <pre id=\"metrics\">Loading metrics...</pre>
   <script>
     async function refresh() {
       try {
@@ -707,13 +701,6 @@ STATUS_PAGE = """
         document.getElementById('status').textContent = JSON.stringify(data, null, 2);
       } catch (err) {
         document.getElementById('status').textContent = 'Error: ' + err;
-      }
-      try {
-        const res = await fetch('/metrics/market_data');
-        const data = await res.json();
-        document.getElementById('metrics').textContent = JSON.stringify(data, null, 2);
-      } catch (err) {
-        document.getElementById('metrics').textContent = 'Error: ' + err;
       }
     }
     async function controlService(service, action) {
@@ -900,11 +887,8 @@ async def universal_webhook(request: Request):
     }
 
     if normalized_topic in SUPPORTED_WEBHOOK_TOPICS:
-        if normalized_topic == "option_trades_super_algo":
+        if normalized_topic == "options-trade":
             _cache_option_trade(redis_client, stamped_payload)
-        elif normalized_topic == "market_agg_socket":
-            _cache_market_agg(redis_client, stamped_payload)
-            _cache_market_state(redis_client, stamped_payload)
         elif normalized_topic == "market-state":
             _cache_market_state(redis_client, stamped_payload)
     else:
@@ -1028,7 +1012,7 @@ def _cache_option_trade(redis_conn, payload: Dict[str, Any]) -> None:
         LOGGER.exception("Failed to publish option trade alert")
 
 
-def _cache_market_agg(redis_conn, payload: Dict[str, Any]) -> None:
+def _cache_market_state(redis_conn, payload: Dict[str, Any]) -> None:
     serialized = json.dumps(payload, default=str)
     pipe = redis_conn.pipeline()
     pipe.setex(UW_MARKET_LATEST_KEY, UW_CACHE_TTL_SECONDS, serialized)
@@ -1037,19 +1021,6 @@ def _cache_market_agg(redis_conn, payload: Dict[str, Any]) -> None:
     pipe.execute()
     try:
         redis_conn.publish(UW_MARKET_STREAM_CHANNEL, serialized)
-    except Exception:
-        LOGGER.exception("Failed to publish market aggregate update")
-
-
-def _cache_market_state(redis_conn, payload: Dict[str, Any]) -> None:
-    serialized = json.dumps(payload, default=str)
-    pipe = redis_conn.pipeline()
-    pipe.setex(UW_MARKET_STATE_LATEST_KEY, UW_CACHE_TTL_SECONDS, serialized)
-    pipe.lpush(UW_MARKET_STATE_HISTORY_KEY, serialized)
-    pipe.ltrim(UW_MARKET_STATE_HISTORY_KEY, 0, UW_HISTORY_LIMIT - 1)
-    pipe.execute()
-    try:
-        redis_conn.publish(UW_MARKET_STATE_STREAM_CHANNEL, serialized)
     except Exception:
         LOGGER.exception("Failed to publish market state update")
 
