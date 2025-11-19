@@ -117,3 +117,8 @@ logs/
 redis/dump.rdb
 redis/*.log
 data/
+
+# ML outputs
+ml/models/
+ml/output/
+ml/data/
