@@ -1,5 +1,3 @@
-import os
-from flask import Request
 import base64
 import requests
 from loguru import logger

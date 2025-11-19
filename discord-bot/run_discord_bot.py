@@ -1,6 +1,6 @@
 import asyncio
 import logging
-import os
+
 from bot.config import create_config_from_env
 from bot.trade_bot import TradeBot
 from env_loader import load_env_file

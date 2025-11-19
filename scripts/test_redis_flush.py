@@ -7,15 +7,23 @@ from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-if str(PROJECT_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from src.config import settings
-from src.lib.redis_client import RedisClient
-from src.services.redis_timeseries import RedisTimeSeriesClient
-from src.services.redis_flush_worker import FlushWorkerSettings, RedisFlushWorker
+
+def _load_flush_dependencies():
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    src_path = PROJECT_ROOT / "src"
+    if str(src_path) not in sys.path:
+        sys.path.insert(0, str(src_path))
+    from src.config import settings as cfg
+    from src.lib.redis_client import RedisClient
+    from src.services.redis_flush_worker import FlushWorkerSettings, RedisFlushWorker
+    from src.services.redis_timeseries import RedisTimeSeriesClient
+
+    return cfg, RedisClient, RedisTimeSeriesClient, FlushWorkerSettings, RedisFlushWorker
+
+
+settings, RedisClient, RedisTimeSeriesClient, FlushWorkerSettings, RedisFlushWorker = _load_flush_dependencies()
 
 async def main() -> None:
     redis_client = RedisClient(

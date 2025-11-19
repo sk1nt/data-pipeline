@@ -5,15 +5,23 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-if str(PROJECT_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from src.config import settings
-from src.lib.redis_client import RedisClient
-from src.services.redis_timeseries import RedisTimeSeriesClient
-from src.services.gexbot_poller import GEXBotPoller, GEXBotPollerSettings
+
+def _load_gex_poller():
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    src_path = PROJECT_ROOT / "src"
+    if str(src_path) not in sys.path:
+        sys.path.insert(0, str(src_path))
+    from src.config import settings as cfg
+    from src.lib.redis_client import RedisClient
+    from src.services.gexbot_poller import GEXBotPoller, GEXBotPollerSettings
+    from src.services.redis_timeseries import RedisTimeSeriesClient
+
+    return cfg, RedisClient, RedisTimeSeriesClient, GEXBotPoller, GEXBotPollerSettings
+
+
+settings, RedisClient, RedisTimeSeriesClient, GEXBotPoller, GEXBotPollerSettings = _load_gex_poller()
 
 async def main() -> None:
     redis_client = RedisClient(

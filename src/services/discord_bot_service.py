@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import signal
 import subprocess
 import sys
 from datetime import datetime
@@ -67,4 +66,3 @@ class DiscordBotService:
             "last_start": self.last_start,
             "last_stop": self.last_stop,
         }
-

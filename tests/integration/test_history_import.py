@@ -1,18 +1,25 @@
 """Integration-style tests for /gex_history_url workflow."""
 from __future__ import annotations
 
-import pytest
-from unittest.mock import AsyncMock, patch
-from fastapi.testclient import TestClient
-
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from fastapi.testclient import TestClient
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data_pipeline import app
+
+def _load_app():
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    from src.data_pipeline import app as service_app
+
+    return service_app
+
+
+app = _load_app()
 
 
 @pytest.fixture
@@ -27,7 +34,7 @@ def test_history_endpoint_enqueues_request(client):
         "ticker": "SPY",
     }
     with patch("src.lib.gex_history_queue.gex_history_queue.enqueue_request", return_value=101) as mock_enqueue, \
-         patch("src.data_pipeline._trigger_queue_processing", new=AsyncMock()) as mock_trigger:
+         patch("src.data_pipeline._trigger_queue_processing", new=AsyncMock()):
         response = client.post("/gex_history_url", json=payload)
 
     assert response.status_code == 200

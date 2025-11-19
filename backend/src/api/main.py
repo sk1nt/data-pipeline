@@ -1,12 +1,16 @@
+import logging
+import os
+
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-import os
-import logging
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
+
+from .status import router as status_router
+from .ticks import router as ticks_router
 
 # Configure logging
 logging.basicConfig(
@@ -42,10 +46,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Include routers
-from .ticks import router as ticks_router
-from .status import router as status_router
 
 app.include_router(ticks_router, prefix="/api/v1", tags=["ticks"])
 app.include_router(status_router, prefix="/api/v1", tags=["status"])

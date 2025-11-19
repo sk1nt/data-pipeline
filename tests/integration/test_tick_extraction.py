@@ -66,7 +66,7 @@ class TestTickExtraction:
     def test_tick_validation(self):
         """Test tick record validation."""
         # Valid tick
-        tick = MnqTickRecord(
+        MnqTickRecord(
             timestamp=datetime(2024, 1, 1, 12, 0, 0),
             price=4500.12,
             volume=5

@@ -4,7 +4,6 @@ Configuration management for GEX Data Pipeline.
 Handles environment variables, CLI arguments, and application settings.
 """
 
-import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 from pydantic import AliasChoices, Field

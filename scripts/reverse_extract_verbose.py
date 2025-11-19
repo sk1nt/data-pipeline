@@ -98,7 +98,6 @@ def main():
                 parser = SierraChartDepthParser()
                 t0 = time.time()
                 try:
-                    import pyarrow as pa
                     import pyarrow.parquet as pq
                     writer = None
                     # single parquet file per day inside the day directory

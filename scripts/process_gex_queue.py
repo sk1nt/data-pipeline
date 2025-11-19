@@ -11,10 +11,17 @@ import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.lib.gex_history_queue import gex_history_queue
+
+def _load_queue_helper():
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    from src.lib.gex_history_queue import gex_history_queue as queue_helper
+
+    return queue_helper
+
+
+gex_history_queue = _load_queue_helper()
 
 
 def process_job(job_id: int, url: str, ticker: str, endpoint: str, log: logging.Logger) -> None:

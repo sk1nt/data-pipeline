@@ -2,10 +2,9 @@
 Depth data extraction service for MNQ.
 """
 
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List
-from datetime import datetime, timedelta
-import concurrent.futures
 
 from ..lib.logging_config import logger
 from ..models.depth_snapshot import DepthSnapshot

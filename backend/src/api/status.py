@@ -1,8 +1,8 @@
-from fastapi import APIRouter
-import duckdb
-import os
 import logging
 from datetime import datetime
+
+from fastapi import APIRouter
+
 from backend.src.models.service_status import ServiceStatus
 
 logger = logging.getLogger(__name__)

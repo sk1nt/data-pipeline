@@ -2,9 +2,9 @@
 Unit tests for SCID parser tick functionality.
 """
 
-import pytest
 from datetime import datetime
-from src.lib.scid_parser import parse_scid_record, is_tick_record
+
+from src.lib.scid_parser import is_tick_record
 
 
 class TestScidTickParsing:
@@ -28,7 +28,7 @@ class TestScidTickParsing:
         }
 
         # Test tick identification
-        assert is_tick_record(mock_record) == True
+        assert is_tick_record(mock_record)
 
     def test_parse_non_tick_record(self):
         """Test parsing a non-tick record (OHLC bar)."""
@@ -46,7 +46,7 @@ class TestScidTickParsing:
         }
 
         # Should not be identified as individual tick
-        assert is_tick_record(mock_record) == False
+        assert not is_tick_record(mock_record)
 
     def test_bundled_trade_detection(self):
         """Test detection of bundled trades."""
@@ -54,12 +54,12 @@ class TestScidTickParsing:
 
         # First in bundle
         record1 = {'open': -1.99900095e+37}
-        assert is_bundled_trade(record1) == True
+        assert is_bundled_trade(record1)
 
         # Last in bundle
         record2 = {'open': -1.99900197e+37}
-        assert is_bundled_trade(record2) == True
+        assert is_bundled_trade(record2)
 
         # Regular record
         record3 = {'open': 0.0}
-        assert is_bundled_trade(record3) == False
+        assert not is_bundled_trade(record3)

@@ -3,7 +3,7 @@ import tempfile
 import json
 import csv
 from pathlib import Path
-from unittest.mock import patch
+
 from src.importers.gex_importer import GEXImporter
 from src.importers.tick_importer import TickImporter
 from src.importers.depth_importer import DepthImporter

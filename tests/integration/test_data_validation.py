@@ -2,14 +2,14 @@
 Integration tests for data validation.
 """
 
-import pytest
 import tempfile
-from pathlib import Path
 from datetime import datetime, timedelta
-from src.services.data_validator import DataValidator
+from pathlib import Path
+
 from src.lib.database import DatabaseConnection
 from src.lib.parquet_handler import ParquetHandler
 from src.models.depth_snapshot import DepthSnapshot
+from src.services.data_validator import DataValidator
 
 
 class TestDataValidation:
@@ -71,7 +71,6 @@ class TestDataValidation:
 
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "empty.db"
-            db = DatabaseConnection(str(db_path))
 
             # Empty database
             start_date = datetime(2024, 1, 1)

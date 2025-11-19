@@ -5,13 +5,21 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-if str(PROJECT_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from src.config import settings
-from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreamer
+
+def _load_tastytrade_dependencies():
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    src_path = PROJECT_ROOT / "src"
+    if str(src_path) not in sys.path:
+        sys.path.insert(0, str(src_path))
+    from src.config import settings as cfg
+    from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreamer
+
+    return cfg, StreamerSettings, TastyTradeStreamer
+
+
+settings, StreamerSettings, TastyTradeStreamer = _load_tastytrade_dependencies()
 
 async def main() -> None:
     streamer = TastyTradeStreamer(

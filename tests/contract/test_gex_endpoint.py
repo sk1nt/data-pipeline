@@ -7,7 +7,6 @@ Tests the API contract and behavior of the GEX data capture endpoint.
 import pytest
 from fastapi.testclient import TestClient
 from src.data_pipeline import app
-from src.models.api_models import GEXPayload, GEXStrike
 
 
 class TestGEXEndpointContract:

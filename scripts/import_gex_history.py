@@ -1,20 +1,26 @@
 import argparse
 import logging
+import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import duckdb
-import polars as pl
 import requests
-from datetime import datetime, timezone, timedelta
-import re
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.lib.gex_history_queue import gex_history_queue
+
+def _load_history_queue():
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    from src.lib.gex_history_queue import gex_history_queue as queue_helper
+
+    return queue_helper
+
+
+gex_history_queue = _load_history_queue()
 
 
 def download_file(url: str, out_path: Path) -> None:
@@ -135,6 +141,7 @@ def import_to_duckdb_and_parquet(file_path: Path, duckdb_path: Path, parquet_pat
                 
                 # Convert to DataFrame
                 batch_df = pd.DataFrame(batch_data, columns=column_order)
+                con.register("batch_df", batch_df)
                 
                 # Insert batch with explicit column order
                 selected_cols = ", ".join(column_order)
@@ -151,6 +158,7 @@ def import_to_duckdb_and_parquet(file_path: Path, duckdb_path: Path, parquet_pat
         LOG.info(f"Processing final batch {batch_count} ({len(batch_data)} records, total: {total_processed + len(batch_data)})")
         
         batch_df = pd.DataFrame(batch_data, columns=column_order)
+        con.register("batch_df", batch_df)
         selected_cols = ", ".join(column_order)
         con.execute(
             f"INSERT INTO {table_name} ({selected_cols}) SELECT {selected_cols} FROM batch_df"

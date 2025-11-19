@@ -38,7 +38,7 @@ def parse_depth_record(record_bytes: bytes) -> Dict:
                     if timestamp.year < 1900 or timestamp.year > 2100:
                         # Try as seconds  
                         timestamp = pd.Timestamp(dt_raw, unit='s')
-            except:
+            except Exception:
                 timestamp = pd.Timestamp.now()
         else:
             timestamp = pd.Timestamp.now()

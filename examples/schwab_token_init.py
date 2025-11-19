@@ -1,4 +1,3 @@
-import os
 import base64
 import requests
 import webbrowser
@@ -74,5 +73,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

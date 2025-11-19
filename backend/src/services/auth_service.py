@@ -1,9 +1,10 @@
-from fastapi import HTTPException, Request, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import hashlib
+import json
 import os
-from typing import Optional
+
 import duckdb
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 security = HTTPBearer()
 
@@ -50,8 +51,15 @@ def check_permissions(model_id: str, required_permissions: dict) -> bool:
         if not result:
             return False
 
-        permissions = result[0]  # Assuming JSON is stored as string, parse if needed
-        # For simplicity, assume permissions match
+        permissions_raw = result[0] or "{}"
+        try:
+            permissions = json.loads(permissions_raw)
+        except (TypeError, json.JSONDecodeError):
+            permissions = {}
+
+        for perm, expected in required_permissions.items():
+            if permissions.get(perm) != expected:
+                return False
         return True
     finally:
         conn.close()

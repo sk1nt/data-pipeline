@@ -326,7 +326,7 @@ class GEXBotPoller:
             "delta_risk_reversal": snapshot.get("delta_risk_reversal"),
         }
         samples = []
-        for field, value in metrics.items():
+        for metric_name, value in metrics.items():
             if value is None:
                 continue
             try:
@@ -334,10 +334,10 @@ class GEXBotPoller:
             except (TypeError, ValueError):
                 continue
             samples.append((
-                f"ts:gex:{field}:{symbol}",
+                f"ts:gex:{metric_name}:{symbol}",
                 timestamp_ms,
                 numeric,
-                {"symbol": symbol, "type": "gex", "field": field},
+                {"symbol": symbol, "type": "gex", "field": metric_name},
             ))
 
         maxchange = snapshot.get("maxchange") or {}
