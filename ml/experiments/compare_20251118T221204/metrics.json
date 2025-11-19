@@ -1,0 +1,4 @@
+{
+  "lstm": "Epoch 1/1 val_acc=0.8578\nSaved LSTM model to ml/models/lstm_compare_20251118T221204.pt",
+  "cnn": "Epoch 1 val_acc=0.8490\nSaved CNN model to ml/models/cnn_compare_20251118T221204.pt"
+}

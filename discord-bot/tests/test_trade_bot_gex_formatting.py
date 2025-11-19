@@ -78,7 +78,7 @@ def test_format_gex_short_feed_variant_hides_timestamp(bot):
     }
     rendered = bot.format_gex_short(data, include_time=False, delta_block=delta_map)
     assert '09/01/2024' not in rendered
-    assert 'spot' in rendered
+    assert 'Δ1.50 +0.25%' in rendered
     assert '(14975.00)' in rendered
     assert 'scaled gamma' in rendered
     assert 'Δ' in rendered
