@@ -1,6 +1,9 @@
+import os
+import sys
 from datetime import datetime, timedelta, timezone
 
-from bot.trade_bot import RollingWindowTracker
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from bot.trade_bot import RollingWindowTracker  # noqa: E402
 
 
 def test_tracker_retains_window_and_last_delta():

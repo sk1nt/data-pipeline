@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Hyperparameter tuning script for LSTM using Optuna (fallback random search).
 
-Saves best hyperparams and model to `ml/experiments/<timestamp>/`.
+Saves best hyperparams and model to `experiments/<timestamp>/`.
 
 Usage:
- python ml/tune.py --input ml/output/MNQ_20251111_1s_w60s_h1.npz --trials 10 --max-epochs 3
+ python tune.py --input output/MNQ_20251111_1s_w60s_h1.npz --trials 10 --max-epochs 3
 
 If Optuna is not installed, it falls back to a simple random search.
 """
@@ -27,7 +27,7 @@ try:
 except Exception:
     OPTUNA = False
 
-OUT = Path('ml/experiments')
+OUT = Path('experiments')
 OUT.mkdir(parents=True, exist_ok=True)
 
 class LSTMModel(nn.Module):

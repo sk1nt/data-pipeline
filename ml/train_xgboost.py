@@ -9,7 +9,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, accuracy_score
 from pathlib import Path
 
-OUT = Path('ml/models')
+OUT = Path('models')
 OUT.mkdir(parents=True, exist_ok=True)
 
 if __name__ == '__main__':
@@ -17,6 +17,7 @@ if __name__ == '__main__':
     p.add_argument('--input', required=True)
     p.add_argument('--out', default=str(OUT / 'xgb_model.json'))
     p.add_argument('--use-gpu', action='store_true', help='Use GPU for XGBoost if available')
+    p.add_argument('--mlflow', action='store_true', help='Log metrics and model to MLflow if available')
     args = p.parse_args()
 
     data = np.load(args.input)
@@ -38,4 +39,19 @@ if __name__ == '__main__':
     acc = accuracy_score(y_val, (preds > 0.5).astype(int))
     print('AUC:', auc, 'ACC:', acc)
     model.save_model(args.out)
+    if args.mlflow:
+        try:
+            import mlflow
+            import mlflow.xgboost
+            mlflow.start_run()
+            mlflow.log_params({'use_gpu': args.use_gpu})
+            mlflow.log_metric('auc', float(auc))
+            mlflow.log_metric('acc', float(acc))
+            try:
+                mlflow.xgboost.log_model(model, artifact_path='model')
+            except Exception:
+                mlflow.log_artifact(args.out)
+            mlflow.end_run()
+        except Exception:
+            print('MLflow not available; skipping mlflow logging')
     print('Saved xgb model to', args.out)

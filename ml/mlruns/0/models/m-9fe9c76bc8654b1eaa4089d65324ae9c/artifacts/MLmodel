@@ -1,0 +1,23 @@
+artifact_path: /home/rwest/projects/data-pipeline/ml/mlruns/0/models/m-9fe9c76bc8654b1eaa4089d65324ae9c/artifacts
+flavors:
+  python_function:
+    config:
+      device: null
+    data: data
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.pytorch
+    pickle_module_name: mlflow.pytorch.pickle_module
+    python_version: 3.13.5
+  pytorch:
+    code: null
+    model_data: data
+    pytorch_version: 2.5.1+cu121
+mlflow_version: 3.6.0
+model_id: m-9fe9c76bc8654b1eaa4089d65324ae9c
+model_size_bytes: 35600
+model_uuid: m-9fe9c76bc8654b1eaa4089d65324ae9c
+prompts: null
+run_id: b97b59c4022c4bf09f55fbcd9cd8cced
+utc_time_created: '2025-11-19 03:57:07.107673'

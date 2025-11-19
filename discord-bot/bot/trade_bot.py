@@ -268,7 +268,12 @@ class TradeBot(commands.Bot):
                 await asyncio.sleep(self.gex_feed_update_seconds)
                 continue
             delta_map = self._build_feed_delta_map(tracker, data, now)
-            content = self.format_gex_short(data, include_time=False, delta_block=delta_map)
+            content = self.format_gex_short(
+                data,
+                include_time=True,
+                time_format="%I:%M:%S %p %Z",
+                delta_block=delta_map,
+            )
             if not messages:
                 messages = await self._post_feed_messages(channels, content)
                 await self._gex_feed_metrics.record_update(now, delta_map, refresh=True)
@@ -1424,7 +1429,14 @@ class TradeBot(commands.Bot):
         body = "\n".join([header, "", *table_lines, "", *maxchange_lines])
         return f"```ansi\n{body}\n```"
 
-    def format_gex_short(self, data, *, include_time: bool = True, delta_block: Optional[Dict[str, 'MetricSnapshot']] = None):
+    def format_gex_short(
+        self,
+        data,
+        *,
+        include_time: bool = True,
+        time_format: Optional[str] = None,
+        delta_block: Optional[Dict[str, 'MetricSnapshot']] = None,
+    ):
         dt = data.get('timestamp')
         if isinstance(dt, str):
             try:
@@ -1437,7 +1449,10 @@ class TradeBot(commands.Bot):
             local_dt = dt.astimezone(self.display_zone)
         else:
             local_dt = None
-        formatted_time = local_dt.strftime("%m/%d/%Y  %I:%M:%S %p %Z") if local_dt else "N/A"
+        formatted_time = "N/A"
+        if local_dt:
+            fmt = time_format or "%m/%d/%Y  %I:%M:%S %p %Z"
+            formatted_time = local_dt.strftime(fmt)
 
         ticker = data.get('display_symbol') or data.get('ticker', 'QQQ')
 
@@ -1528,10 +1543,40 @@ class TradeBot(commands.Bot):
             current_delta = colorize(fallback, 'N/ABn')
 
         source_label = self._resolve_gex_source_label(data)
+        def snapshot(key: str) -> 'MetricSnapshot':
+            snap = delta_block.get(key) if delta_block else None
+            if isinstance(snap, MetricSnapshot):
+                return snap
+            return MetricSnapshot(value=None, delta=None, percent=None, previous=None, baseline=None)
+
+        def fmt_abs(value, digits: int = 2) -> str:
+            if not isinstance(value, (int, float)):
+                return 'N/A'
+            return f"{abs(value):.{digits}f}"
+
+        def fmt_percent(value) -> str:
+            if not isinstance(value, (int, float)):
+                return 'n/a%'
+            return f"{value:+.2f}%"
+
+        def color_for_delta(delta) -> str:
+            if not isinstance(delta, (int, float)):
+                return 'yellow'
+            return 'green' if delta >= 0 else 'red'
+
         header_parts = [f"{ansi['dim_white']}GEX: {ticker}{ansi['reset']}"]
         if include_time:
             header_parts.append(formatted_time)
-        header_parts.append(f"{ansi['dim_white']}{fmt_price(data.get('spot_price'))}{ansi['reset']}")
+
+        price_text = fmt_price(data.get('spot_price'))
+        if delta_block:
+            spot_snap = snapshot('spot')
+            delta_text = fmt_abs(spot_snap.delta)
+            percent_text = fmt_percent(spot_snap.percent)
+            delta_color = ansi.get(color_for_delta(spot_snap.delta))
+            delta_display = colorize(delta_color, f"Δ{delta_text} {percent_text}")
+            price_text = f"{price_text}  {delta_display}"
+        header_parts.append(f"{ansi['dim_white']}{price_text}{ansi['reset']}")
         header_parts.append(f"{ansi['dim_white']}{source_label}{ansi['reset']}")
         header = "  ".join(header_parts)
 
@@ -1597,12 +1642,6 @@ class TradeBot(commands.Bot):
             return fmt_abs(value)
 
         lines = [header, ""]
-
-        spot_snap = snapshot('spot')
-        spot_value = colorize(ansi.get(color_for_delta(spot_snap.delta)), fmt_abs(spot_snap.value))
-        delta_text = fmt_abs(spot_snap.delta) if isinstance(spot_snap.delta, (int, float)) else 'n/a'
-        pct_text = fmt_percent(spot_snap.percent)
-        lines.append(f"spot              {spot_value:<8}  Δ{delta_text:<7}  {pct_text}")
 
         def append_prev_line(label: str, snap_key: str):
             snap = snapshot(snap_key)

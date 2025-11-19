@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Train a simple 1D-CNN model for sequence classification using PyTorch.
 
-Usage: python ml/train_cnn.py --input ml/output/MNQ_20251111_1s_w60s_h1.npz --epochs 1 --batch 128
+Usage: python train_cnn.py --input output/MNQ_20251111_1s_w60s_h1.npz --epochs 1 --batch 128
 """
 import argparse
 import numpy as np
@@ -12,7 +12,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from pathlib import Path
 
-OUT = Path('ml/models')
+OUT = Path('models')
 OUT.mkdir(parents=True, exist_ok=True)
 
 class CNNModel(nn.Module):
@@ -41,6 +41,7 @@ if __name__ == '__main__':
     p.add_argument('--epochs', type=int, default=1)
     p.add_argument('--batch', type=int, default=128)
     p.add_argument('--out', default=str(OUT / 'cnn_model.pt'))
+    p.add_argument('--mlflow', action='store_true', help='Log metrics and model to MLflow if available')
     args = p.parse_args()
 
     data = np.load(args.input)
@@ -67,6 +68,17 @@ if __name__ == '__main__':
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     loss_fn = nn.BCEWithLogitsLoss()
 
+    mlflow_module = None
+    if args.mlflow:
+        try:
+            import mlflow
+            import mlflow.pytorch
+            mlflow_module = mlflow
+            mlflow_module.start_run()
+            mlflow_module.log_params({'epochs': args.epochs, 'batch': args.batch})
+        except Exception:
+            print('MLflow not available; skipping logging')
+
     for e in range(args.epochs):
         model.train()
         for xb, yb in train_loader:
@@ -89,6 +101,13 @@ if __name__ == '__main__':
                 labels.extend(yb.cpu().numpy().tolist())
         acc = accuracy_score((np.array(preds) > 0.5).astype(int), np.array(labels))
         print(f'Epoch {e+1} val_acc={acc:.4f}')
+        if mlflow_module:
+            mlflow_module.log_metric('val_acc', float(acc), step=e+1)
 
     torch.save(model.state_dict(), args.out)
     print('Saved CNN model to', args.out)
+    if mlflow_module:
+        try:
+            mlflow.pytorch.log_model(model, artifact_path='model')
+        except Exception:
+            pass
