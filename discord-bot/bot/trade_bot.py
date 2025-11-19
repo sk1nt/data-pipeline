@@ -1089,7 +1089,13 @@ class TradeBot(commands.Bot):
             print(f"Redis error fetching market snapshot: {exc}")
             return None
         if not raw:
-            return None
+            try:
+                raw = await asyncio.to_thread(self.redis_client.lindex, self.uw_market_history_key, 0)
+            except Exception as exc:
+                print(f"Redis error fetching historical market snapshot: {exc}")
+                raw = None
+            if not raw:
+                return None
         if isinstance(raw, bytes):
             raw = raw.decode('utf-8')
         try:

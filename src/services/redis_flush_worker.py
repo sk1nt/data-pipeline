@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -24,6 +24,8 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class FlushWorkerSettings:
     interval_seconds: int = settings.flush_interval_seconds
+    schedule_mode: str = settings.flush_schedule_mode
+    daily_time: str = settings.flush_daily_time
     key_pattern: str = "ts:*"
     last_hash: str = "ts_meta:last_flushed"
     db_path: Path = Path(settings.timeseries_db_path)
@@ -80,14 +82,39 @@ class RedisFlushWorker:
             self._task = None
 
     async def _run(self) -> None:
-        LOGGER.info("Redis flush worker started (interval=%ss)", self.settings.interval_seconds)
+        mode = (self.settings.schedule_mode or "interval").lower()
+        if mode == "daily":
+            LOGGER.info(
+                "Redis flush worker started (daily schedule at %sZ)",
+                self.settings.daily_time,
+            )
+            await self._run_daily()
+        else:
+            LOGGER.info("Redis flush worker started (interval=%ss)", self.settings.interval_seconds)
+            await self._run_interval()
+        LOGGER.info("Redis flush worker stopped")
+
+    async def _run_interval(self) -> None:
         while not self._stop_event.is_set():
             await self._flush_once()
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self.settings.interval_seconds)
             except asyncio.TimeoutError:
                 continue
-        LOGGER.info("Redis flush worker stopped")
+
+    async def _run_daily(self) -> None:
+        while not self._stop_event.is_set():
+            wait_seconds = self._seconds_until_daily_run()
+            LOGGER.info("Next Redis flush scheduled in %.0fs", wait_seconds)
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=wait_seconds)
+                if self._stop_event.is_set():
+                    break
+            except asyncio.TimeoutError:
+                pass
+            if self._stop_event.is_set():
+                break
+            await self._flush_once()
 
     async def _flush_once(self) -> None:
         try:
@@ -175,6 +202,23 @@ class RedisFlushWorker:
             summary["keys"],
             summary["duration"],
         )
+
+    def _seconds_until_daily_run(self) -> float:
+        try:
+            hour, minute = [int(part) for part in self.settings.daily_time.split(":")]
+        except (ValueError, AttributeError):
+            hour, minute = 0, 30
+        target = dt_time(hour=hour % 24, minute=minute % 60)
+        now = datetime.now(timezone.utc)
+        today_target = now.replace(
+            hour=target.hour,
+            minute=target.minute,
+            second=0,
+            microsecond=0,
+        )
+        if today_target <= now:
+            today_target += timedelta(days=1)
+        return max(0.0, (today_target - now).total_seconds())
 
     def _write_to_duckdb(self, df: pd.DataFrame) -> None:
         self.settings.db_path.parent.mkdir(parents=True, exist_ok=True)
