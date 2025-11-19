@@ -5,14 +5,14 @@
 **Status:** In Progress
 
 ## Goal
-Run all real-time services via `data-pipeline.py`, buffering one full trading day of TastyTrade (trades + summarized depth) and GEXBot data inside RedisTimeSeries, then flushing to DuckDB/Parquet every 10 minutes. Add guardrails and daily compressed backups once ingestion is stable.
+Run all real-time services via `data-pipeline.py`, buffering one full trading day of TastyTrade (trades + summarized depth) and GEXBot data inside RedisTimeSeries, then performing a nightly flush to DuckDB/Parquet. Add guardrails and daily compressed backups once ingestion is stable.
 
 ## Scope
 - TastyTrade DXLink streamer managed by `data-pipeline.py`
 - Schwab streamer co-managed to mirror symbols + compare depth vs TastyTrade
 - GEXBot poller (NQ_NDX, ES_SPX, SPY, QQQ, SPX, NDX) polling every 60s
 - RedisTimeSeries cache with ~24h retention
-- 10-minute batch flush to DuckDB + Parquet
+- Nightly flush to DuckDB + Parquet (keeps Redis hot during RTH, persists after the close)
 - Future guardrails & backups (plan defined; implementation after ingestion)
 
 ## Task Breakdown
@@ -32,8 +32,9 @@ Run all real-time services via `data-pipeline.py`, buffering one full trading da
 - [x] Persist market-data counters under `metrics:market_data_counts` for Schwab/TastyTrade parity checks
 
 ### 3. Flush Pipeline (10 min)
-- [x] Implement flush worker to read RedisTimeSeries deltas, persist to DuckDB/Parquet
+- [x] Implement flush worker to read RedisTimeSeries deltas, persist to DuckDB/Parquet (nightly schedule)
 - [ ] Add logging/metrics for flush success/failure
+- Nightly cadence is controlled via `FLUSH_SCHEDULE_MODE=daily` and `FLUSH_DAILY_TIME=00:30` (UTC). Override per-environment if we need a different maintenance window.
 
 ### 4. FastAPI Lifecycle Wiring
 - [ ] Update `data-pipeline.py` lifespan to start/stop streamer, poller, flush worker

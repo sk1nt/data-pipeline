@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     parquet_dir: str = Field(default="data/parquet/gexbot", env="PARQUET_DIR")
     redis_retention_ms: int = Field(default=86_400_000, env="REDIS_RETENTION_MS")
     flush_interval_seconds: int = Field(default=600, env="FLUSH_INTERVAL_SECONDS")
+    flush_schedule_mode: str = Field(default="daily", env="FLUSH_SCHEDULE_MODE")
+    flush_daily_time: str = Field(default="00:30", env="FLUSH_DAILY_TIME")
     redis_host: str = Field(default="localhost", env="REDIS_HOST")
     redis_port: int = Field(default=6379, env="REDIS_PORT")
     redis_db: int = Field(default=0, env="REDIS_DB")
