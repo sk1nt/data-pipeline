@@ -2,10 +2,11 @@
 Base Pydantic models and enums for the GEX priority system.
 """
 
+from datetime import date, datetime, time, timedelta
 from enum import Enum
-from typing import Optional, Dict, Any, List
-from datetime import datetime, date, time, timedelta
-from pydantic import BaseModel, Field, validator, UUID4
+from typing import Any, Dict, Optional
+
+from pydantic import UUID4, BaseModel, Field, validator
 from uuid import uuid4
 
 

@@ -2,8 +2,8 @@
 Unit tests for data validation functions.
 """
 
-import pytest
-from datetime import datetime, timedelta
+from datetime import datetime
+
 from src.services.data_validator import DataValidator
 
 

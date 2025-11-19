@@ -1,4 +1,3 @@
-import pytest
 from src.services.schwab_streamer import build_streamer
 
 def test_schwab_streamer_start(monkeypatch):

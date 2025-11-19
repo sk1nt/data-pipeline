@@ -1,7 +1,7 @@
-from pydantic import BaseModel
-from typing import Optional, Dict, Any
 from datetime import datetime
-import uuid
+from typing import Any, Dict
+
+from pydantic import BaseModel
 
 class QueryHistory(BaseModel):
     query_id: str  # UUID

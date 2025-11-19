@@ -15,13 +15,12 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 
 def setup_sys_path() -> None:

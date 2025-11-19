@@ -28,7 +28,7 @@ import dataclasses
 import datetime as dt
 import re
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import duckdb
 

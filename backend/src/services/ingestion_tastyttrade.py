@@ -2,7 +2,6 @@ import asyncio
 import os
 import time
 from datetime import datetime
-from typing import Dict, Any
 
 from dotenv import load_dotenv
 from tastytrade import DXLinkStreamer, OAuthSession
@@ -96,7 +95,6 @@ class TastyTradeIngestion:
                 print("✅ Streaming started successfully")
                 
                 # Event loop with periodic saves
-                save_task = None
                 try:
                     while True:
                         # Get next trade event (with timeout)

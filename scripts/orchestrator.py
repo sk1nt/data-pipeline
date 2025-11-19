@@ -10,7 +10,7 @@ import os
 import subprocess
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 # Roll schedule derived from the CME quarterly contract table documented in
 # scripts/export_scid_ticks_to_parquet.py (see module docstring). MNQ rolls
@@ -181,7 +181,6 @@ def _validate_parquet(path: Path) -> (bool, bool, str):
         import duckdb
         con = duckdb.connect()
         # simple read to confirm file is readable
-        rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{path}')").fetchone()[0]
         cols = con.execute(f"SELECT * FROM read_parquet('{path}') LIMIT 1").fetchdf().columns.tolist()
         has_ts_ms = 'ts_ms' in cols
         return True, has_ts_ms, ''
@@ -195,7 +194,6 @@ def run_convert_for_day(python: str, date_str: str, args: argparse.Namespace) ->
     If the parquet is corrupted and --recreate-corrupt is set, re-run the worker_day
     for that day to re-source raw files before conversion.
     """
-    target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     # compute expected parquet paths
     out_depth = Path(args.depth_parquet_dir) / args.symbol / f"{date_str.replace('-', '')}.parquet"
     out_tick = Path(args.tick_parquet_dir) / args.symbol / f"{date_str.replace('-', '')}.parquet"
@@ -241,7 +239,7 @@ def run_convert_for_day(python: str, date_str: str, args: argparse.Namespace) ->
             env = os.environ.copy()
             env['PYTHONPATH'] = str(Path('.').resolve())
             if args.skip_existing:
-                print(f"[orchestrator] skip-existing set; already handled previously")
+                print("[orchestrator] skip-existing set; already handled previously")
             proc = subprocess.Popen(cmd, env=env)
             rc = proc.wait()
             if rc != 0:

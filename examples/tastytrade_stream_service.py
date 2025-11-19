@@ -31,19 +31,23 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-# Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _import_stream_dependencies():
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    from scripts.tastytrade_oauth2 import TastyTradeOAuth2 as OAuthHelper
+    from tastytrade import DXLinkStreamer, OAuthSession
+    from tastytrade.dxfeed import Quote
+
+    return OAuthHelper, OAuthSession, DXLinkStreamer, Quote
+
+
+TastyTradeOAuth2, OAuthSession, DXLinkStreamer, Quote = _import_stream_dependencies()
 
 # Load environment variables from .env file
 load_dotenv(PROJECT_ROOT / ".env")
-
-# Import OAuth2 manager
-from scripts.tastytrade_oauth2 import TastyTradeOAuth2
-
-# Import TastyTrade SDK (but use OAuth2 for auth)
-from tastytrade import OAuthSession, DXLinkStreamer
-from tastytrade.dxfeed import Quote
 
 # Configure logging
 logging.basicConfig(
@@ -243,7 +247,6 @@ class TastyTradeStreamService:
                 logger.info("✅ Streaming started successfully")
                 
                 # Event loop with periodic saves
-                save_task = None
                 try:
                     while True:
                         # Get next quote event (with timeout)

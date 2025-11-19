@@ -1,9 +1,9 @@
-import pytest
-from types import SimpleNamespace
-from datetime import datetime, timezone
 import os
 import sys
-import json
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import pytest
 
 # Ensure bot package is importable from discord-bot directory
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))

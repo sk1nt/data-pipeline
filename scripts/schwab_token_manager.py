@@ -18,12 +18,22 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from src.config import settings
-from src.services.schwab_streamer import SchwabAuthClient
-from schwab import auth
+
+def _load_schwab_dependencies():
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    src_path = str(PROJECT_ROOT / "src")
+    if src_path not in sys.path:
+        sys.path.insert(0, src_path)
+    from src.config import settings as cfg
+    from src.services.schwab_streamer import SchwabAuthClient as AuthClient
+    from schwab import auth as schwab_auth
+
+    return cfg, AuthClient, schwab_auth
+
+
+settings, SchwabAuthClient, auth = _load_schwab_dependencies()
 
 
 def persist_env(token_path: Path | None = None, dry_run: bool = False):
@@ -70,7 +80,6 @@ def exchange_url(received_url: str, token_path: Path | None = None, append_to_en
         print('SCHWAB_CLIENT_ID and SCHWAB_CLIENT_SECRET must be set in .env or environment')
         return 1
     tok_path = token_path or (PROJECT_ROOT / '.tokens' / 'schwab_token.json')
-    qs = auth.parse_query(received_url) if hasattr(auth, 'parse_query') else None
     # Build auth context correctly, passing state if present
     from urllib.parse import urlparse, parse_qs
     parsed = urlparse(received_url)

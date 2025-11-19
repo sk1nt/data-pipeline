@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List
 import duckdb
 import os
 from datetime import datetime

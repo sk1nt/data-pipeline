@@ -3,9 +3,10 @@ PriorityRule model for the GEX priority system.
 """
 
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Any, Dict
+from uuid import UUID, uuid4
+
 from pydantic import BaseModel, Field, validator
-from uuid import uuid4, UUID
 
 from ..lib.logging import get_logger
 

@@ -1,6 +1,5 @@
 import subprocess
 import sys
-from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 

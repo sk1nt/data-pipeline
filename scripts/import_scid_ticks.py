@@ -20,10 +20,9 @@ from typing import List
 import duckdb
 
 from src.lib.scid_parser import (
-    parse_scid_file_backwards_generator,
-    is_tick_record,
     is_bundled_trade,
-    parse_scid_pair,
+    is_tick_record,
+    parse_scid_file_backwards_generator,
 )
 
 

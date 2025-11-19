@@ -5,7 +5,6 @@ Combined tick data extraction for MNQ - CLI and service in one.
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime, timedelta
-import concurrent.futures
 import sys
 import pytz
 
