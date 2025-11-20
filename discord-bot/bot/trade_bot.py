@@ -71,6 +71,71 @@ class TradeBot(commands.Bot):
 
             async def _gex_cmd(ctx, *args):
                 symbol, show_full = self._resolve_gex_request(args)
+                display_symbol = (symbol or 'QQQ').upper()
+                ticker = self.ticker_aliases.get(display_symbol, display_symbol)
+
+                # 1) Get supported symbols map from cache/endpoint
+                tickers_map = await self._get_supported_tickers()
+                supported_set = set()
+                for v in tickers_map.values():
+                    if isinstance(v, list):
+                        supported_set.update(s.upper() for s in v)
+
+                # 2) Validate symbol and respond with the grouped supported list if unsupported
+                if ticker.upper() not in supported_set:
+                    if tickers_map:
+                        msg = self._format_supported_tickers_message(tickers_map, alias_map=self.ticker_aliases)
+                        await ctx.send(f"Unsupported symbol '{symbol}'.\n{msg}")
+                    else:
+                        await ctx.send(f"Unsupported symbol '{symbol}'. Could not fetch supported symbol list.")
+                    return
+
+                # 3) If supported but not part of poller's base set, enroll dynamically and fetch via poller
+                try:
+                    from src.services.gexbot_poller import GEXBotPoller
+                    poller = getattr(self, 'gex_poller', None)
+                except Exception:
+                    poller = getattr(self, 'gex_poller', None)
+
+                if poller:
+                    try:
+                        base_symbols = getattr(poller, '_base_symbols', set()) or set()
+                        if ticker.upper() not in base_symbols and hasattr(poller, 'add_symbol_for_day'):
+                            try:
+                                poller.add_symbol_for_day(ticker)
+                            except Exception:
+                                pass
+                        if hasattr(poller, 'fetch_symbol_now'):
+                            snap = await poller.fetch_symbol_now(ticker)
+                            if snap:
+                                # Normalize snapshot for cache + formatting
+                                snap['_freshness'] = 'current'
+                                snap['_source'] = 'redis-cache'
+                                snap['display_symbol'] = display_symbol
+                                snap['spot_price'] = snap.get('spot_price') or snap.get('spot') or None
+                                snap['major_pos_vol'] = snap.get('major_pos_vol') if snap.get('major_pos_vol') is not None else 0
+                                snap['major_neg_vol'] = snap.get('major_neg_vol') if snap.get('major_neg_vol') is not None else 0
+                                snap['major_pos_oi'] = snap.get('major_pos_oi') if snap.get('major_pos_oi') is not None else 0
+                                snap['major_neg_oi'] = snap.get('major_neg_oi') if snap.get('major_neg_oi') is not None else 0
+                                snap['sum_gex_oi'] = snap.get('sum_gex_oi') if snap.get('sum_gex_oi') is not None else 0
+                                snap['max_priors'] = snap.get('max_priors') or []
+                                # Write both cache and canonical snapshot so get_gex_data respects it
+                                try:
+                                    await asyncio.to_thread(self.redis_client.setex, f"gex:{ticker.lower()}:latest", 300, json.dumps(snap, default=str))
+                                except Exception:
+                                    pass
+                                try:
+                                    await asyncio.to_thread(self.redis_client.set, f"{self.redis_snapshot_prefix}{ticker.upper()}", json.dumps(snap, default=str))
+                                except Exception:
+                                    pass
+                                formatter = self.format_gex if show_full else self.format_gex_short
+                                await ctx.send(formatter(snap))
+                                return
+                    except Exception:
+                        # continue to fallback if poller action fails
+                        pass
+
+                # 4) Fallback to normal path (redis/DB/API) — this will hit API on first fetch if no cached snapshot
                 data = await self.get_gex_data(symbol)
                 if data:
                     formatter = self.format_gex if show_full else self.format_gex_short
@@ -561,6 +626,52 @@ class TradeBot(commands.Bot):
             print(f"API fetch failed: {e}")
 
         return None
+
+    async def _get_supported_tickers(self) -> dict:
+        """Fetch a cached categories map from Redis or GEXBot metadata.
+
+        Returns a dict mapping category name -> list[str].
+        """
+        cache_key = 'gexbot:tickers:categories'
+        # Try redis cache first
+        try:
+            raw = await asyncio.to_thread(self.redis_client.get, cache_key)
+            if raw:
+                if isinstance(raw, (bytes, bytearray)):
+                    raw = raw.decode('utf-8')
+                return json.loads(raw)
+        except Exception:
+            pass
+
+        # Try the public tickers endpoint
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get('https://api.gexbot.com/tickers')
+                if resp.status_code == 200 and isinstance(resp.json(), dict):
+                    data = resp.json()
+                    try:
+                        await asyncio.to_thread(self.redis_client.setex, cache_key, 86400, json.dumps(data))
+                    except Exception:
+                        pass
+                    return data
+        except Exception:
+            pass
+        return {}
+
+    def _format_supported_tickers_message(self, tickers_map: dict, alias_map: Optional[dict] = None) -> str:
+        if not isinstance(tickers_map, dict) or not tickers_map:
+            return 'Unsupported symbol. Unable to fetch supported symbol list.'
+        msg = 'Unsupported symbol. Supported tickers by category:\n'
+        for cat, syms in tickers_map.items():
+            if isinstance(syms, list) and syms:
+                msg += f"**{cat.title()}**: {', '.join(sorted(syms))}\n"
+        if alias_map:
+            alias_texts = []
+            for k, v in alias_map.items():
+                alias_texts.append(f"{k}/{k.lower()} -> {v}")
+            if alias_texts:
+                msg += '\nAliases: ' + '; '.join(alias_texts)
+        return msg
 
     async def _poll_gexbot_api(self, ticker: str):
         """Poll the zero endpoint only, limiting outbound requests."""
