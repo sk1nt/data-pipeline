@@ -61,13 +61,6 @@ class TradeBot(commands.Bot):
         metrics_key = getattr(config, 'gex_feed_metrics_key', 'metrics:gex_feed') or 'metrics:gex_feed'
         metrics_enabled = bool(getattr(config, 'gex_feed_metrics_enabled', False))
         self._gex_feed_metrics = RedisGexFeedMetrics(self.redis_client, metrics_key, enabled=metrics_enabled)
-        self.ml_trade_stream_channel = os.getenv('ML_TRADE_STREAM_CHANNEL', 'trade:ml-bot:stream')
-        self.ml_trade_history_key = os.getenv('ML_TRADE_HISTORY_KEY', 'trade:ml-bot')
-        self.ml_trade_latest_key = os.getenv('ML_TRADE_LATEST_KEY', 'trade:ml-bot:latest')
-        self.ml_trade_user_id = self._parse_optional_int(os.getenv('DISCORD_ML_TRADE_USER_ID'))
-        self.ml_trade_username = os.getenv('DISCORD_ML_TRADE_USERNAME', 'skint0552').lower()
-        self._ml_trade_listener_task: Optional[asyncio.Task] = None
-        self._ml_trade_listener_stop = asyncio.Event()
         # Use a path variable and create short-lived connections per query to avoid file locks
         self.duckdb_path = os.getenv('DUCKDB_PATH', '/home/rwest/projects/data-pipeline/data/gex_data.db')
         # Register commands defined as methods on the subclass so prefix commands work
@@ -78,168 +71,6 @@ class TradeBot(commands.Bot):
 
             async def _gex_cmd(ctx, *args):
                 symbol, show_full = self._resolve_gex_request(args)
-                # --- Extension: dynamic symbol addition and supported symbol validation ---
-                # 1. Get supported symbols from GEXBot API
-                try:
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        resp = await client.get("https://api.gexbot.com/tickers")
-                        if resp.status_code == 200:
-                            tickers = resp.json()
-                        else:
-                            tickers = {}
-                except Exception:
-                    tickers = {}
-                # Flatten all tickers to a set for validation
-                supported = set()
-                for cat in tickers.values():
-                    if isinstance(cat, list):
-                        supported.update(s.upper() for s in cat)
-                # 2. Validate symbol
-                if symbol.upper() not in supported:
-                    # Reply with supported symbol list grouped by category
-                    if tickers:
-                        msg = f"Unsupported symbol '{symbol}'. Supported tickers by category:\n"
-                        for cat, syms in tickers.items():
-                            if isinstance(syms, list) and syms:
-                                msg += f"**{cat.title()}**: {', '.join(sorted(syms))}\n"
-                        await ctx.send(msg)
-                    else:
-                        await ctx.send(f"Unsupported symbol '{symbol}'. Could not fetch supported symbol list.")
-                    return
-                # 3. Enroll symbol for 24h (dynamic addition) and trigger immediate fetch if possible
-                try:
-                    from src.services.gexbot_poller import GEXBotPoller
-                    poller = getattr(self, 'gex_poller', None)
-                except Exception:
-                    poller = None
-
-                # Resolve display symbol and canonical ticker before building cache/snapshot keys
-                display_symbol = (symbol or 'QQQ').upper()
-                ticker = self.ticker_aliases.get(display_symbol, display_symbol)
-                cache_key = f"gex:{ticker.lower()}:latest"
-                snapshot_key = f"{self.redis_snapshot_prefix}{ticker.upper()}"
-
-                if poller:
-                    try:
-                        if hasattr(poller, 'add_symbol_for_day') and symbol.upper() not in supported:
-                            poller.add_symbol_for_day(symbol)
-                        if hasattr(poller, 'fetch_symbol_now'):
-                            snap = await poller.fetch_symbol_now(symbol)
-                            if snap:
-                                # Normalize snap to ensure required fields for cache validity
-                                display_symbol = (symbol or 'QQQ').upper()
-                                ticker = self.ticker_aliases.get(display_symbol, display_symbol)
-                                snap['_freshness'] = 'current'
-                                snap['_source'] = 'redis-cache'
-                                snap['display_symbol'] = display_symbol
-                                # Fill missing coverage fields with sensible defaults so _has_snapshot_coverage passes
-                                snap['spot_price'] = snap.get('spot_price') or snap.get('spot') or None
-                                snap['major_pos_vol'] = snap.get('major_pos_vol') if snap.get('major_pos_vol') is not None else 0
-                                snap['major_neg_vol'] = snap.get('major_neg_vol') if snap.get('major_neg_vol') is not None else 0
-                                snap['major_pos_oi'] = snap.get('major_pos_oi') if snap.get('major_pos_oi') is not None else 0
-                                snap['major_neg_oi'] = snap.get('major_neg_oi') if snap.get('major_neg_oi') is not None else 0
-                                snap['sum_gex_oi'] = snap.get('sum_gex_oi') if snap.get('sum_gex_oi') is not None else 0
-                                snap['max_priors'] = snap.get('max_priors') or []
-                                # write the cache key that get_gex_data expects
-                                try:
-                                    await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(snap, default=str))
-                                except Exception:
-                                    pass
-                                # write snapshot key as pipeline snapshot (string blob)
-                                try:
-                                    await asyncio.to_thread(self.redis_client.set, snapshot_key, json.dumps(snap, default=str))
-                                except Exception:
-                                    pass
-                                # attempt to read back and reply
-                                try:
-                                    data = snap
-                                    formatter = self.format_gex if show_full else self.format_gex_short
-                                    await ctx.send(formatter(data))
-                                    return
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-                else:
-                    # No poller attached — emulate dynamic enrollment and immediate fetch
-                    try:
-                        # Enroll dynamic list in Redis under same key format used by poller
-                        dyn_key = 'gexbot:symbols:dynamic'
-                        now = datetime.utcnow().replace(tzinfo=timezone.utc)
-                        expires_at = (now + timedelta(hours=24)).astimezone(timezone.utc).isoformat()
-                        # read existing
-                        try:
-                            raw = await asyncio.to_thread(self.redis_client.get, dyn_key)
-                        except Exception:
-                            raw = None
-                        payload = []
-                        updated = False
-                        if raw:
-                            try:
-                                decoded = raw.decode('utf-8') if isinstance(raw, (bytes, bytearray)) else raw
-                                payload = json.loads(decoded) if decoded else []
-                            except Exception:
-                                payload = []
-                        # Only enroll unsupported symbols into the dynamic list
-                        if isinstance(payload, list) and display_symbol not in supported:
-                            found = False
-                            for entry in payload:
-                                if isinstance(entry, dict) and entry.get('symbol', '').upper() == display_symbol:
-                                    entry['expires_at'] = expires_at
-                                    found = True
-                                    updated = True
-                                    break
-                            if not found:
-                                payload.append({'symbol': display_symbol, 'expires_at': expires_at})
-                                updated = True
-                        # write back with TTL ~24h
-                        if updated:
-                            try:
-                                await asyncio.to_thread(self.redis_client.setex, dyn_key, 86400, json.dumps(payload))
-                            except Exception:
-                                pass
-
-                    except Exception:
-                        pass
-
-                    # Immediate fetch from API and write both cache_key and snapshot_key so get_gex_data finds them
-                    try:
-                        # Use same normalization as get_gex_data
-                        display_symbol = (symbol or 'QQQ').upper()
-                        ticker = self.ticker_aliases.get(display_symbol, display_symbol)
-                        api_data = await self._poll_gexbot_api(ticker)
-                        if api_data:
-                            # Ensure required fields exist so get_gex_data treats this as a complete snapshot
-                            api_data['_freshness'] = 'current'
-                            api_data['_source'] = 'API'
-                            api_data['display_symbol'] = display_symbol
-                            # Fill missing coverage fields with sensible defaults so _has_snapshot_coverage passes
-                            api_data['spot_price'] = api_data.get('spot_price') or api_data.get('spot') or None
-                            api_data['major_pos_vol'] = api_data.get('major_pos_vol') if api_data.get('major_pos_vol') is not None else 0
-                            api_data['major_neg_vol'] = api_data.get('major_neg_vol') if api_data.get('major_neg_vol') is not None else 0
-                            api_data['major_pos_oi'] = api_data.get('major_pos_oi') if api_data.get('major_pos_oi') is not None else 0
-                            api_data['major_neg_oi'] = api_data.get('major_neg_oi') if api_data.get('major_neg_oi') is not None else 0
-                            api_data['sum_gex_oi'] = api_data.get('sum_gex_oi') if api_data.get('sum_gex_oi') is not None else 0
-                            api_data['max_priors'] = api_data.get('max_priors') or []
-                            # write cache
-                            try:
-                                await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(api_data, default=str))
-                            except Exception:
-                                pass
-                            # write snapshot key as pipeline snapshot (string blob)
-                            try:
-                                await asyncio.to_thread(self.redis_client.set, snapshot_key, json.dumps(api_data, default=str))
-                            except Exception:
-                                pass
-                            try:
-                                formatter = self.format_gex if show_full else self.format_gex_short
-                                await ctx.send(formatter(api_data))
-                                return
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                # 4. Continue with normal GEX fetch/format (fallback)
                 data = await self.get_gex_data(symbol)
                 if data:
                     formatter = self.format_gex if show_full else self.format_gex_short
@@ -331,9 +162,6 @@ class TradeBot(commands.Bot):
         if self._should_run_gex_feed() and not self._gex_feed_task:
             self._gex_feed_stop.clear()
             self._gex_feed_task = asyncio.create_task(self._run_gex_feed_loop())
-        if self.ml_trade_stream_channel and not self._ml_trade_listener_task:
-            self._ml_trade_listener_stop.clear()
-            self._ml_trade_listener_task = asyncio.create_task(self._listen_ml_trade_stream())
 
     async def on_message(self, message):
         if message.author == self.user:
@@ -356,13 +184,6 @@ class TradeBot(commands.Bot):
             except Exception:
                 pass
             self._uw_listener_task = None
-        if self._ml_trade_listener_task:
-            self._ml_trade_listener_stop.set()
-            try:
-                await self._ml_trade_listener_task
-            except Exception:
-                pass
-            self._ml_trade_listener_task = None
         if self._gex_feed_task:
             self._gex_feed_stop.set()
             try:
@@ -447,12 +268,7 @@ class TradeBot(commands.Bot):
                 await asyncio.sleep(self.gex_feed_update_seconds)
                 continue
             delta_map = self._build_feed_delta_map(tracker, data, now)
-            content = self.format_gex_short(
-                data,
-                include_time=True,
-                time_format="%I:%M:%S %p %Z",
-                delta_block=delta_map,
-            )
+            content = self.format_gex_short(data, include_time=False, delta_block=delta_map)
             if not messages:
                 messages = await self._post_feed_messages(channels, content)
                 await self._gex_feed_metrics.record_update(now, delta_map, refresh=True)
@@ -919,8 +735,7 @@ class TradeBot(commands.Bot):
             if value is None:
                 return False
         max_priors = payload.get('max_priors')
-        # Accept an empty list as valid coverage; only missing field should fail coverage
-        if max_priors is None:
+        if not max_priors:
             return False
         return True
 
@@ -1147,16 +962,6 @@ class TradeBot(commands.Bot):
             names = {'skint0552'}
         return names
 
-    @staticmethod
-    def _parse_optional_int(value: Optional[str]) -> Optional[int]:
-        if not value:
-            return None
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return None
-        return parsed or None
-
     def _init_tastytrade_client(self) -> Optional[TastyTradeClient]:
         client_secret = os.getenv('TASTYTRADE_CLIENT_SECRET')
         refresh_token = os.getenv('TASTYTRADE_REFRESH_TOKEN')
@@ -1261,41 +1066,6 @@ class TradeBot(commands.Bot):
             except Exception:
                 pass
 
-    async def _listen_ml_trade_stream(self):
-        if not self.ml_trade_stream_channel:
-            return
-        pubsub = self.redis_client.pubsub(ignore_subscribe_messages=True)
-        try:
-            pubsub.subscribe(self.ml_trade_stream_channel)
-        except Exception as exc:
-            print(f"Failed to subscribe to ML trade stream: {exc}")
-            return
-        try:
-            while not self._ml_trade_listener_stop.is_set():
-                message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
-                if not message:
-                    await asyncio.sleep(0.1)
-                    continue
-                if message.get('type') != 'message':
-                    continue
-                data = message.get('data')
-                if isinstance(data, bytes):
-                    data = data.decode('utf-8')
-                try:
-                    payload = json.loads(data)
-                except Exception as exc:
-                    print(f"Failed to decode ML trade payload: {exc}")
-                    continue
-                try:
-                    await self._notify_ml_trade(payload)
-                except Exception as exc:
-                    print(f"Failed to notify ML trade: {exc}")
-        finally:
-            try:
-                pubsub.close()
-            except Exception:
-                pass
-
     async def _broadcast_option_trade(self, payload: dict) -> None:
         if not self.option_alert_channel_ids:
             return
@@ -1312,62 +1082,6 @@ class TradeBot(commands.Bot):
             except Exception as exc:
                 print(f"Failed to send UW alert to {channel_id}: {exc}")
 
-    async def _notify_ml_trade(self, payload: dict) -> None:
-        message = self.format_ml_trade_alert(payload)
-        user = await self._resolve_ml_trade_user()
-        if user and await self._send_dm(user, message):
-            return
-        if self.status_channel_id:
-            try:
-                channel = self.get_channel(self.status_channel_id)
-                if channel is None:
-                    channel = await self.fetch_channel(self.status_channel_id)
-                if channel:
-                    await channel.send(message)
-            except Exception as exc:
-                print(f"Failed to post ML trade alert to status channel: {exc}")
-        else:
-            print('ML trade received but no target user/channel configured')
-
-    async def _resolve_ml_trade_user(self):
-        if self.ml_trade_user_id:
-            user = self.get_user(self.ml_trade_user_id)
-            if not user:
-                try:
-                    user = await self.fetch_user(self.ml_trade_user_id)
-                except Exception as exc:
-                    print(f"Failed to fetch ML trade user by ID: {exc}")
-                    user = None
-            if user:
-                return user
-        if self.ml_trade_username:
-            lower_target = self.ml_trade_username.lower()
-            for user in self.users:
-                if user.name.lower() == lower_target:
-                    return user
-        return None
-
-    def format_ml_trade_alert(self, payload: dict) -> str:
-        symbol = (payload.get('symbol') or 'UNKNOWN').upper()
-        action = (payload.get('action') or '').upper() or 'ACTION'
-        direction = (payload.get('direction') or '').upper() or 'DIR'
-        price = self._format_price(payload.get('price'))
-        confidence = payload.get('confidence')
-        confidence_pct = f"{float(confidence) * 100:.1f}%" if isinstance(confidence, (int, float)) else 'n/a'
-        pos_before = payload.get('position_before')
-        pos_after = payload.get('position_after')
-        pnl = self._format_currency(payload.get('pnl'))
-        total_pnl = self._format_currency(payload.get('total_pnl'))
-        total_trades = payload.get('total_trades') or '-'
-        timestamp = payload.get('timestamp') or payload.get('received_at') or datetime.now(timezone.utc).isoformat()
-        simulated = payload.get('simulated', True)
-        label = 'SIM' if simulated else 'LIVE'
-        return (
-            f"[{label}] ML trade {action} {direction} {symbol} @ {price} | "
-            f"conf {confidence_pct} | pos {pos_before}->{pos_after} | "
-            f"ΔPnL {pnl} / total {total_pnl} | trades #{total_trades} | {timestamp}"
-        )
-
     async def _fetch_market_snapshot(self) -> Optional[dict]:
         try:
             raw = await asyncio.to_thread(self.redis_client.get, self.uw_market_latest_key)
@@ -1375,13 +1089,7 @@ class TradeBot(commands.Bot):
             print(f"Redis error fetching market snapshot: {exc}")
             return None
         if not raw:
-            try:
-                raw = await asyncio.to_thread(self.redis_client.lindex, self.uw_market_history_key, 0)
-            except Exception as exc:
-                print(f"Redis error fetching historical market snapshot: {exc}")
-                raw = None
-            if not raw:
-                return None
+            return None
         if isinstance(raw, bytes):
             raw = raw.decode('utf-8')
         try:
@@ -1437,20 +1145,6 @@ class TradeBot(commands.Bot):
     async def _send_dm_or_warn(self, ctx, content: str) -> None:
         if not await self._send_dm(ctx.author, content):
             await ctx.send('Unable to DM you. Check your privacy settings.')
-
-    @staticmethod
-    def _format_price(value) -> str:
-        try:
-            return f"{float(value):.2f}"
-        except (TypeError, ValueError):
-            return 'n/a'
-
-    @staticmethod
-    def _format_currency(value) -> str:
-        try:
-            return f"{float(value):.2f}"
-        except (TypeError, ValueError):
-            return 'n/a'
 
     def _format_wall_value_line(
         self,
@@ -1582,7 +1276,7 @@ class TradeBot(commands.Bot):
             local_dt = dt.astimezone(self.display_zone)
         else:
             local_dt = None
-        formatted_time = local_dt.strftime("%m/%d/%Y  %I:%M:%S %p") if local_dt else "N/A"
+        formatted_time = local_dt.strftime("%m/%d/%Y  %I:%M:%S %p %Z") if local_dt else "N/A"
 
         ticker = data.get('display_symbol') or data.get('ticker', 'QQQ')
 
@@ -1724,14 +1418,7 @@ class TradeBot(commands.Bot):
         body = "\n".join([header, "", *table_lines, "", *maxchange_lines])
         return f"```ansi\n{body}\n```"
 
-    def format_gex_short(
-        self,
-        data,
-        *,
-        include_time: bool = True,
-        time_format: Optional[str] = None,
-        delta_block: Optional[Dict[str, 'MetricSnapshot']] = None,
-    ):
+    def format_gex_short(self, data, *, include_time: bool = True, delta_block: Optional[Dict[str, 'MetricSnapshot']] = None):
         dt = data.get('timestamp')
         if isinstance(dt, str):
             try:
@@ -1744,10 +1431,7 @@ class TradeBot(commands.Bot):
             local_dt = dt.astimezone(self.display_zone)
         else:
             local_dt = None
-        formatted_time = "N/A"
-        if local_dt:
-            fmt = time_format or "%m/%d/%Y  %I:%M:%S %p"
-            formatted_time = local_dt.strftime(fmt)
+        formatted_time = local_dt.strftime("%m/%d/%Y  %I:%M:%S %p %Z") if local_dt else "N/A"
 
         ticker = data.get('display_symbol') or data.get('ticker', 'QQQ')
 
@@ -1838,40 +1522,10 @@ class TradeBot(commands.Bot):
             current_delta = colorize(fallback, 'N/ABn')
 
         source_label = self._resolve_gex_source_label(data)
-        def snapshot(key: str) -> 'MetricSnapshot':
-            snap = delta_block.get(key) if delta_block else None
-            if isinstance(snap, MetricSnapshot):
-                return snap
-            return MetricSnapshot(value=None, delta=None, percent=None, previous=None, baseline=None)
-
-        def fmt_abs(value, digits: int = 2) -> str:
-            if not isinstance(value, (int, float)):
-                return 'N/A'
-            return f"{abs(value):.{digits}f}"
-
-        def fmt_percent(value) -> str:
-            if not isinstance(value, (int, float)):
-                return 'n/a%'
-            return f"{value:+.2f}%"
-
-        def color_for_delta(delta) -> str:
-            if not isinstance(delta, (int, float)):
-                return 'yellow'
-            return 'green' if delta >= 0 else 'red'
-
         header_parts = [f"{ansi['dim_white']}GEX: {ticker}{ansi['reset']}"]
         if include_time:
             header_parts.append(formatted_time)
-
-        price_text = fmt_price(data.get('spot_price'))
-        if delta_block:
-            spot_snap = snapshot('spot')
-            delta_text = fmt_abs(spot_snap.delta)
-            percent_text = fmt_percent(spot_snap.percent)
-            delta_color = ansi.get(color_for_delta(spot_snap.delta))
-            delta_display = colorize(delta_color, f"Δ{delta_text} {percent_text}")
-            price_text = f"{price_text}  {delta_display}"
-        header_parts.append(f"{ansi['dim_white']}{price_text}{ansi['reset']}")
+        header_parts.append(f"{ansi['dim_white']}{fmt_price(data.get('spot_price'))}{ansi['reset']}")
         header_parts.append(f"{ansi['dim_white']}{source_label}{ansi['reset']}")
         header = "  ".join(header_parts)
 
@@ -1937,6 +1591,12 @@ class TradeBot(commands.Bot):
             return fmt_abs(value)
 
         lines = [header, ""]
+
+        spot_snap = snapshot('spot')
+        spot_value = colorize(ansi.get(color_for_delta(spot_snap.delta)), fmt_abs(spot_snap.value))
+        delta_text = fmt_abs(spot_snap.delta) if isinstance(spot_snap.delta, (int, float)) else 'n/a'
+        pct_text = fmt_percent(spot_snap.percent)
+        lines.append(f"spot              {spot_value:<8}  Δ{delta_text:<7}  {pct_text}")
 
         def append_prev_line(label: str, snap_key: str):
             snap = snapshot(snap_key)
