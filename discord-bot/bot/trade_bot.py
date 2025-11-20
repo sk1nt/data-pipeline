@@ -1683,7 +1683,7 @@ class TradeBot(commands.Bot):
         def fmt_percent(value) -> str:
             if not isinstance(value, (int, float)):
                 return 'n/a%'
-            return f"{abs(value):.2f}%"
+            return f"{value:+.2f}%"
 
         def color_for_delta(delta) -> str:
             if not isinstance(delta, (int, float)):
@@ -1707,7 +1707,8 @@ class TradeBot(commands.Bot):
         spot_value = colorize(ansi.get(color_for_delta(spot_snap.delta)), fmt_abs(spot_snap.value))
         delta_text = fmt_abs(spot_snap.delta) if isinstance(spot_snap.delta, (int, float)) else 'n/a'
         pct_text = fmt_percent(spot_snap.percent)
-        lines.append(f"spot              {spot_value:<8}  Δ{delta_text:<7}  {pct_text}")
+        # Keep a single space between delta and percent for compact display
+        lines.append(f"spot              {spot_value:<8}  Δ{delta_text} {pct_text}")
 
         def append_prev_line(label: str, snap_key: str):
             snap = snapshot(snap_key)
