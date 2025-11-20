@@ -34,13 +34,43 @@ def labels_from_close(df: pd.Series, horizon: int = 1):
     return returns[:-horizon]
 
 
+def williams_r(high, low, close, period=14):
+    hh = high.rolling(period).max()
+    ll = low.rolling(period).min()
+    return -100 * (hh - close) / (hh - ll)
+
+
+def rsi(close, period=14):
+    delta = close.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+
+def macd(close, fast=12, slow=26, signal=9):
+    fast_ema = close.ewm(span=fast).mean()
+    slow_ema = close.ewm(span=slow).mean()
+    macd_line = fast_ema - slow_ema
+    signal_line = macd_line.ewm(span=signal).mean()
+    return macd_line, signal_line
+
+
+def bollinger_bands(close, period=20, std=2):
+    sma = close.rolling(period).mean()
+    std_dev = close.rolling(period).std()
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    return upper, lower
+
+
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--inputs', required=True, help='Path(s) to 1s-parquet file(s); comma-separated or glob')
     p.add_argument('--window', default=60, type=int)
     p.add_argument('--stride', default=1, type=int)
     p.add_argument('--horizon', default=1, type=int)
-    p.add_argument('--features', default='open,high,low,close,volume,gex_zero,nq_spot')
+    p.add_argument('--features', default='open,high,low,close,volume,gex_zero,nq_spot,williams_r,rsi,macd,macd_signal,bb_upper,bb_lower')
     p.add_argument('--label-source', default='close', choices=['close','nq_spot','gex_zero'], help='Use this column to build labels instead of close')
     args = p.parse_args()
     # Resolve inputs - can be comma-separated list or glob
@@ -59,6 +89,11 @@ if __name__ == '__main__':
             raise FileNotFoundError(f)
         df_list.append(pd.read_parquet(f))
     df = pd.concat(df_list, ignore_index=True)
+    # Compute technical indicators
+    df['williams_r'] = williams_r(df['high'], df['low'], df['close'])
+    df['rsi'] = rsi(df['close'])
+    df['macd'], df['macd_signal'] = macd(df['close'])
+    df['bb_upper'], df['bb_lower'] = bollinger_bands(df['close'])
     features = [f.strip() for f in args.features.split(',') if f.strip()]
     df = df.sort_values('timestamp').reset_index(drop=True)
     # Keep only features that exist in the dataframe
@@ -74,6 +109,11 @@ if __name__ == '__main__':
     df = df.dropna(subset=subset_cols, how='any')
     if len(features) == 0:
         raise RuntimeError('No requested features are present in inputs')
+
+    # Scale features
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    df[features] = scaler.fit_transform(df[features])
 
     X = sliding_windows(df, features, args.window, args.stride, horizon=args.horizon)
     # Build labels from label-source

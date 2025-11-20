@@ -23,7 +23,7 @@ def main():
     p.add_argument('--input', default='output/MNQ_20251111_1s_w60s_h1.npz')
     p.add_argument('--epochs', type=int, default=2)
     p.add_argument('--batch', type=int, default=256)
-    p.add_argument('--models', default='lstm,cnn,tcn,transformer,lightgbm,xgboost')
+    p.add_argument('--models', default='lstm,cnn,tcn,transformer,lightgbm,xgboost,gru')
     args = p.parse_args()
 
     timestamp = time.strftime('%Y%m%dT%H%M%S')
@@ -42,6 +42,8 @@ def main():
             cmd = ['python', 'train_tcn.py', '--input', args.input, '--epochs', str(args.epochs), '--batch', str(args.batch), '--out', f'models/tcn_compare_{timestamp}.pt']
         elif m == 'transformer':
             cmd = ['python', 'train_transformer.py', '--input', args.input, '--epochs', str(args.epochs), '--batch', str(args.batch), '--out', f'models/transformer_compare_{timestamp}.pt']
+        elif m == 'gru':
+            cmd = ['python', 'train_lstm.py', '--input', args.input, '--epochs', str(args.epochs), '--batch', str(args.batch), '--model_type', 'gru', '--out', f'models/gru_compare_{timestamp}.pt']
         elif m == 'lightgbm':
             cmd = ['python', 'train_lightgbm.py', '--input', args.input, '--out', f'models/lightgbm_compare_{timestamp}.pkl']
         elif m == 'xgboost':

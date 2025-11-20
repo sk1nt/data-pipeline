@@ -51,7 +51,7 @@ class GEXBotPoller:
         self.dynamic_key = dynamic_key
         self.supported_key = supported_key
         self._base_symbols: Set[str] = {s.upper() for s in settings.symbols}
-        self._dynamic_symbols: Set[str] = self._load_dynamic_symbols()
+        self._dynamic_symbols: Dict[str, datetime] = self._load_dynamic_symbols()
         self._supported_symbols: Set[str] = set(self._base_symbols)
         self._last_supported_refresh: Optional[date] = None
         self.snapshot_count = 0
@@ -87,7 +87,8 @@ class GEXBotPoller:
             while not self._stop_event.is_set():
                 if self._needs_supported_refresh():
                     await self._refresh_supported_symbols(session)
-                symbols = sorted(self._base_symbols | self._dynamic_symbols)
+                self._prune_expired_dynamic_symbols()
+                symbols = sorted(self._base_symbols | set(self._dynamic_symbols.keys()))
                 for symbol in symbols:
                     try:
                         snapshot = await self._fetch_symbol(session, symbol)
@@ -127,18 +128,20 @@ class GEXBotPoller:
         return start <= now <= end
 
     def add_symbol_for_day(self, symbol: str) -> None:
-        """Auto-enroll a symbol for polling until the next midnight."""
+        """Auto-enroll a symbol for polling for the next 24 hours."""
         normalized = symbol.upper().strip()
         if not normalized or normalized in self._base_symbols:
             return
-        if normalized in self._dynamic_symbols:
+        expires_at = datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(hours=24)
+        existing = self._dynamic_symbols.get(normalized)
+        if existing and existing > expires_at:
             return
-        self._dynamic_symbols.add(normalized)
+        self._dynamic_symbols[normalized] = expires_at
         LOGGER.info("Enrolled %s for GEX polling (dynamic set)", normalized)
         self._persist_dynamic_symbols()
 
     async def fetch_symbol_now(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Fetch a symbol immediately and enroll it for the remainder of the day."""
+        """Fetch a symbol immediately and enroll it for the next 24 hours."""
         normalized = symbol.upper().strip()
         if not normalized:
             return None
@@ -379,18 +382,76 @@ class GEXBotPoller:
         except Exception:
             LOGGER.warning("Failed to cache GEX snapshot for %s", symbol, exc_info=True)
 
-    def _load_dynamic_symbols(self) -> Set[str]:
+    def _load_dynamic_symbols(self) -> Dict[str, datetime]:
         if not self.redis:
-            return set()
+            return {}
         cached = self.redis.get_cached(self.dynamic_key) or []
-        return {str(symbol).upper() for symbol in cached}
+        now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        result: Dict[str, datetime] = {}
+        if isinstance(cached, list):
+            for entry in cached:
+                symbol: Optional[str] = None
+                expires_at: Optional[datetime] = None
+                if isinstance(entry, str):
+                    symbol = entry.upper()
+                    expires_at = now + timedelta(hours=24)
+                elif isinstance(entry, dict):
+                    entry_symbol = entry.get("symbol")
+                    if entry_symbol:
+                        symbol = str(entry_symbol).upper()
+                    expires_raw = entry.get("expires_at") or entry.get("expiry")
+                    expires_at = self._parse_expiry(expires_raw)
+                if not symbol:
+                    continue
+                expiry = expires_at or (now + timedelta(hours=24))
+                if expiry <= now:
+                    continue
+                result[symbol] = expiry
+        return result
 
     def _persist_dynamic_symbols(self) -> None:
         if not self.redis:
             return
-        ttl = max(60, self._seconds_until_midnight())
-        payload = sorted(self._dynamic_symbols)
+        if not self._dynamic_symbols:
+            self.redis.delete_cached(self.dynamic_key)
+            return
+        now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        payload = [
+            {
+                "symbol": symbol,
+                "expires_at": expiry.astimezone(timezone.utc).isoformat(),
+            }
+            for symbol, expiry in sorted(self._dynamic_symbols.items())
+        ]
+        max_expiry = max(self._dynamic_symbols.values())
+        ttl = max(60, int((max_expiry - now).total_seconds()))
         self.redis.set_cached(self.dynamic_key, payload, ttl_seconds=ttl)
+
+    def _parse_expiry(self, raw: Any) -> Optional[datetime]:
+        if isinstance(raw, (int, float)):
+            return datetime.fromtimestamp(float(raw), tz=timezone.utc)
+        if isinstance(raw, str):
+            try:
+                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt
+        return None
+
+    def _prune_expired_dynamic_symbols(self) -> None:
+        if not self._dynamic_symbols:
+            return
+        now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        expired = [symbol for symbol, expiry in self._dynamic_symbols.items() if expiry <= now]
+        if not expired:
+            return
+        for symbol in expired:
+            self._dynamic_symbols.pop(symbol, None)
+        self._persist_dynamic_symbols()
 
     def _seconds_until_midnight(self) -> int:
         now = datetime.utcnow()
@@ -443,7 +504,11 @@ class GEXBotPoller:
             "snapshot_count": self.snapshot_count,
             "last_snapshot_ts": self.last_snapshot_ts,
             "base_symbols": sorted(self._base_symbols),
-            "dynamic_symbols": sorted(self._dynamic_symbols),
+            "dynamic_symbols": sorted(self._dynamic_symbols.keys()),
+            "dynamic_expirations": {
+                symbol: expiry.astimezone(timezone.utc).isoformat()
+                for symbol, expiry in self._dynamic_symbols.items()
+            },
         }
 
 
