@@ -130,6 +130,36 @@ Authorization: Bearer <api-key>
 GET /api/v1/status
 ```
 
+### ML Bot Trade Hook
+```http
+POST /ml-trade
+Content-Type: application/json
+
+{
+  "symbol": "MNQ",
+  "action": "entry",
+  "direction": "long",
+  "price": 165.25,
+  "confidence": 0.785,
+  "position_before": 0,
+  "position_after": 1,
+  "pnl": 0.0,
+  "total_pnl": 0.0,
+  "total_trades": 1,
+  "timestamp": "2025-11-19T14:30:22.123456+00:00",
+  "simulated": true
+}
+```
+
+The orchestrator normalizes the payload, writes the history list under `trade:ml-bot`, caches the latest sample at `trade:ml-bot:latest`, and publishes to the `trade:ml-bot:stream` channel so Discord user `skint0552` receives a DM from the bot. Override the Redis targets or Discord recipient with:
+
+- `ML_TRADE_HISTORY_KEY`, `ML_TRADE_LATEST_KEY`, `ML_TRADE_STREAM_CHANNEL`
+- `DISCORD_ML_TRADE_USERNAME`, `DISCORD_ML_TRADE_USER_ID`
+
+### TastyTrade Live Trade Channel
+
+Every TastyTrade tick now emits a pub/sub payload on `market_data:tastytrade:trades` in addition to the RedisTimeSeries keys. Subscribe to that channel to receive JSON messages containing `symbol`, `price`, `size`, `timestamp`, `ts_ms`, and any strategy metadata fields (if present). Downstream services can react in real time without polling `/lookup/trades`.
+
 ## Development
 
 ### Testing

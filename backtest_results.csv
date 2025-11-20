@@ -1,0 +1,2 @@
+trades_taken,win_rate,net_pnl,total_commissions,edge,date,file
+68568,0.40781414070703537,250831.44,28798.559999999998,0.3658141407070354,2025-09-02,data/parquet/tick/MNQ/20250902.parquet

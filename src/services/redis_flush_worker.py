@@ -543,10 +543,39 @@ class RedisFlushWorker:
                 decoded = dynamic_raw.decode() if isinstance(dynamic_raw, (bytes, bytearray)) else dynamic_raw
                 dynamic_symbols = json.loads(decoded)
                 if isinstance(dynamic_symbols, list):
-                    symbols.update(str(item).upper() for item in dynamic_symbols if isinstance(item, str))
+                    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+                    for entry in dynamic_symbols:
+                        if isinstance(entry, str):
+                            symbols.add(entry.upper())
+                            continue
+                        if isinstance(entry, dict):
+                            raw_symbol = entry.get("symbol")
+                            if not raw_symbol:
+                                continue
+                            expires_raw = entry.get("expires_at") or entry.get("expiry")
+                            expires_at = self._parse_dynamic_expiry(expires_raw)
+                            if expires_at and expires_at <= now:
+                                continue
+                            symbols.add(str(raw_symbol).upper())
             except json.JSONDecodeError:
                 LOGGER.warning("Invalid dynamic symbol cache; ignoring")
         return symbols
+
+    @staticmethod
+    def _parse_dynamic_expiry(raw: Any) -> Optional[datetime]:
+        if raw is None:
+            return None
+        if isinstance(raw, (int, float)):
+            return datetime.fromtimestamp(float(raw), tz=timezone.utc)
+        if isinstance(raw, str):
+            try:
+                dt_value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if dt_value.tzinfo is None:
+                dt_value = dt_value.replace(tzinfo=timezone.utc)
+            return dt_value.astimezone(timezone.utc)
+        return None
 
     def _load_snapshot(self, symbol: str) -> Optional[Dict[str, Any]]:
         key = f"{self.settings.gex_snapshot_prefix}{symbol.upper()}"

@@ -61,6 +61,7 @@ NOISY_STREAM_LOGGERS = [
     "httpx",
 ]
 MARKET_DATA_METRICS_KEY = "metrics:market_data_counts"
+TASTYTRADE_TRADE_CHANNEL = "market_data:tastytrade:trades"
 
 
 class HistoryPayload(BaseModel):
@@ -70,6 +71,26 @@ class HistoryPayload(BaseModel):
     ticker: Optional[str] = None
     endpoint: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+
+
+class MLTradePayload(BaseModel):
+    """Schema for machine learning driven trade signals."""
+
+    symbol: str
+    action: str
+    direction: str
+    price: float
+    confidence: float
+    position_before: int
+    position_after: int
+    pnl: float
+    total_pnl: float
+    total_trades: int
+    timestamp: datetime
+    simulated: bool = True
+
+
+MLTradePayload.model_rebuild()
 
 
 class SchwabStreamingService:
@@ -381,6 +402,8 @@ class ServiceManager:
         ]
         if self.rts:
             self.rts.multi_add(samples)
+        if normalized_source == "tastytrade":
+            self._publish_tastytrade_trade(symbol, price, size, timestamp_ms, payload)
         self.trade_count += 1
         self.trade_counts[normalized_source] = self.trade_counts.get(normalized_source, 0) + 1
         symbol_trade_counts = self.trade_counts_by_symbol.setdefault(symbol, {})
@@ -476,6 +499,39 @@ class ServiceManager:
             self.last_depth_timestamps[normalized_source] = self.last_depth_ts
         self._record_depth_snapshot(symbol, normalized_source, payload)
         self._maybe_persist_metrics()
+
+    def _publish_tastytrade_trade(
+        self,
+        symbol: str,
+        price: float,
+        size: float,
+        timestamp_ms: int,
+        payload: Dict[str, Any],
+    ) -> None:
+        if not self.redis_client:
+            return
+        message = {
+            "symbol": symbol,
+            "price": price,
+            "size": size,
+            "timestamp": payload.get("timestamp") or datetime.utcnow().isoformat(),
+            "ts_ms": timestamp_ms,
+            "source": "tastytrade",
+        }
+        extra_fields = (
+            "action",
+            "direction",
+            "confidence",
+            "position_before",
+            "position_after",
+        )
+        for key in extra_fields:
+            if key in payload:
+                message[key] = payload[key]
+        try:
+            self.redis_client.client.publish(TASTYTRADE_TRADE_CHANNEL, json.dumps(message, default=str))
+        except Exception:
+            LOGGER.debug("Failed to publish tastytrade trade", exc_info=True)
 
     def _record_depth_snapshot(self, symbol: str, source: str, payload: Dict[str, Any]) -> None:
         """Store the latest book for each feed and push comparisons into LookupService."""
@@ -587,6 +643,11 @@ UW_OPTION_STREAM_CHANNEL = "uw:options-trade:stream"
 UW_MARKET_STREAM_CHANNEL = "uw:market-state:stream"
 UW_HISTORY_LIMIT = 200
 UW_CACHE_TTL_SECONDS = 900
+ML_TRADE_LATEST_KEY = "trade:ml-bot:latest"
+ML_TRADE_HISTORY_KEY = "trade:ml-bot"
+ML_TRADE_STREAM_CHANNEL = "trade:ml-bot:stream"
+ML_TRADE_HISTORY_LIMIT = 500
+TASTYTRADE_TRADE_CHANNEL = "market_data:tastytrade:trades"
 SUPPORTED_WEBHOOK_TOPICS = {
     "options-trade",
     "market-state",
@@ -636,6 +697,25 @@ async def status() -> Dict[str, Any]:
 async def market_data_metrics() -> Dict[str, Any]:
     """Expose trade + level2 counters for quick Schwab/TastyTrade comparisons."""
     return service_manager.metrics_snapshot()
+
+
+@app.post("/ml-trade")
+async def ingest_ml_trade(trade: MLTradePayload) -> Dict[str, Any]:
+    """Accept ML-driven trade signals and persist them for downstream alerts."""
+    redis_conn = _get_redis_client()
+    payload = trade.model_dump()
+    payload["symbol"] = payload.get("symbol", "").upper()
+    payload["action"] = (payload.get("action") or "").lower()
+    payload["direction"] = (payload.get("direction") or "").lower()
+    trade_ts = trade.timestamp if isinstance(trade.timestamp, datetime) else datetime.now(timezone.utc)
+    payload["timestamp"] = trade_ts.astimezone(timezone.utc).isoformat()
+    payload["received_at"] = datetime.now(timezone.utc).isoformat()
+    _cache_ml_trade(redis_conn, payload)
+    return {
+        "status": "received",
+        "symbol": payload["symbol"],
+        "simulated": payload["simulated"],
+    }
 
 
 CONTROL_ACTIONS = {"start", "stop", "restart"}
@@ -1023,6 +1103,19 @@ def _cache_market_state(redis_conn, payload: Dict[str, Any]) -> None:
         redis_conn.publish(UW_MARKET_STREAM_CHANNEL, serialized)
     except Exception:
         LOGGER.exception("Failed to publish market state update")
+
+
+def _cache_ml_trade(redis_conn, payload: Dict[str, Any]) -> None:
+    serialized = json.dumps(payload, default=str)
+    pipe = redis_conn.pipeline()
+    pipe.set(ML_TRADE_LATEST_KEY, serialized)
+    pipe.lpush(ML_TRADE_HISTORY_KEY, serialized)
+    pipe.ltrim(ML_TRADE_HISTORY_KEY, 0, ML_TRADE_HISTORY_LIMIT - 1)
+    pipe.execute()
+    try:
+        redis_conn.publish(ML_TRADE_STREAM_CHANNEL, serialized)
+    except Exception:
+        LOGGER.exception("Failed to publish ML trade alert")
 
 
 def _infer_endpoint(url: str) -> str:

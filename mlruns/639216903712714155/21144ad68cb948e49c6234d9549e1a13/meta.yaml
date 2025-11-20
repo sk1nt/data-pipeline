@@ -1,0 +1,14 @@
+artifact_uri: file:///home/rwest/projects/data-pipeline/mlruns/639216903712714155/21144ad68cb948e49c6234d9549e1a13/artifacts
+end_time: 1763547802047
+entry_point_name: ''
+experiment_id: '639216903712714155'
+lifecycle_stage: active
+run_id: 21144ad68cb948e49c6234d9549e1a13
+run_name: backtest_3_days
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1763547802036
+status: 3
+tags: []
+user_id: rwest
