@@ -12,7 +12,8 @@ In this folder you'll find ML models, backtest helpers, and scripts.
 
 Commands:
 - Extract 1s aggregated tick features and join GEX snapshots:
-  `python ml/extract.py --symbol MNQ --date 2025-11-11 --gex-db data/gex_data.db --gex-ticker NQ_NDX`
+    `python ml/extract.py --symbol MNQ --date 2025-11-11 --gex-db data/gex_data.db --gex-ticker NQ_NDX`
+    `python ml/extract.py --symbol MNQ --date 2025-11-11 --gex-db data/gex_data.db --bar-type volume --bar-size 1000`  # Produce volume bars
 
 - Enrich the MNQ ticks for the last full week of October 2025 with NQ_NDX snapshots:
   `python ml/enrich_october_week.py` (writes per-day parquet to `ml/output/` and a summary JSON).
