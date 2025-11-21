@@ -125,3 +125,8 @@ ml/data/
 ml/experiments/
 ml/mlruns/
 ml/mlflow.db
+experiments/
+output/
+models/
+mlruns/
+mlflow.db
