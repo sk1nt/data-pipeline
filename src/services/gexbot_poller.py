@@ -88,6 +88,11 @@ class GEXBotPoller:
                 if self._needs_supported_refresh():
                     await self._refresh_supported_symbols(session)
                 self._prune_expired_dynamic_symbols()
+                # Sync dynamic symbol list from Redis and fetch new symbols immediately
+                try:
+                    await self._sync_dynamic_symbols(session)
+                except Exception:
+                    LOGGER.exception('Failed to sync dynamic symbols')
                 symbols = sorted(self._base_symbols | set(self._dynamic_symbols.keys()))
                 for symbol in symbols:
                     try:
@@ -441,6 +446,48 @@ class GEXBotPoller:
                 dt = dt.astimezone(timezone.utc)
             return dt
         return None
+
+    async def _sync_dynamic_symbols(self, session: Optional[aiohttp.ClientSession]) -> None:
+        """Detect dynamic symbols added externally and fetch snapshots for newly added ones.
+
+        This method reads the dynamic symbols list from Redis, computes any newly
+        added symbols (relative to in-memory dynamic map), and makes an immediate
+        fetch for each new symbol so a canonical snapshot is stored and timeseries
+        are recorded.
+        """
+        if not self.redis:
+            return
+        new_map = self._load_dynamic_symbols()
+        if not isinstance(new_map, dict):
+            new_map = {}
+        # Determine newly added symbols
+        current_keys = set(self._dynamic_symbols.keys()) if self._dynamic_symbols else set()
+        new_keys = set(new_map.keys()) - current_keys
+        if not new_keys:
+            # No additions, just update our cached map
+            self._dynamic_symbols = new_map
+            return
+        LOGGER.info('Detected new dynamic symbols: %s', ','.join(sorted(new_keys)))
+        # For each new symbol, fetch snapshot and record timeseries
+        for symbol in sorted(new_keys):
+            try:
+                snapshot = None
+                # If caller provided a session, use it; otherwise, create a short-lived session
+                if session:
+                    snapshot = await self._fetch_symbol(session, symbol)
+                else:
+                    timeout = aiohttp.ClientTimeout(total=12)
+                    connector = aiohttp.TCPConnector(limit=2, force_close=True)
+                    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as tmp_session:
+                        snapshot = await self._fetch_symbol(tmp_session, symbol)
+                if snapshot:
+                    self.latest[symbol.upper()] = snapshot
+                    await self._record_timeseries(snapshot)
+                    LOGGER.info('Fetched and recorded snapshot for dynamic symbol %s', symbol)
+            except Exception:
+                LOGGER.exception('Failed to fetch snapshot for dynamic symbol %s', symbol)
+        # Replace in-memory dynamic symbol map with the latest from Redis
+        self._dynamic_symbols = new_map
 
     def _prune_expired_dynamic_symbols(self) -> None:
         if not self._dynamic_symbols:

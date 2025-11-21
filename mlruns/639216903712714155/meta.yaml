@@ -1,6 +1,0 @@
-artifact_location: file:///home/rwest/projects/data-pipeline/mlruns/639216903712714155
-creation_time: 1763546449017
-experiment_id: '639216903712714155'
-last_update_time: 1763546449017
-lifecycle_stage: active
-name: backtest_threshold_optimized

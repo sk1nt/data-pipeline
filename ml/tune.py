@@ -27,7 +27,7 @@ try:
 except Exception:
     OPTUNA = False
 
-OUT = Path('experiments')
+OUT = Path(__file__).resolve().parents[0] / 'experiments'
 OUT.mkdir(parents=True, exist_ok=True)
 
 class LSTMModel(nn.Module):
@@ -89,7 +89,12 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
     random.seed(args.seed)
 
-    data = np.load(args.input)
+    try:
+        from ml.path_utils import resolve_cli_path
+    except Exception:
+        from path_utils import resolve_cli_path
+    input_path = resolve_cli_path(args.input)
+    data = np.load(input_path)
     X = data['X']
     y = data['y']
     y = (y > 0).astype(np.float32)

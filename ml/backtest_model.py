@@ -12,6 +12,13 @@ import mlflow.pytorch
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
+try:
+    from ml.enhanced_features import create_enhanced_features
+except Exception:
+    try:
+        from enhanced_features import create_enhanced_features
+    except Exception:
+        create_enhanced_features = None
 
 class LSTMModel(nn.Module):
     def __init__(self, input_dim, hidden_dim=64, num_layers=1, dropout=0.0):
@@ -26,6 +33,33 @@ class LSTMModel(nn.Module):
 
 def load_model_and_scaler(model_path):
     """Load the trained model and scaler."""
+    # Prefer joblib for .pkl / .joblib extensions to avoid torch attempts
+    ext = Path(model_path).suffix.lower()
+    if ext in ('.pkl', '.joblib'):
+        try:
+            import joblib
+            sk_model = joblib.load(model_path)
+            scaler = None
+            # try to find the scaler in standard locations
+            # Prefer the 13-feature scaler for LightGBM / sklearn baseline models
+            possible = []
+            if 'lightgbm' in model_path.lower() or 'mnq_lightgbm' in model_path.lower() or 'lgb' in model_path.lower():
+                possible = [Path('ml/models/scaler_13_features.pkl'), Path('models/scaler_13_features.pkl')]
+            elif 'enhanced' in model_path.lower():
+                possible = [Path('ml/models/enhanced_gex_scaler.pkl'), Path('models/enhanced_gex_scaler.pkl')]
+            else:
+                possible = [Path('models/scaler_13_features.pkl'), Path('ml/models/scaler_13_features.pkl'), Path('ml/models/enhanced_gex_scaler.pkl'), Path('models/enhanced_gex_scaler.pkl')]
+            for p in possible:
+                try:
+                    if p.exists():
+                        scaler = joblib.load(p)
+                        break
+                except Exception:
+                    pass
+            return sk_model, scaler, {'model_type': 'sklearn'}
+        except Exception as e:
+            # If we failed to load a .pkl/.joblib with joblib, don't try torch.load: raise
+            raise RuntimeError(f"Failed to load joblib model at {model_path}: {e}")
     try:
         # Try loading as full checkpoint first
         checkpoint = torch.load(model_path, map_location='cpu')
@@ -35,6 +69,11 @@ def load_model_and_scaler(model_path):
             hidden_dim = checkpoint.get('hidden_dim', 256)  # Default for production model
             num_layers = checkpoint.get('num_layers', 2)
             model = LSTMModel(input_dim=input_dim, hidden_dim=hidden_dim, num_layers=num_layers)
+            # Annotate model with input dimension for downstream preprocessing
+            try:
+                model.input_dim = input_dim
+            except Exception:
+                pass
             model.load_state_dict(checkpoint['model_state_dict'])
             scaler = checkpoint.get('scaler')
             return model, scaler, checkpoint
@@ -60,6 +99,11 @@ def load_model_and_scaler(model_path):
             print(f"Inferred architecture: input_dim={input_dim}, hidden_dim={hidden_dim}, num_layers={num_layers}")
 
             model = LSTMModel(input_dim=input_dim, hidden_dim=hidden_dim, num_layers=num_layers)
+            # Annotate model with input dimension for downstream preprocessing
+            try:
+                model.input_dim = input_dim
+            except Exception:
+                pass
             model.load_state_dict(state_dict)
             
             # Try to load scaler separately
@@ -73,8 +117,35 @@ def load_model_and_scaler(model_path):
             
             return model, scaler, {'input_dim': input_dim, 'hidden_dim': hidden_dim, 'num_layers': num_layers}
     except Exception as e:
-        print(f"Error loading model: {e}")
-        raise
+        print(f"Error loading with torch: {e}")
+        # If file extension is a pickle or joblib try loading with joblib
+        try:
+            import joblib
+            sk_model = joblib.load(model_path)
+            scaler = None
+            # Prefer the 13-feature scaler for LightGBM / sklearn baseline models
+            possible = []
+            if 'lightgbm' in model_path.lower() or 'mnq_lightgbm' in model_path.lower() or 'lgb' in model_path.lower():
+                possible = [Path('ml/models/scaler_13_features.pkl'), Path('models/scaler_13_features.pkl')]
+            elif 'enhanced' in model_path.lower():
+                possible = [Path('ml/models/enhanced_gex_scaler.pkl'), Path('models/enhanced_gex_scaler.pkl')]
+            else:
+                possible = [Path('models/scaler_13_features.pkl'), Path('ml/models/scaler_13_features.pkl'), Path('ml/models/enhanced_gex_scaler.pkl'), Path('models/enhanced_gex_scaler.pkl')]
+            for p in possible:
+                try:
+                    if p.exists():
+                        scaler = joblib.load(p)
+                        break
+                except Exception:
+                    pass
+            return sk_model, scaler, {'model_type': 'sklearn'}
+        except Exception as e2:
+            print(f"Joblib load failed: {e2}")
+            raise
+
+    # No further generic pkl loading fallbacks. We intentionally avoid attempting torch.load
+    # when encountering a .pkl/.joblib file. If control reaches here and model is not loaded,
+    # propagate the earlier exception to the caller.
 
 def load_enhanced_gex_data():
     """Load NQ GEX data filtered to market hours for MNQ usage."""
@@ -123,7 +194,7 @@ def load_enhanced_gex_data():
     
     df_enhanced = df_market[enhanced_cols].copy()
     df_enhanced = df_enhanced.sort_values('timestamp').drop_duplicates('timestamp')
-    df_enhanced = df_enhanced.set_index('timestamp')
+    df_enhanced = df_enhanced.set_index('timestamp', drop=False)
     
     return df_enhanced
 
@@ -137,10 +208,11 @@ def align_with_enhanced_gex(df_tick):
         df_gex = align_with_enhanced_gex._gex_cache
         
         # Ensure tick data timestamps are tz-naive UTC for alignment
-        if df_tick.index.tz is not None:
+        # Handle RangeIndex or tz-naive indices safely
+        if hasattr(df_tick.index, 'tz') and df_tick.index.tz is not None:
             tick_timestamps_utc = df_tick.index.tz_convert('UTC').tz_localize(None)
         else:
-            # Assume tick data is already in UTC if tz-naive
+            # Assume tick data is already in UTC if tz-naive or RangeIndex
             tick_timestamps_utc = df_tick.index
         
         # Forward fill GEX data to align with tick timestamps
@@ -168,21 +240,36 @@ def align_with_enhanced_gex(df_tick):
                 df_tick[col] = 0.0
         return df_tick
 
-def preprocess_day_data(parquet_file, scaler, sequence_length=60):
+def preprocess_day_data(parquet_file, scaler, sequence_length=60, required_feature_count=None):
     """Preprocess a single day's data for prediction."""
     # Load data
     df = pd.read_parquet(parquet_file)
+    # Normalize timestamp column to datetime and set index if present
+    if 'timestamp' in df.columns:
+        try:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+        except Exception:
+            pass
+        try:
+            if not hasattr(df.index, 'tz') and df.index.name != 'timestamp':
+                df = df.set_index('timestamp', drop=False)
+        except Exception:
+            # best-effort only; continue
+            pass
     
     # Handle different data formats
     if 'price' in df.columns and 'timestamp' in df.columns:
         # Tick data format - resample to 1-second OHLCV
-        df = df.set_index('timestamp')
+        df = df.set_index('timestamp', drop=False)
         df = df.resample('1s').agg({
             'price': ['first', 'max', 'min', 'last'],
             'volume': 'sum'
         })
         df.columns = ['open', 'high', 'low', 'close', 'volume']
         df = df.dropna()
+        # Ensure 'timestamp' column exists for enhanced feature functions
+        if 'timestamp' not in df.columns and df.index.name == 'timestamp':
+            df['timestamp'] = df.index
         
         # Add missing columns with default values
         df['gex_zero'] = 0.0
@@ -194,10 +281,26 @@ def preprocess_day_data(parquet_file, scaler, sequence_length=60):
     elif not all(col in df.columns for col in ['open', 'high', 'low', 'close', 'volume']):
         print(f"Warning: Missing required OHLCV columns in {parquet_file}")
         return None, None
+    else:
+        # If data is already in 1s OHLCV form, still align with enhanced GEX features
+        # to ensure features like max_priors_current, max_priors_1m, max_priors_5m are present
+        try:
+            df = align_with_enhanced_gex(df)
+        except Exception:
+            pass
+        # If index contains timestamp but 'timestamp' column was not present, add it
+        if 'timestamp' not in df.columns and df.index.name == 'timestamp':
+            df['timestamp'] = df.index
 
     # Basic feature engineering (same as training)
     df['returns'] = df['close'].pct_change()
     df['log_returns'] = np.log(df['close'] / df['close'].shift(1))
+    # Add enhanced features if available (to match enhanced model training)
+    if create_enhanced_features is not None:
+        try:
+            df = create_enhanced_features(df)
+        except Exception as e:
+            print(f"Warning: create_enhanced_features failed: {e}")
 
     # Technical indicators (same as training)
     # RSI
@@ -234,11 +337,17 @@ def preprocess_day_data(parquet_file, scaler, sequence_length=60):
     # Create target (next return direction)
     df['target'] = (df['returns'].shift(-1) > 0).astype(int)
 
-    # Select features (enhanced with GEX features)
-    feature_cols = ['open', 'high', 'low', 'close', 'volume', 'zero_gamma', 'spot_price',
-                   'net_gex', 'major_pos_vol', 'major_neg_vol', 'sum_gex_vol', 'delta_risk_reversal',
-                   'max_priors_current', 'max_priors_1m', 'max_priors_5m',
-                   'adx', 'di_plus', 'di_minus', 'rsi', 'stoch_k', 'stoch_d']
+    # Select features
+    if create_enhanced_features is not None:
+        exclude_cols = ['timestamp', 'tick_type', 'source', 'counter']
+        feature_cols = [col for col in df.columns if col not in exclude_cols and df[col].dtype in ['float64', 'int64', 'float32', 'int32']]
+        print(f"Automatically selecting {len(feature_cols)} enhanced features")
+    else:
+        # Select features (enhanced with GEX features)
+        feature_cols = ['open', 'high', 'low', 'close', 'volume', 'zero_gamma', 'spot_price',
+                       'net_gex', 'major_pos_vol', 'major_neg_vol', 'sum_gex_vol', 'delta_risk_reversal',
+                       'max_priors_current', 'max_priors_1m', 'max_priors_5m',
+                       'adx', 'di_plus', 'di_minus', 'rsi', 'stoch_k', 'stoch_d']
 
     # Ensure all features exist
     available_cols = [col for col in feature_cols if col in df.columns]
@@ -268,11 +377,29 @@ def preprocess_day_data(parquet_file, scaler, sequence_length=60):
     X = np.array(sequences)
     y = np.array(targets)
 
-    # Scale features
+    # Scale features and ensure feature dimensionality matches model expectations
+    X_reshaped = X.reshape(-1, X.shape[-1])
+    # Prefer the model-required feature count if provided, otherwise use scaler expectation
+    expected = required_feature_count
+    if expected is None and scaler is not None:
+        expected = getattr(scaler, 'n_features_in_', None)
+
+    if expected is not None and X_reshaped.shape[1] != expected:
+        if X_reshaped.shape[1] < expected:
+            pad = np.zeros((X_reshaped.shape[0], expected - X_reshaped.shape[1]), dtype=X_reshaped.dtype)
+            X_reshaped = np.concatenate([X_reshaped, pad], axis=1)
+        else:
+            # Truncate extra features if expected is fewer features
+            X_reshaped = X_reshaped[:, :expected]
+
     if scaler is not None:
-        X_reshaped = X.reshape(-1, X.shape[-1])
         X_scaled = scaler.transform(X_reshaped)
-        X = X_scaled.reshape(X.shape)
+    else:
+        X_scaled = X_reshaped
+
+    # Determine new feature dimension
+    new_feat_dim = X_scaled.shape[1]
+    X = X_scaled.reshape(-1, X.shape[1], new_feat_dim)
 
     return X, y
 
@@ -380,12 +507,22 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', default='models/lstm_production.pt', help='Path to trained model')
     parser.add_argument('--threshold', type=float, default=0.3, help='Prediction threshold')
-    parser.add_argument('--commission_cost', type=float, default=0.42, help='Commission cost per trade')
+    parser.add_argument('--commission_cost', type=float, default=None, help='Commission cost per trade (roundtrip). Overrides --instrument')
+    parser.add_argument('--commission_per_side', type=float, default=None, help='Commission per side (single contract). Roundtrip = per_side*2')
+    parser.add_argument('--instrument', default='MNQ', help='Instrument being backtested (MNQ or NQ)')
     parser.add_argument('--max_days', type=int, default=10, help='Maximum number of days to backtest')
     parser.add_argument('--mlflow_experiment', default='backtest_threshold_optimized', help='MLflow experiment name')
     args = parser.parse_args()
 
     mlflow.set_experiment(args.mlflow_experiment)
+
+    # Commission map (roundtrip)
+    # Commission map per side (per single contract)
+    COMM_PER_SIDE = {
+        'MNQ': 0.21,  # per side
+        'NQ': 0.84,   # per side
+        'NQ_NDX': 0.84,
+    }
 
     # Load model
     print(f"Loading model from {args.model}")
@@ -395,6 +532,14 @@ def main():
     except Exception as e:
         print(f"Error loading model: {e}")
         return
+
+    # Determine commission (per roundtrip) if not explicitly provided
+    if args.commission_per_side is not None:
+        commission = args.commission_per_side * 2.0
+    elif args.commission_cost is not None:
+        commission = args.commission_cost
+    else:
+        commission = COMM_PER_SIDE.get(args.instrument.upper(), 0.21) * 2.0
 
     # Find available days
     print("Finding available trading days...")
@@ -440,10 +585,20 @@ def main():
 
         try:
             # Preprocess data
-            X, y = preprocess_day_data(file_path, scaler)
+            # Try to infer required feature count from model if possible
+            required_feature_count = None
+            try:
+                if hasattr(model, 'rnn') and hasattr(model.rnn, 'input_size'):
+                    required_feature_count = model.rnn.input_size
+                elif hasattr(model, 'input_dim'):
+                    required_feature_count = getattr(model, 'input_dim')
+            except Exception:
+                required_feature_count = None
+
+            X, y = preprocess_day_data(file_path, scaler, sequence_length=60, required_feature_count=required_feature_count)
 
             # Evaluate model
-            day_result = evaluate_model_on_day(model, X, y, args.threshold, args.commission_cost)
+            day_result = evaluate_model_on_day(model, X, y, args.threshold, commission)
             day_result['date'] = date.strftime('%Y-%m-%d')
             day_result['file'] = str(file_path)
 

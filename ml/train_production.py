@@ -12,7 +12,7 @@ from pathlib import Path
 import mlflow
 import mlflow.pytorch
 
-OUT = Path('models')
+OUT = Path(__file__).resolve().parents[0] / 'models'
 OUT.mkdir(parents=True, exist_ok=True)
 
 class LSTMModel(nn.Module):
@@ -84,7 +84,12 @@ if __name__ == '__main__':
     # Setup MLflow
     mlflow.set_experiment(args.mlflow_experiment)
 
-    data = np.load(args.input)
+    try:
+        from ml.path_utils import resolve_cli_path
+    except Exception:
+        from path_utils import resolve_cli_path
+    input_path = resolve_cli_path(args.input)
+    data = np.load(input_path)
     X = data['X']
     y_raw = data['y']
     y = (y_raw > 0).astype(np.float32)
@@ -166,7 +171,9 @@ if __name__ == '__main__':
         if precision > best_precision:
             best_precision = precision
             patience = 0
-            torch.save(model.state_dict(), args.out)
+            out_path = resolve_cli_path(args.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(model.state_dict(), out_path)
             print(f"  → Saved model with precision {precision:.3f}")
         else:
             patience += 1
@@ -177,7 +184,7 @@ if __name__ == '__main__':
 
     # Final evaluation
     print("\n=== FINAL EVALUATION ===")
-    model.load_state_dict(torch.load(args.out))
+    model.load_state_dict(torch.load(str(resolve_cli_path(args.out))))
     model.eval()
 
     all_preds = []
