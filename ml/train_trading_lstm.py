@@ -18,7 +18,7 @@ from pathlib import Path
 import mlflow
 import mlflow.pytorch
 
-OUT = Path('models')
+OUT = Path(__file__).resolve().parents[0] / 'models'
 OUT.mkdir(parents=True, exist_ok=True)
 
 class LSTMModel(nn.Module):
@@ -109,7 +109,12 @@ if __name__ == '__main__':
     # Setup MLflow
     mlflow.set_experiment(args.mlflow_experiment)
 
-    data = np.load(args.input)
+    try:
+        from ml.path_utils import resolve_cli_path
+    except Exception:
+        from path_utils import resolve_cli_path
+    input_path = resolve_cli_path(args.input)
+    data = np.load(input_path)
     X = data['X']
     y_raw = data['y']
     y = (y_raw > 0).astype(np.float32)
@@ -221,8 +226,9 @@ if __name__ == '__main__':
                 if precision > best_precision:
                     best_precision = precision
                     patience = 0
-                    fold_out = args.out.replace('.pt', f'_fold{fold}.pt')
-                    torch.save(model.state_dict(), fold_out)
+                            fold_out = str(resolve_cli_path(args.out)).replace('.pt', f'_fold{fold}.pt')
+                            Path(fold_out).parent.mkdir(parents=True, exist_ok=True)
+                            torch.save(model.state_dict(), fold_out)
                     print(f"  → Saved model with precision {precision:.3f}")
                 else:
                     patience += 1
@@ -254,18 +260,18 @@ if __name__ == '__main__':
         mlflow.log_metric("cv_avg_precision", avg_precision)
         mlflow.log_metric("cv_std_precision", std_precision)
         mlflow.log_metric("best_precision", max(precisions))
-        mlflow.log_param("final_model_path", args.out)
+        mlflow.log_param("final_model_path", str(resolve_cli_path(args.out)))
 
         # Save final model (last fold)
         if fold_results:
-            final_model_path = args.out.replace('.pt', f'_fold{len(fold_results)-1}.pt')
+            final_model_path = str(resolve_cli_path(args.out)).replace('.pt', f'_fold{len(fold_results)-1}.pt')
             import shutil
-            shutil.copy(final_model_path, args.out)
-            print(f"Saved final model to {args.out}")
+            shutil.copy(final_model_path, str(resolve_cli_path(args.out)))
+            print(f"Saved final model to {str(resolve_cli_path(args.out))}")
 
             # Log model to MLflow
             model = LSTMModel(X.shape[2], dropout=args.dropout, model_type=args.model_type)
-            model.load_state_dict(torch.load(args.out))
+            model.load_state_dict(torch.load(str(resolve_cli_path(args.out))))
             mlflow.pytorch.log_model(model, "model")
 
         print("\n🎯 Production-ready model training complete!")

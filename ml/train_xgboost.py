@@ -9,7 +9,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, accuracy_score
 from pathlib import Path
 
-OUT = Path('models')
+OUT = Path(__file__).resolve().parents[0] / 'models'
 OUT.mkdir(parents=True, exist_ok=True)
 
 if __name__ == '__main__':
@@ -20,7 +20,12 @@ if __name__ == '__main__':
     p.add_argument('--mlflow', action='store_true', help='Log metrics and model to MLflow if available')
     args = p.parse_args()
 
-    data = np.load(args.input)
+    try:
+        from ml.path_utils import resolve_cli_path
+    except Exception:
+        from path_utils import resolve_cli_path
+    input_path = resolve_cli_path(args.input)
+    data = np.load(input_path)
     X = data['X']
     y = data['y']
     y_class = (y > 0).astype(int)
@@ -38,7 +43,9 @@ if __name__ == '__main__':
     auc = roc_auc_score(y_val, preds)
     acc = accuracy_score(y_val, (preds > 0.5).astype(int))
     print('AUC:', auc, 'ACC:', acc)
-    model.save_model(args.out)
+    out_path = resolve_cli_path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    model.save_model(str(out_path))
     if args.mlflow:
         try:
             import mlflow
@@ -50,8 +57,8 @@ if __name__ == '__main__':
             try:
                 mlflow.xgboost.log_model(model, artifact_path='model')
             except Exception:
-                mlflow.log_artifact(args.out)
+                mlflow.log_artifact(str(out_path))
             mlflow.end_run()
         except Exception:
             print('MLflow not available; skipping mlflow logging')
-    print('Saved xgb model to', args.out)
+    print('Saved xgb model to', out_path)

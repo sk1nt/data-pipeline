@@ -29,8 +29,27 @@ def extract_1s_bars(symbol: str, date: str, tick_parquet_root: str = 'data/tick'
     # Build optional join SQL for gex if requested
     gex_join = ''
     if gex_db:
-        gex_join = f"LEFT JOIN (SELECT to_timestamp(timestamp/1000) as gts, zero_gamma, spot_price FROM gexdb.gex_snapshots WHERE ticker = '{gex_ticker}') g ON a.ts_s = g.gts"
+        gex_join = f"LEFT JOIN (SELECT *, to_timestamp(timestamp/1000) as gts FROM gexdb.gex_snapshots WHERE ticker = '{gex_ticker}') g ON a.ts_s = g.gts"
 
+    gex_select = ''
+    if gex_db:
+        gex_select = """
+              , g.timestamp as gex_timestamp
+              , g.ticker as gex_ticker
+              , g.spot_price
+              , g.zero_gamma
+              , g.net_gex
+              , g.min_dte
+              , g.sec_min_dte
+              , g.major_pos_vol
+              , g.major_pos_oi
+              , g.major_neg_vol
+              , g.major_neg_oi
+              , g.sum_gex_vol
+              , g.sum_gex_oi
+              , g.delta_risk_reversal
+              , g.max_priors
+"""
     q = f"""
     WITH ticks AS (
         SELECT
@@ -58,9 +77,7 @@ def extract_1s_bars(symbol: str, date: str, tick_parquet_root: str = 'data/tick'
            a.low,
            l.price as close,
            a.volume
-    
-        -- optional join to gex snapshots
-        {'' if not gex_db else ', g.zero_gamma as gex_zero, g.spot_price as nq_spot'}
+    {gex_select}
     FROM agg a
     LEFT JOIN ticks f ON a.ts_s = f.ts_s AND a.first_ts = f.ts
     LEFT JOIN ticks l ON a.ts_s = l.ts_s AND a.last_ts = l.ts

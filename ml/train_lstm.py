@@ -13,7 +13,7 @@ from sklearn.model_selection import train_test_split, KFold
 from sklearn.metrics import accuracy_score
 from pathlib import Path
 
-OUT = Path('models')
+OUT = Path(__file__).resolve().parents[0] / 'models'
 OUT.mkdir(parents=True, exist_ok=True)
 
 class LSTMModel(nn.Module):
@@ -48,8 +48,35 @@ if __name__ == '__main__':
     p.add_argument('--cv', type=int, default=0, help='Number of CV folds (0 disables)')
     p.add_argument('--mlflow', action='store_true', help='Log to MLflow server if available')
     args = p.parse_args()
+    mlflow_module = None
+    if args.mlflow:
+        try:
+            import mlflow
+            import mlflow.pytorch
+            try:
+                import mlflow_utils
+                mlflow_utils.ensure_sqlite_tracking()
+            except Exception:
+                pass
+            mlflow_module = mlflow
+            mlflow_module.start_run()
+            mlflow_module.log_params({
+                'epochs': args.epochs,
+                'batch': args.batch,
+                'model_type': args.model_type,
+                'dropout': args.dropout,
+                'cv': args.cv,
+            })
+        except Exception:
+            print('MLflow not available; skipping mlflow logging')
+            mlflow_module = None
 
-    data = np.load(args.input)
+    try:
+        from ml.path_utils import resolve_cli_path
+    except Exception:
+        from path_utils import resolve_cli_path
+    input_path = resolve_cli_path(args.input)
+    data = np.load(input_path)
     X = data['X']
     y = data['y']
     y = (y > 0).astype(np.float32)
@@ -116,7 +143,17 @@ if __name__ == '__main__':
             # Save fold model
             fold_out = args.out.replace('.pt', f'_fold{fold}.pt')
             torch.save(model.state_dict(), fold_out)
-            print(f'Saved fold {fold} model to {fold_out}')
+        print(f'Saved fold {fold} model to {fold_out}')
+    if args.cv > 0 and mlflow_module:
+        try:
+            mlflow_module.log_metric('cv_avg_acc', float(np.mean(fold_accs)) if fold_accs else 0.0)
+        except Exception:
+            pass
+        try:
+            mlflow.pytorch.log_model(model, artifact_path='model')
+        except Exception:
+            mlflow_module.log_artifact(args.out)
+        mlflow_module.end_run()
 
         # Average accuracies
         avg_acc = np.mean(fold_accs)
@@ -184,12 +221,28 @@ if __name__ == '__main__':
             if val_loss < best_val:
                 best_val = val_loss
                 best_epoch = e
-                torch.save(model.state_dict(), args.out)
+                out_path = resolve_cli_path(args.out)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(model.state_dict(), out_path)
             # early stopping
             if args.patience > 0 and (e - best_epoch) >= args.patience:
                 print('Early stopping at epoch', e)
                 break
         # If patience disabled and not saved yet, save latest model
         if args.patience == 0:
-            torch.save(model.state_dict(), args.out)
-        print(f'Saved {args.model_type.upper()} model to', args.out)
+            out_path = resolve_cli_path(args.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(model.state_dict(), out_path)
+        print(f'Saved {args.model_type.upper()} model to', resolve_cli_path(args.out))
+    if args.cv == 0 and mlflow_module:
+        try:
+            mlflow_module.log_metric('val_acc', acc)
+            mlflow_module.log_metric('val_loss', best_val)
+        except Exception:
+            pass
+        try:
+            mlflow.pytorch.log_model(model, artifact_path='model')
+        except Exception as exc:
+            print('MLflow model log skipped:', exc)
+        finally:
+            mlflow_module.end_run()

@@ -13,7 +13,7 @@ from sklearn.metrics import roc_auc_score, accuracy_score
 import pickle
 from pathlib import Path
 
-OUT = Path('models')
+OUT = Path(__file__).resolve().parents[0] / 'models'
 OUT.mkdir(parents=True, exist_ok=True)
 
 if __name__ == '__main__':
@@ -24,7 +24,12 @@ if __name__ == '__main__':
     p.add_argument('--mlflow', action='store_true', help='Log metrics and model to MLflow if available')
     args = p.parse_args()
 
-    data = np.load(args.input)
+    try:
+        from ml.path_utils import resolve_cli_path
+    except Exception:
+        from path_utils import resolve_cli_path
+    input_path = resolve_cli_path(args.input)
+    data = np.load(input_path)
     X = data['X']
     y = data['y']
 
@@ -48,6 +53,22 @@ if __name__ == '__main__':
     if args.use_gpu:
         params['device'] = 'gpu'
 
+    mlflow_module = None
+    if args.mlflow:
+        try:
+            import mlflow
+            import mlflow.lightgbm
+            try:
+                import mlflow_utils
+                mlflow_utils.ensure_sqlite_tracking()
+            except Exception:
+                pass
+            mlflow_module = mlflow
+            mlflow_module.start_run()
+            mlflow_module.log_params({'use_gpu': args.use_gpu, 'num_rounds': 100})
+        except Exception:
+            print('MLflow not available; skipping mlflow logging')
+            mlflow_module = None
     try:
         model = lgb.train(params, train_data, num_boost_round=100, valid_sets=[val_data])
     except Exception as e:
@@ -61,27 +82,20 @@ if __name__ == '__main__':
     acc = accuracy_score(y_val, (preds > 0.5).astype(int))
 
     print('AUC:', auc, 'ACC:', acc)
-    # mlflow logging
-    if args.mlflow:
+    if mlflow_module:
         try:
-            import mlflow
-            import mlflow.lightgbm
-            mlflow.start_run()
-            mlflow.log_params({'use_gpu': args.use_gpu})
-            mlflow.log_metric('auc', float(auc))
-            mlflow.log_metric('acc', float(acc))
-            try:
-                mlflow.lightgbm.log_model(model, artifact_path='model')
-            except Exception:
-                # fallback: log model file artifact
-                import pickle
-                with open(args.out, 'wb') as f:
-                    pickle.dump(model, f)
-                mlflow.log_artifact(args.out)
-            mlflow.end_run()
+            mlflow_module.log_metric('auc', float(auc))
+            mlflow_module.log_metric('acc', float(acc))
         except Exception:
-            print('MLflow not available; skipping mlflow logging')
-
-    with open(args.out, 'wb') as f:
+            pass
+        try:
+            mlflow.lightgbm.log_model(model, artifact_path='model')
+        except Exception as exc:
+            print('MLflow model log skipped:', exc)
+        finally:
+            mlflow_module.end_run()
+    out_path = resolve_cli_path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, 'wb') as f:
         pickle.dump(model, f)
-    print('Saved model to', args.out)
+    print('Saved model to', out_path)

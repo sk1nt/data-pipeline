@@ -10,7 +10,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from pathlib import Path
 
-OUT = Path('models')
+OUT = Path(__file__).resolve().parents[0] / 'models'
 OUT.mkdir(parents=True, exist_ok=True)
 
 class TransformerModel(nn.Module):
@@ -38,7 +38,12 @@ if __name__ == '__main__':
     p.add_argument('--mlflow', action='store_true', help='Log metrics and model to MLflow if available')
     args = p.parse_args()
 
-    data = np.load(args.input)
+    try:
+        from ml.path_utils import resolve_cli_path
+    except Exception:
+        from path_utils import resolve_cli_path
+    input_path = resolve_cli_path(args.input)
+    data = np.load(input_path)
     X = data['X']
     y = data['y']
     y = (y > 0).astype(np.float32)
@@ -65,6 +70,11 @@ if __name__ == '__main__':
         try:
             import mlflow
             import mlflow.pytorch
+            try:
+                import mlflow_utils
+                mlflow_utils.ensure_sqlite_tracking()
+            except Exception:
+                pass
             mlflow_module = mlflow
             mlflow_module.start_run()
             mlflow_module.log_params({'epochs': args.epochs, 'batch': args.batch})
@@ -94,12 +104,18 @@ if __name__ == '__main__':
         acc = accuracy_score((np.array(preds) > 0.5).astype(int), np.array(labels))
         print(f'Epoch {e+1} val_acc={acc:.4f}')
         if mlflow_module:
-            mlflow_module.log_metric('val_acc', float(acc), step=e+1)
+            try:
+                mlflow_module.log_metric('val_acc', float(acc), step=e+1)
+            except Exception:
+                pass
 
-    torch.save(model.state_dict(), args.out)
-    print('Saved Transformer model to', args.out)
+    out_path = resolve_cli_path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), out_path)
+    print('Saved Transformer model to', out_path)
     if mlflow_module:
         try:
             mlflow.pytorch.log_model(model, artifact_path='model')
         except Exception:
             pass
+        mlflow_module.end_run()

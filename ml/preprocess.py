@@ -9,8 +9,13 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-DATA_DIR = Path('output')
-OUT_DIR = Path('output')
+try:
+    from ml.path_utils import resolve_cli_path
+except Exception:
+    from path_utils import resolve_cli_path
+
+DATA_DIR = resolve_cli_path('output')
+OUT_DIR = resolve_cli_path('output')
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -84,11 +89,25 @@ if __name__ == '__main__':
             files.append(pat)
     # Read and concat in timestamp order
     df_list = []
+    # Resolve input files in a repo-root-aware manner
+    try:
+        from ml.path_utils import resolve_cli_path
+    except Exception:
+        # Running from within `ml/` (cwd='ml') - import as local module
+        from path_utils import resolve_cli_path
     for f in files:
-        if not Path(f).exists():
+        p = resolve_cli_path(f)
+        print(f"[preprocess] resolve_cli_path: '{f}' -> '{p}' (exists={p.exists()})")
+        if not p.exists():
             raise FileNotFoundError(f)
-        df_list.append(pd.read_parquet(f))
+        df_list.append(pd.read_parquet(p))
     df = pd.concat(df_list, ignore_index=True)
+    # Normalize GEX/spot aliases for downstream processing
+    # Some extraction paths write 'zero_gamma'/'spot_price' while tests expect 'gex_zero'/'nq_spot'
+    if 'zero_gamma' in df.columns and 'gex_zero' not in df.columns:
+        df['gex_zero'] = df['zero_gamma']
+    if 'spot_price' in df.columns and 'nq_spot' not in df.columns:
+        df['nq_spot'] = df['spot_price']
     # Compute technical indicators
     df['williams_r'] = williams_r(df['high'], df['low'], df['close'])
     df['rsi'] = rsi(df['close'])
@@ -106,6 +125,12 @@ if __name__ == '__main__':
     subset_cols = features[:]  # feature subset for dropna
     if args.label_source in df.columns:
         subset_cols.append(args.label_source)
+    else:
+        # allow label-source aliases mapping
+        if args.label_source == 'nq_spot' and 'spot_price' in df.columns:
+            subset_cols.append('spot_price')
+        if args.label_source == 'gex_zero' and 'zero_gamma' in df.columns:
+            subset_cols.append('zero_gamma')
     df = df.dropna(subset=subset_cols, how='any')
     if len(features) == 0:
         raise RuntimeError('No requested features are present in inputs')
@@ -121,10 +146,16 @@ if __name__ == '__main__':
         returns = labels_from_close(df['close'], horizon=args.horizon)
     else:
         # labels from arbitrary numeric series: future - current normalized by current
-        if args.label_source not in df.columns:
+        # map aliases
+        label_col = args.label_source
+        if args.label_source == 'nq_spot' and 'nq_spot' not in df.columns and 'spot_price' in df.columns:
+            label_col = 'spot_price'
+        if args.label_source == 'gex_zero' and 'gex_zero' not in df.columns and 'zero_gamma' in df.columns:
+            label_col = 'zero_gamma'
+        if label_col not in df.columns:
             raise RuntimeError(f'label_source {args.label_source} not found in input data')
-        future = df[args.label_source].shift(-args.horizon)
-        returns = ((future - df[args.label_source]) / df[args.label_source])[:-args.horizon]
+        future = df[label_col].shift(-args.horizon)
+        returns = ((future - df[label_col]) / df[label_col])[:-args.horizon]
     # Build labels aligned with windows: y[i] corresponds to returns at index (i + window - 1)
     if X.shape[0] == 0:
         raise RuntimeError('Not enough data to create any windows with given window/horizon.')

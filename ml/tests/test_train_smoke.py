@@ -19,6 +19,7 @@ def test_models_run_smoke(tmp_path):
     for cmd in MODELS:
         # skip xgboost if not installed
         try:
+            # pass commands directly (cwd='ml') for outputs
             subprocess.run(cmd, check=True, cwd='ml')
         except Exception as e:
             print('Model failed:', cmd, e)

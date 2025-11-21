@@ -8,7 +8,7 @@ import subprocess
 import json
 import time
 
-BASE = Path('experiments')
+BASE = Path(__file__).resolve().parent / 'experiments'
 BASE.mkdir(parents=True, exist_ok=True)
 
 

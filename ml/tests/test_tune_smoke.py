@@ -9,5 +9,5 @@ def test_tune_smoke(tmp_path):
     subprocess.run(cmd, check=True, cwd='ml')
     # ensure experiment directory created
     import glob
-    dirs = glob.glob('experiments/lstm_tune_*')
+    dirs = glob.glob('ml/experiments/lstm_tune_*')
     assert len(dirs) > 0

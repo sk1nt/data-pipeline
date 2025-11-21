@@ -88,10 +88,14 @@ def main():
     parser.add_argument('--mlflow', action='store_true', help='Log metrics and artifacts to MLflow if available')
     args = parser.parse_args()
 
-    path = Path(args.input)
-    if not path.exists():
-        raise SystemExit(f"Missing input {path}. Run ml/preprocess.py first")
-    X, y = load_npz(path)
+    try:
+        from ml.path_utils import resolve_cli_path
+    except Exception:
+        from path_utils import resolve_cli_path
+    input_path = resolve_cli_path(args.input)
+    if not input_path.exists():
+        raise SystemExit(f"Missing input {input_path}. Run ml/preprocess.py first")
+    X, y = load_npz(input_path)
     # Convert continuous returns to binary labels by sign for classification
     y = (y > 0).astype('float32')
     print('Loaded shapes', X.shape, y.shape)
@@ -117,6 +121,11 @@ def main():
     if args.mlflow:
         try:
             import mlflow
+            try:
+                import mlflow_utils
+                mlflow_utils.ensure_sqlite_tracking()
+            except Exception:
+                pass
             mlflow = mlflow
             mlflow.start_run()
             mlflow.log_params({
@@ -135,22 +144,30 @@ def main():
         print(f'Epoch {epoch}/{args.epochs}: train_loss={train_loss:.4f} val_loss={val_loss:.4f} val_acc={val_acc:.4f}')
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), args.out)
+            out_path = resolve_cli_path(args.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(model.state_dict(), out_path)
             best_epoch = epoch
         if mlflow:
-            mlflow.log_metric('train_loss', float(train_loss), step=epoch)
-            mlflow.log_metric('val_loss', float(val_loss), step=epoch)
-            mlflow.log_metric('val_acc', float(val_acc), step=epoch)
+            try:
+                mlflow.log_metric('train_loss', float(train_loss), step=epoch)
+                mlflow.log_metric('val_loss', float(val_loss), step=epoch)
+                mlflow.log_metric('val_acc', float(val_acc), step=epoch)
+            except Exception:
+                pass
         if args.patience > 0 and (epoch - best_epoch) >= args.patience:
             print('Early stopping at epoch', epoch)
             break
     test_loss, test_acc = evaluate(model, device, loaders[2], criterion)
     print('Test', test_loss, test_acc)
     if mlflow:
-        mlflow.log_metric('test_loss', float(test_loss))
-        mlflow.log_metric('test_acc', float(test_acc))
         try:
-            mlflow.log_artifact(args.out)
+            mlflow.log_metric('test_loss', float(test_loss))
+            mlflow.log_metric('test_acc', float(test_acc))
+        except Exception:
+            pass
+        try:
+            mlflow.log_artifact(out_path)
             import mlflow.pytorch
             mlflow.pytorch.log_model(model, artifact_path='model')
         except Exception:
