@@ -5,7 +5,12 @@ This folder contains data extraction, preprocessing, and example training script
 All scripts are designed to read from the canonical data files under `data/` and produce outputs under `ml/`.
 
 Commands:
+In this folder you'll find ML models, backtest helpers, and scripts.
 
+**Practical Tips:**
+- See `docs/TRADING_SYSTEMS_TIPS.md` for short, practical guidelines derived from live trading systems. The doc covers bar-aggregation (volume/time/dollar bars), overfitting risks and walk-forward validation, transaction-cost assumptions, latency effects, and recommendations to prefer low-variance models as first steps.
+
+Commands:
 - Extract 1s aggregated tick features and join GEX snapshots:
   `python ml/extract.py --symbol MNQ --date 2025-11-11 --gex-db data/gex_data.db --gex-ticker NQ_NDX`
 
@@ -29,3 +34,7 @@ Commands:
 Notes:
 - All outputs (datasets, models, logs) are stored under `ml/`.
 - Scripts do not modify files outside the `data/` directory and `ml/`.
+
+MLflow server
+ - Use the included helper to run a local MLflow server that points at `ml/mlflow.db` and stores artifacts in `ml/mlruns`:
+   `./scripts/start_mlflow_server.sh 5000` (or choose a port). Tests that set `MLFLOW_TRACKING_URI` to `http://127.0.0.1:5000` assume a server is running.
