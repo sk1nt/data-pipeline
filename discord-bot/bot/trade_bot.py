@@ -61,6 +61,17 @@ class TradeBot(commands.Bot):
         metrics_key = getattr(config, 'gex_feed_metrics_key', 'metrics:gex_feed') or 'metrics:gex_feed'
         metrics_enabled = bool(getattr(config, 'gex_feed_metrics_enabled', False))
         self._gex_feed_metrics = RedisGexFeedMetrics(self.redis_client, metrics_key, enabled=metrics_enabled)
+        self.gex_feed_backoff_base_seconds = max(self.gex_feed_update_seconds, float(getattr(config, 'gex_feed_backoff_base_seconds', self.gex_feed_update_seconds)))
+        self.gex_feed_backoff_max_seconds = max(self.gex_feed_backoff_base_seconds, float(getattr(config, 'gex_feed_backoff_max_seconds', 300.0)))
+        self._gex_feed_backoff_seconds = 0.0
+        self.gexbot_dynamic_key = getattr(config, 'gexbot_dynamic_key', 'gexbot:symbols:dynamic')
+        self.gexbot_supported_key = getattr(config, 'gexbot_supported_key', 'gexbot:symbols:supported')
+        default_symbols = getattr(config, 'gexbot_default_symbols', None)
+        if not default_symbols:
+            default_symbols = ['NQ_NDX', 'ES_SPX', 'SPY', 'QQQ', 'SPX', 'NDX']
+        if isinstance(default_symbols, str):
+            default_symbols = [sym.strip() for sym in default_symbols.split(',') if sym.strip()]
+        self._gexbot_default_symbols = {sym.upper() for sym in default_symbols}
         # Use a path variable and create short-lived connections per query to avoid file locks
         self.duckdb_path = os.getenv('DUCKDB_PATH', '/home/rwest/projects/data-pipeline/data/gex_data.db')
         # Register commands defined as methods on the subclass so prefix commands work
@@ -71,6 +82,56 @@ class TradeBot(commands.Bot):
 
             async def _gex_cmd(ctx, *args):
                 symbol, show_full = self._resolve_gex_request(args)
+                display_symbol = (symbol or 'QQQ').upper()
+                ticker = self.ticker_aliases.get(display_symbol, display_symbol)
+
+                # verify supported symbol map before continuing
+                tickers_map = await self._get_supported_tickers()
+                supported_set = set()
+                for values in tickers_map.values():
+                    if isinstance(values, list):
+                        supported_set.update(val.upper() for val in values if isinstance(val, str))
+
+                if tickers_map and ticker.upper() not in supported_set:
+                    msg = self._format_supported_tickers_message(tickers_map, alias_map=self.ticker_aliases)
+                    await ctx.send(f"Unsupported symbol '{symbol}'.\n{msg}")
+                    return
+
+                await self._maybe_enroll_dynamic_symbol(ticker)
+                try:
+                    from src.services.gexbot_poller import GEXBotPoller
+                    poller = getattr(self, 'gex_poller', None)
+                except Exception:
+                    poller = getattr(self, 'gex_poller', None)
+
+                if poller:
+                    try:
+                        base_symbols = getattr(poller, '_base_symbols', set()) or set()
+                        if ticker.upper() not in base_symbols and hasattr(poller, 'add_symbol_for_day'):
+                            try:
+                                poller.add_symbol_for_day(ticker)
+                            except Exception:
+                                pass
+                        if hasattr(poller, 'fetch_symbol_now'):
+                            snap = await poller.fetch_symbol_now(ticker)
+                            if snap:
+                                snap['_freshness'] = 'current'
+                                snap['_source'] = 'redis-cache'
+                                snap['display_symbol'] = display_symbol
+                                snap['spot_price'] = snap.get('spot_price') or snap.get('spot')
+                                snap['major_pos_vol'] = snap.get('major_pos_vol') if snap.get('major_pos_vol') is not None else 0
+                                snap['major_neg_vol'] = snap.get('major_neg_vol') if snap.get('major_neg_vol') is not None else 0
+                                snap['major_pos_oi'] = snap.get('major_pos_oi') if snap.get('major_pos_oi') is not None else 0
+                                snap['major_neg_oi'] = snap.get('major_neg_oi') if snap.get('major_neg_oi') is not None else 0
+                                snap['sum_gex_oi'] = snap.get('sum_gex_oi') if snap.get('sum_gex_oi') is not None else 0
+                                snap['max_priors'] = snap.get('max_priors') or []
+                                await asyncio.to_thread(self.redis_client.setex, f"gex:{ticker.lower()}:latest", 300, json.dumps(snap, default=str))
+                                await asyncio.to_thread(self.redis_client.set, f"{self.redis_snapshot_prefix}{ticker.upper()}", json.dumps(snap, default=str))
+                                formatter = self.format_gex if show_full else self.format_gex_short
+                                await ctx.send(formatter(snap))
+                                return
+                    except Exception:
+                        pass
                 data = await self.get_gex_data(symbol)
                 if data:
                     formatter = self.format_gex if show_full else self.format_gex_short
@@ -203,6 +264,169 @@ class TradeBot(commands.Bot):
             return False
         return True
 
+    def _reset_feed_backoff(self) -> None:
+        self._gex_feed_backoff_seconds = 0.0
+
+    def _record_feed_rate_limit(self, status: Optional[int]) -> None:
+        if status not in (427, 429):
+            return
+        if self._gex_feed_backoff_seconds <= 0:
+            self._gex_feed_backoff_seconds = self.gex_feed_backoff_base_seconds
+        else:
+            self._gex_feed_backoff_seconds = min(self.gex_feed_backoff_max_seconds, self._gex_feed_backoff_seconds * 2)
+        print(f"GEX feed rate-limited (HTTP {status}); backing off for {self._gex_feed_backoff_seconds:.1f}s")
+
+    def _handle_feed_http_exception(self, exc: discord.HTTPException) -> bool:
+        status = getattr(exc, 'status', None)
+        if status in (427, 429):
+            self._record_feed_rate_limit(status)
+            return True
+        return False
+
+    async def _sleep_between_feed_updates(self) -> None:
+        delay = self.gex_feed_update_seconds
+        if self._gex_feed_backoff_seconds:
+            delay = max(delay, self._gex_feed_backoff_seconds)
+        await asyncio.sleep(delay)
+
+    async def _get_supported_tickers(self) -> dict:
+        cache_key = 'gexbot:tickers:categories'
+        try:
+            raw = await asyncio.to_thread(self.redis_client.get, cache_key)
+            if raw:
+                if isinstance(raw, (bytes, bytearray)):
+                    raw = raw.decode('utf-8')
+                return json.loads(raw)
+        except Exception:
+            pass
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get('https://api.gexbot.com/tickers')
+                data = resp.json()
+                if resp.status_code == 200 and isinstance(data, dict):
+                    try:
+                        await asyncio.to_thread(self.redis_client.setex, cache_key, 86400, json.dumps(data))
+                    except Exception:
+                        pass
+                    return data
+        except Exception:
+            pass
+        return {}
+
+    def _format_supported_tickers_message(self, tickers_map: dict, alias_map: Optional[dict] = None) -> str:
+        if not isinstance(tickers_map, dict) or not tickers_map:
+            return 'Unsupported symbol. Unable to fetch supported symbol list.'
+        msg = 'Unsupported symbol. Supported tickers by category:\n'
+        for category, symbols in tickers_map.items():
+            if isinstance(symbols, list) and symbols:
+                msg += f"**{category.title()}**: {', '.join(sorted(symbols))}\n"
+        if alias_map:
+            alias_texts = []
+            for key, value in alias_map.items():
+                alias_texts.append(f"{key}/{key.lower()} -> {value}")
+            if alias_texts:
+                msg += '\nAliases: ' + '; '.join(alias_texts)
+        return msg
+
+    async def _maybe_enroll_dynamic_symbol(self, ticker: str) -> None:
+        normalized = (ticker or '').upper().strip()
+        if not normalized or normalized in self._gexbot_default_symbols:
+            return
+        entries = await self._load_dynamic_entries()
+        now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        expires_at = (now + timedelta(hours=24)).astimezone(timezone.utc).isoformat()
+        entries[normalized] = expires_at
+        await self._write_dynamic_entries(entries)
+
+    async def _load_dynamic_entries(self) -> Dict[str, str]:
+        try:
+            raw = await asyncio.to_thread(self.redis_client.get, self.gexbot_dynamic_key)
+        except Exception:
+            raw = None
+        return self._parse_dynamic_entries(raw)
+
+    def _parse_dynamic_entries(self, raw: Any) -> Dict[str, str]:
+        entries: Dict[str, str] = {}
+        if not raw:
+            return entries
+        if isinstance(raw, (bytes, bytearray)):
+            try:
+                raw = raw.decode('utf-8')
+            except Exception:
+                return entries
+        try:
+            decoded = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            decoded = raw
+        if not isinstance(decoded, list):
+            return entries
+        for item in decoded:
+            normalized = self._normalize_dynamic_entry(item)
+            if normalized:
+                entries[normalized['symbol']] = normalized['expires_at']
+        return entries
+
+    def _normalize_dynamic_entry(self, item: Any) -> Optional[Dict[str, str]]:
+        symbol: Optional[str] = None
+        expires_at: Optional[str] = None
+        if isinstance(item, str):
+            symbol = item.upper()
+        elif isinstance(item, dict):
+            raw_symbol = item.get('symbol')
+            if isinstance(raw_symbol, str) and raw_symbol.strip():
+                symbol = raw_symbol.upper()
+            elif raw_symbol is not None:
+                symbol = str(raw_symbol).upper()
+            expiry_raw = item.get('expires_at') or item.get('expiry')
+            if expiry_raw:
+                expires_at = self._normalize_datetime(expiry_raw)
+        if not symbol:
+            return None
+        if not expires_at:
+            expires_at = (datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(hours=24)).isoformat()
+        return {'symbol': symbol, 'expires_at': expires_at}
+
+    def _normalize_datetime(self, value: Any) -> Optional[str]:
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat()
+            except Exception:
+                return None
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).isoformat()
+        return None
+
+    async def _write_dynamic_entries(self, entries: Dict[str, str]) -> None:
+        if not entries:
+            try:
+                await asyncio.to_thread(self.redis_client.delete, self.gexbot_dynamic_key)
+            except Exception:
+                pass
+            return
+        payload = [
+            {
+                'symbol': symbol,
+                'expires_at': expires,
+            }
+            for symbol, expires in sorted(entries.items())
+        ]
+        value = json.dumps(payload)
+        ttl = 86400
+        try:
+            await asyncio.to_thread(self.redis_client.setex, self.gexbot_dynamic_key, ttl, value)
+        except Exception:
+            try:
+                await asyncio.to_thread(self.redis_client.set, self.gexbot_dynamic_key, value)
+            except Exception:
+                pass
+
     async def _run_gex_feed_loop(self):
         try:
             while not self._gex_feed_stop.is_set():
@@ -265,7 +489,7 @@ class TradeBot(commands.Bot):
             data = await self.get_gex_data(self.gex_feed_symbol)
             if not data:
                 await self._gex_feed_metrics.record_error(now, reason='no_data')
-                await asyncio.sleep(self.gex_feed_update_seconds)
+                await self._sleep_between_feed_updates()
                 continue
             delta_map = self._build_feed_delta_map(tracker, data, now)
             content = self.format_gex_short(
@@ -285,7 +509,7 @@ class TradeBot(commands.Bot):
                 messages = await self._post_feed_messages(channels, content)
                 await self._gex_feed_metrics.record_update(now, delta_map, refresh=True)
                 next_refresh = self._next_refresh_boundary(now)
-            await asyncio.sleep(self.gex_feed_update_seconds)
+            await self._sleep_between_feed_updates()
 
     def _next_refresh_boundary(self, current: datetime) -> datetime:
         minute_block = (current.minute // self.gex_feed_refresh_minutes) * self.gex_feed_refresh_minutes
@@ -296,17 +520,26 @@ class TradeBot(commands.Bot):
 
     async def _post_feed_messages(self, channels: List[discord.abc.Messageable], content: str) -> Dict[int, discord.Message]:
         messages: Dict[int, discord.Message] = {}
+        rate_limited = False
         for channel in channels:
             try:
                 msg = await channel.send(content)
+            except discord.HTTPException as exc:
+                if self._handle_feed_http_exception(exc):
+                    rate_limited = True
+                print(f"Failed to send GEX feed message to {getattr(channel, 'id', 'unknown')}: {exc}")
+                continue
             except Exception as exc:
                 print(f"Failed to send GEX feed message to {getattr(channel, 'id', 'unknown')}: {exc}")
                 continue
             messages[getattr(channel, 'id', id(channel))] = msg
+        if not rate_limited:
+            self._reset_feed_backoff()
         return messages
 
     async def _edit_feed_messages(self, messages: Dict[int, discord.Message], content: str) -> None:
         stale_ids = []
+        rate_limited = False
         for cid, msg in messages.items():
             try:
                 await msg.edit(content=content)
@@ -314,11 +547,16 @@ class TradeBot(commands.Bot):
                 if exc.status == 404:
                     stale_ids.append(cid)
                 else:
-                    print(f"Failed to edit GEX feed message {cid}: {exc}")
+                    if self._handle_feed_http_exception(exc):
+                        rate_limited = True
+                    else:
+                        print(f"Failed to edit GEX feed message {cid}: {exc}")
             except Exception as exc:
                 print(f"Failed to edit GEX feed message {cid}: {exc}")
         for cid in stale_ids:
             messages.pop(cid, None)
+        if not rate_limited:
+            self._reset_feed_backoff()
 
     async def _delete_feed_messages(self, messages: Dict[int, discord.Message]) -> None:
         target = list(messages.items())
@@ -561,6 +799,10 @@ class TradeBot(commands.Bot):
                 api_data['_source'] = 'API'
                 api_data['display_symbol'] = display_symbol
                 await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(api_data, default=str))
+                try:
+                    await asyncio.to_thread(self.redis_client.set, snapshot_key, json.dumps(api_data, default=str))
+                except Exception:
+                    pass
                 return await finalize(api_data)
         except Exception as e:
             print(f"API fetch failed: {e}")
