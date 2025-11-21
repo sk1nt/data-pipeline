@@ -1,0 +1,5 @@
+week_start,type,best_method,best_model,net_pnl,win_rate,trades,threshold
+2025-10-06,advanced_ensembles,blending,rank_averaging,60364.62,0.1639758330133969,49489,
+2025-10-06,threshold_optimization,,cv_lstm,46515.12,0.171338004671338,35964,0.3
+2025-11-03,advanced_ensembles,blending,rank_averaging,60364.62,0.1639758330133969,49489,
+2025-11-03,threshold_optimization,,cv_lstm,46515.12,0.171338004671338,35964,0.3
