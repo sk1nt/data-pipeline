@@ -98,11 +98,7 @@ class TradeBot(commands.Bot):
                     return
 
                 await self._maybe_enroll_dynamic_symbol(ticker)
-                try:
-                    from src.services.gexbot_poller import GEXBotPoller
-                    poller = getattr(self, 'gex_poller', None)
-                except Exception:
-                    poller = getattr(self, 'gex_poller', None)
+                poller = getattr(self, 'gex_poller', None)
 
                 if poller:
                     try:
