@@ -75,6 +75,8 @@ if __name__ == '__main__':
     p.add_argument('--window', default=60, type=int)
     p.add_argument('--stride', default=1, type=int)
     p.add_argument('--horizon', default=1, type=int)
+    p.add_argument('--bar-type', default='time', choices=['time', 'volume', 'dollar'], help='Type of bars used in inputs (time/volume/dollar). If not time, run `ml/extract.py` to produce bar datasets. Preprocess currently expects 1s or bar parquet files.')
+    p.add_argument('--bar-size', default=1, type=float, help='Bar size parameter (seconds for time; volume threshold for volume, dollar threshold for dollar bars).')
     p.add_argument('--features', default='open,high,low,close,volume,gex_zero,nq_spot,williams_r,rsi,macd,macd_signal,bb_upper,bb_lower')
     p.add_argument('--label-source', default='close', choices=['close','nq_spot','gex_zero'], help='Use this column to build labels instead of close')
     args = p.parse_args()
@@ -100,6 +102,9 @@ if __name__ == '__main__':
         print(f"[preprocess] resolve_cli_path: '{f}' -> '{p}' (exists={p.exists()})")
         if not p.exists():
             raise FileNotFoundError(f)
+        # If inputs point to raw tick parquet and user requested non-time bars, remind to run extract first
+        if args.bar_type != 'time' and 'tick' in str(p):
+            print('[preprocess] Warning: inputs appear to be raw tick parquet. For volume/dollar bars please run `ml/extract.py --bar-type', args.bar_type, '--bar-size', args.bar_size, '` first.')
         df_list.append(pd.read_parquet(p))
     df = pd.concat(df_list, ignore_index=True)
     # Normalize GEX/spot aliases for downstream processing
