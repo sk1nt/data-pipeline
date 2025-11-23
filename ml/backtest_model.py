@@ -240,7 +240,7 @@ def align_with_enhanced_gex(df_tick):
                 df_tick[col] = 0.0
         return df_tick
 
-def preprocess_day_data(parquet_file, scaler, sequence_length=60, required_feature_count=None):
+def preprocess_day_data(parquet_file, scaler, sequence_length=60, required_feature_count=None, stride=1, max_samples=None):
     """Preprocess a single day's data for prediction."""
     # Load data
     df = pd.read_parquet(parquet_file)
@@ -360,30 +360,47 @@ def preprocess_day_data(parquet_file, scaler, sequence_length=60, required_featu
     # Handle NaN values
     df_features = df_features.fillna(method='ffill').fillna(0)
 
-    # Create sequences
-    sequences = []
-    targets = []
+    # Convert to float32 to reduce memory pressure
+    df_features = df_features.astype(np.float32)
 
-    for i in range(sequence_length, len(df_features) - 1):
-        seq = df_features.iloc[i-sequence_length:i].values
-        target = df['target'].iloc[i]
-
-        sequences.append(seq)
-        targets.append(target)
-
-    if not sequences:
+    # Prepare indices for sequences (apply stride and maximum sample limit)
+    start_idx = sequence_length
+    end_idx = len(df_features) - 1
+    if end_idx <= start_idx:
         return None, None
 
-    X = np.array(sequences)
-    y = np.array(targets)
+    seq_indices = list(range(start_idx, end_idx, stride if stride > 0 else 1))
+    if max_samples is not None and max_samples > 0 and len(seq_indices) > max_samples:
+        seq_indices = seq_indices[:max_samples]
+
+    n_sequences = len(seq_indices)
+    if n_sequences == 0:
+        return None, None
+
+    # Allocate arrays directly to avoid large python lists
+    num_features = df_features.shape[1]
+    X = np.empty((n_sequences, sequence_length, num_features), dtype=np.float32)
+    y = np.empty((n_sequences,), dtype=np.float32)
+
+    for out_i, i in enumerate(seq_indices):
+        seq = df_features.iloc[i-sequence_length:i].values.astype(np.float32)
+        target = df['target'].iloc[i]
+        X[out_i] = seq
+        y[out_i] = target
+
+
+    # X and y already prepared as float32 arrays
 
     # Scale features and ensure feature dimensionality matches model expectations
     X_reshaped = X.reshape(-1, X.shape[-1])
-    # Prefer the model-required feature count if provided, otherwise use scaler expectation
-    expected = required_feature_count
-    if expected is None and scaler is not None:
+    # Prefer the scaler's expected feature count if available, otherwise fall back to model-required
+    expected = None
+    if scaler is not None:
         expected = getattr(scaler, 'n_features_in_', None)
+    if expected is None:
+        expected = required_feature_count
 
+    # debug: shapes for preallocation and scaling
     if expected is not None and X_reshaped.shape[1] != expected:
         if X_reshaped.shape[1] < expected:
             pad = np.zeros((X_reshaped.shape[0], expected - X_reshaped.shape[1]), dtype=X_reshaped.dtype)
@@ -397,9 +414,17 @@ def preprocess_day_data(parquet_file, scaler, sequence_length=60, required_featu
     else:
         X_scaled = X_reshaped
 
-    # Determine new feature dimension
+    # Determine new feature dimension (match model's required feature count if available)
+    final_feat_dim = required_feature_count if required_feature_count is not None else X_scaled.shape[1]
+    if X_scaled.shape[1] != final_feat_dim:
+        if X_scaled.shape[1] < final_feat_dim:
+            pad = np.zeros((X_scaled.shape[0], final_feat_dim - X_scaled.shape[1]), dtype=X_scaled.dtype)
+            X_scaled = np.concatenate([X_scaled, pad], axis=1)
+        else:
+            X_scaled = X_scaled[:, :final_feat_dim]
+
     new_feat_dim = X_scaled.shape[1]
-    X = X_scaled.reshape(-1, X.shape[1], new_feat_dim)
+    X = X_scaled.reshape(-1, sequence_length, new_feat_dim)
 
     return X, y
 
@@ -514,6 +539,11 @@ def main():
     parser.add_argument('--mlflow_experiment', default='backtest_threshold_optimized', help='MLflow experiment name')
     args = parser.parse_args()
 
+    try:
+        import mlflow_utils
+        mlflow_utils.ensure_sqlite_tracking()
+    except Exception:
+        pass
     mlflow.set_experiment(args.mlflow_experiment)
 
     # Commission map (roundtrip)

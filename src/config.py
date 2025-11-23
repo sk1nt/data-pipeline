@@ -6,8 +6,12 @@ Handles environment variables, CLI arguments, and application settings.
 
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from dotenv import load_dotenv
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+load_dotenv(".env")
 
 
 class Settings(BaseSettings):
@@ -85,7 +89,7 @@ class Settings(BaseSettings):
         env="GEXBOT_POLL_DYNAMIC_SCHEDULE",
     )
     gex_poll_symbols: str = Field(
-        default="NQ_NDX,ES_SPX,SPY,QQQ,SPX,NDX",
+        default="ES_SPX,SPY,QQQ,SPX,NDX",
         validation_alias=AliasChoices("GEXBOT_POLL_SYMBOLS"),
     )
     gex_poll_aggregation: str = Field(
@@ -93,6 +97,36 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GEXBOT_POLL_AGGREGATION"),
     )
     gexbot_api_key: Optional[str] = Field(default=None, env="GEXBOT_API_KEY")
+    gex_nq_polling_enabled: bool = Field(
+        default=False,
+        # Accept both legacy and canonical env var names; pydantic's validation alias
+        # ensures truthy values are coerced correctly from env strings like 'true'.
+        validation_alias=AliasChoices("GEXBOT_NQ_POLLING_ENABLED"),
+    )
+    gex_nq_poll_symbols: str = Field(
+        default="NQ_NDX",
+        env="GEXBOT_NQ_POLL_SYMBOLS",
+    )
+    gex_nq_poll_interval_seconds: int = Field(
+        default=60,
+        env="GEXBOT_NQ_POLL_INTERVAL_SECONDS",
+    )
+    gex_nq_poll_rth_interval_seconds: int = Field(
+        default=1,
+        env="GEXBOT_NQ_POLL_RTH_INTERVAL_SECONDS",
+    )
+    gex_nq_poll_off_hours_interval_seconds: int = Field(
+        default=300,
+        env="GEXBOT_NQ_POLL_OFF_HOURS_INTERVAL_SECONDS",
+    )
+    gex_nq_poll_dynamic_schedule: bool = Field(
+        default=True,
+        env="GEXBOT_NQ_POLL_DYNAMIC_SCHEDULE",
+    )
+    gex_nq_poll_aggregation: str = Field(
+        default="zero",
+        env="GEXBOT_NQ_POLL_AGGREGATION",
+    )
 
     # Schwab streaming
     schwab_enabled: bool = Field(default=False, env="SCHWAB_ENABLED")
@@ -179,6 +213,10 @@ class Settings(BaseSettings):
     @property
     def gex_symbol_list(self) -> list[str]:
         return [symbol.strip().upper() for symbol in self.gex_poll_symbols.split(",") if symbol.strip()]
+
+    @property
+    def gex_nq_poll_symbol_list(self) -> list[str]:
+        return [symbol.strip().upper() for symbol in self.gex_nq_poll_symbols.split(",") if symbol.strip()]
 
     @property
     def redis_params(self) -> Dict[str, Any]:

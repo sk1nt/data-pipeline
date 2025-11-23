@@ -58,6 +58,7 @@ class TradeBot(commands.Bot):
         self.gex_feed_refresh_minutes = max(1, int(getattr(config, 'gex_feed_refresh_minutes', 5) or 5))
         self.gex_feed_window_seconds = max(15, int(getattr(config, 'gex_feed_window_seconds', 60) or 60))
         self.gex_feed_force_window = bool(getattr(config, 'gex_feed_force_window', False))
+        self.gex_feed_aggregation_seconds = max(0.1, float(getattr(config, 'gex_feed_aggregation_seconds', 1.0) or 1.0))
         metrics_key = getattr(config, 'gex_feed_metrics_key', 'metrics:gex_feed') or 'metrics:gex_feed'
         metrics_enabled = bool(getattr(config, 'gex_feed_metrics_enabled', False))
         self._gex_feed_metrics = RedisGexFeedMetrics(self.redis_client, metrics_key, enabled=metrics_enabled)
@@ -123,14 +124,14 @@ class TradeBot(commands.Bot):
                                 snap['max_priors'] = snap.get('max_priors') or []
                                 await asyncio.to_thread(self.redis_client.setex, f"gex:{ticker.lower()}:latest", 300, json.dumps(snap, default=str))
                                 await asyncio.to_thread(self.redis_client.set, f"{self.redis_snapshot_prefix}{ticker.upper()}", json.dumps(snap, default=str))
-                                formatter = self.format_gex if show_full else self.format_gex_short
+                                formatter = self.format_gex if show_full else self.format_gex_small
                                 await ctx.send(formatter(snap))
                                 return
                     except Exception:
                         pass
                 data = await self.get_gex_data(symbol)
                 if data:
-                    formatter = self.format_gex if show_full else self.format_gex_short
+                    formatter = self.format_gex if show_full else self.format_gex_small
                     await ctx.send(formatter(data))
                 else:
                     await ctx.send('GEX data not available')
@@ -478,6 +479,10 @@ class TradeBot(commands.Bot):
         tracker = RollingWindowTracker(window_seconds=self.gex_feed_window_seconds)
         messages: Dict[int, discord.Message] = {}
         next_refresh = self._next_refresh_boundary(datetime.now(self.display_zone))
+        # Buffer aggregation state so we only send one message per aggregation window
+        pending_content: Optional[str] = None
+        pending_delta_map: Optional[Dict[str, 'MetricSnapshot']] = None
+        pending_first_ts: Optional[datetime] = None
         while not self._gex_feed_stop.is_set():
             now = datetime.now(self.display_zone)
             if now >= session_end:
@@ -494,13 +499,41 @@ class TradeBot(commands.Bot):
                 time_format="%I:%M:%S %p %Z",
                 delta_block=delta_map,
             )
-            if not messages:
-                messages = await self._post_feed_messages(channels, content)
-                await self._gex_feed_metrics.record_update(now, delta_map, refresh=True)
-            else:
-                await self._edit_feed_messages(messages, content)
-                await self._gex_feed_metrics.record_update(now, delta_map, refresh=False)
+            # Buffer content and delta_map; coalesce updates into one send/edit per aggregation window
+            # During RTH this effectively limits to 1 aggregated message/sec by default
+            pending_content = content
+            pending_delta_map = delta_map
+            if pending_first_ts is None:
+                pending_first_ts = now
+
+            # Determine effective aggregation window (RTH session uses configured aggregator)
+            effective_agg_seconds = self.gex_feed_aggregation_seconds
+            # If update interval is longer than aggregation, adhere to update interval
+            effective_wait = max(effective_agg_seconds, self.gex_feed_update_seconds)
+            age = (now - pending_first_ts).total_seconds() if pending_first_ts else 0
+            if age >= effective_wait:
+                if not messages:
+                    messages = await self._post_feed_messages(channels, pending_content)
+                    await self._gex_feed_metrics.record_update(now, pending_delta_map, refresh=True)
+                else:
+                    await self._edit_feed_messages(messages, pending_content)
+                    await self._gex_feed_metrics.record_update(now, pending_delta_map, refresh=False)
+                # Clear buffer
+                pending_content = None
+                pending_delta_map = None
+                pending_first_ts = None
             if now >= next_refresh and now < session_end:
+                # Force immediate refresh; publish any pending content first
+                if pending_content:
+                    if not messages:
+                        messages = await self._post_feed_messages(channels, pending_content)
+                        await self._gex_feed_metrics.record_update(now, pending_delta_map, refresh=True)
+                    else:
+                        await self._edit_feed_messages(messages, pending_content)
+                        await self._gex_feed_metrics.record_update(now, pending_delta_map, refresh=False)
+                    pending_content = None
+                    pending_delta_map = None
+                    pending_first_ts = None
                 await self._delete_feed_messages(messages)
                 messages = await self._post_feed_messages(channels, content)
                 await self._gex_feed_metrics.record_update(now, delta_map, refresh=True)
@@ -714,6 +747,7 @@ class TradeBot(commands.Bot):
                 import duckdb
                 q = f"""
                 SELECT timestamp, ticker, spot_price, zero_gamma, net_gex,
+                       sum_gex_vol, delta_risk_reversal, min_dte, sec_min_dte,
                        major_pos_vol, major_neg_vol, major_pos_oi, major_neg_oi, sum_gex_oi, max_priors
                 FROM gex_snapshots
                 WHERE ticker = '{ticker}'
@@ -748,8 +782,23 @@ class TradeBot(commands.Bot):
 
             result = await asyncio.to_thread(query_db)
             if result:
-                columns = ['timestamp', 'ticker', 'spot_price', 'zero_gamma', 'net_gex',
-                          'major_pos_vol', 'major_neg_vol', 'major_pos_oi', 'major_neg_oi', 'sum_gex_oi', 'max_priors']
+                columns = [
+                    'timestamp',
+                    'ticker',
+                    'spot_price',
+                    'zero_gamma',
+                    'net_gex',
+                    'sum_gex_vol',
+                    'delta_risk_reversal',
+                    'min_dte',
+                    'sec_min_dte',
+                    'major_pos_vol',
+                    'major_neg_vol',
+                    'major_pos_oi',
+                    'major_neg_oi',
+                    'sum_gex_oi',
+                    'max_priors',
+                ]
                 data = dict(zip(columns, result))
                 data['display_symbol'] = display_symbol
                 data['_source'] = 'DB'
@@ -1587,7 +1636,7 @@ class TradeBot(commands.Bot):
         )
 
         wall_label_width = max(label_width - 4, 1)
-        call_gap = ' ' * 3
+        call_gap = ' ' * 5
         put_gap = ' ' * 3
         call_wall_line = self._format_wall_line(
             data,
@@ -1667,6 +1716,134 @@ class TradeBot(commands.Bot):
         body = "\n".join([header, "", *table_lines, "", *maxchange_lines])
         return f"```ansi\n{body}\n```"
 
+    def format_gex_small(self, data):
+        dt = data.get('timestamp')
+        if isinstance(dt, str):
+            try:
+                dt = datetime.fromisoformat(dt)
+            except Exception:
+                dt = None
+        if isinstance(dt, datetime):
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            local_dt = dt.astimezone(self.display_zone)
+        else:
+            local_dt = None
+
+        formatted_time = None
+        if local_dt:
+            formatted_time = local_dt.strftime("%m/%d/%Y  %I:%M:%S %p %Z")
+
+        ticker = data.get('display_symbol') or data.get('ticker', 'QQQ')
+
+        def fmt_price(x):
+            return f"{x:.2f}" if isinstance(x, (int, float)) else "N/A"
+
+        def fmt_net_gex(x):
+            if not isinstance(x, (int, float)):
+                return "N/A"
+            return f"{(abs(x)/1000):.4f}Bn"
+
+        ansi = {
+            'reset': "\u001b[0m",
+            'dim_white': "\u001b[2;37m",
+            'yellow': "\u001b[2;33m",
+            'green': "\u001b[2;32m",
+            'red': "\u001b[2;31m",
+        }
+
+        def colorize(code, text):
+            if not code:
+                return text
+            return f"{code}{text}{ansi['reset']}"
+
+        def color_for_value(value, neutral='yellow'):
+            if not isinstance(value, (int, float)):
+                return neutral
+            if value > 0:
+                return 'green'
+            if value < 0:
+                return 'red'
+            return neutral
+
+        header_parts = [f"{ansi['dim_white']}GEX: {ticker}{ansi['reset']}"]
+        if formatted_time:
+            header_parts.append(formatted_time)
+        price_text = fmt_price(data.get('spot_price'))
+        header_parts.append(f"{ansi['dim_white']}{price_text}{ansi['reset']}")
+        header_parts.append(f"{ansi['dim_white']}{self._resolve_gex_source_label(data)}{ansi['reset']}")
+        header = "  ".join(header_parts)
+
+        classic_label_width = 19
+        wall_label_width = max(classic_label_width - 4, 1)
+        call_gap = '    '
+        put_gap = '    '
+
+        zero_gamma_line = f"{'zero gamma':<{classic_label_width}}{colorize(ansi['yellow'], fmt_price(data.get('zero_gamma')))}"
+        call_wall_line = self._format_wall_line(
+            data,
+            'call',
+            'call wall',
+            fmt_price,
+            label_width=wall_label_width,
+            gap_override=call_gap,
+            default_line=self._format_wall_short_line(
+                'call wall',
+                data.get('major_pos_vol'),
+                fmt_price,
+                label_width=wall_label_width,
+                gap=call_gap,
+            ),
+        ) + '  '
+        put_wall_line = self._format_wall_line(
+            data,
+            'put',
+            'put wall',
+            fmt_price,
+            label_width=wall_label_width,
+            gap_override=put_gap,
+            default_line=self._format_wall_short_line(
+                'put wall',
+                data.get('major_neg_vol'),
+                fmt_price,
+                label_width=wall_label_width,
+                gap=put_gap,
+            ),
+        ) + '  '
+
+        net_color_code = ansi.get(color_for_value(data.get('net_gex')))
+        net_value = colorize(net_color_code, fmt_net_gex(data.get('net_gex')))
+        net_line = f"{'net gex':<{classic_label_width}}{net_value}"
+
+        current_entry = self._extract_current_maxchange_entry(data)
+        def fmt_current_entry(entry):
+            label = f"{'current':<{classic_label_width}}"
+            if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
+                return f"{label}N/A"
+            if len(entry) >= 3 and isinstance(entry[1], (int, float)) and isinstance(entry[2], (int, float)):
+                strike_val = entry[1]
+                delta_val = entry[2]
+            else:
+                strike_val = entry[0]
+                delta_val = entry[1]
+            strike_txt = fmt_price(strike_val) if isinstance(strike_val, (int, float)) else str(strike_val)
+            delta_txt = fmt_net_gex(delta_val) if isinstance(delta_val, (int, float)) else str(delta_val)
+            delta_color = ansi.get(color_for_value(delta_val))
+            return f"{label}{strike_txt:<12}{colorize(delta_color, delta_txt)}"
+        current_line = fmt_current_entry(current_entry)
+
+        lines = [
+            header,
+            "",
+            zero_gamma_line,
+            call_wall_line,
+            put_wall_line,
+            net_line,
+            current_line,
+        ]
+        body = "\n".join(lines)
+        return f"```ansi\n{body}\n```"
+
     def format_gex_short(
         self,
         data,
@@ -1697,17 +1874,11 @@ class TradeBot(commands.Bot):
         def fmt_price(x):
             return f"{x:.2f}" if isinstance(x, (int, float)) else "N/A"
 
-        # Keep gamma display as-is (no scaling)
-
         # Net GEX formatting as above
         def fmt_net_gex(x):
             if not isinstance(x, (int, float)):
                 return "N/A"
-            # Display magnitude scaled by 1000 with Bn suffix for both signs
             return f"{(abs(x)/1000):.4f}Bn"
-
-        def fmt_net_abs(x):
-            return f"{abs(x):.5f}" if isinstance(x, (int, float)) else "N/A"
 
         ansi = {
             'reset': "\u001b[0m",
@@ -1731,10 +1902,11 @@ class TradeBot(commands.Bot):
                 return 'red'
             return neutral
 
-        zero_gamma_line = f"zero gamma        {colorize(ansi['yellow'], fmt_price(data.get('zero_gamma')))}"
         wall_label_width = 15
-        call_gap = ' ' * 3
+        call_gap = ' ' * 4
         put_gap = ' ' * 3
+        classic_label_width = 18
+        zero_gamma_line = f"{'zero gamma':<{classic_label_width}}{colorize(ansi['yellow'], fmt_price(data.get('zero_gamma')))}"
         major_pos_line = self._format_wall_line(
             data,
             'call',
@@ -1765,22 +1937,20 @@ class TradeBot(commands.Bot):
                 gap=put_gap,
             ),
         )
+
         net_color_code = ansi.get(color_for_value(data.get('net_gex')))
         net_value = colorize(net_color_code, fmt_net_gex(data.get('net_gex')))
 
-        current_entry = self._extract_current_maxchange_entry(data)
-        if isinstance(current_entry, tuple):
-            price_val, delta_val = current_entry
-            current_price = fmt_price(price_val)
-            delta_text = fmt_net_gex(delta_val) if isinstance(delta_val, (int, float)) else str(delta_val)
-            delta_color = ansi.get(color_for_value(delta_val))
-            current_delta = colorize(delta_color, delta_text)
-        else:
-            fallback = ansi['yellow']
-            current_price = 'N/A'
-            current_delta = colorize(fallback, 'N/ABn')
+        sum_gex_oi_value = fmt_price(data.get('sum_gex_oi'))
+        sum_gex_oi_color = ansi.get(color_for_value(data.get('sum_gex_oi')))
+        sum_oi_line = f"{'sum gex oi':<{classic_label_width}}{colorize(sum_gex_oi_color, sum_gex_oi_value)}"
 
-        source_label = self._resolve_gex_source_label(data)
+        delta_rr_value = data.get('delta_risk_reversal')
+        delta_rr_color = ansi.get(color_for_value(delta_rr_value))
+        delta_rr_line = f"{'delta risk rev':<{classic_label_width}}{colorize(delta_rr_color, fmt_price(delta_rr_value))}"
+
+        current_entry = self._extract_current_maxchange_entry(data)
+
         def snapshot(key: str) -> 'MetricSnapshot':
             snap = delta_block.get(key) if delta_block else None
             if isinstance(snap, MetricSnapshot):
@@ -1815,7 +1985,7 @@ class TradeBot(commands.Bot):
             delta_display = colorize(delta_color, f"Δ{delta_text} {percent_text}")
             price_text = f"{price_text}  {delta_display}"
         header_parts.append(f"{ansi['dim_white']}{price_text}{ansi['reset']}")
-        header_parts.append(f"{ansi['dim_white']}{source_label}{ansi['reset']}")
+        header_parts.append(f"{ansi['dim_white']}{self._resolve_gex_source_label(data)}{ansi['reset']}")
         header = "  ".join(header_parts)
 
         if delta_block:
@@ -1830,6 +2000,30 @@ class TradeBot(commands.Bot):
                 fmt_net_gex,
             )
         else:
+            def fmt_delta_entry(label: str, entry):
+                if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
+                    return f"{label:<18}N/A  N/ABn"
+                if len(entry) >= 3 and isinstance(entry[1], (int, float)) and isinstance(entry[2], (int, float)):
+                    strike_val = entry[1]
+                    delta = entry[2]
+                else:
+                    strike_val = entry[0]
+                    delta = entry[1]
+                strike_txt = fmt_price(strike_val) if isinstance(strike_val, (int, float)) else str(strike_val)
+                delta_txt = fmt_net_gex(delta) if isinstance(delta, (int, float)) else str(delta)
+                delta_color = ansi.get(color_for_value(delta))
+                return f"{label:<18}{strike_txt:<8} {colorize(delta_color, delta_txt)}"
+
+            maxchange_lines = ["", "max change gex"]
+            maxchange_lines.append(fmt_delta_entry('current', current_entry))
+
+            max_priors = data.get('max_priors', []) or []
+            intervals = [1, 5, 10, 15, 30]
+            for i, interval in enumerate(intervals):
+                entry = max_priors[i] if i < len(max_priors) else None
+                label = f"{interval} min"
+                maxchange_lines.append(fmt_delta_entry(label, entry))
+
             lines = [
                 header,
                 "",
@@ -1837,7 +2031,9 @@ class TradeBot(commands.Bot):
                 major_pos_line,
                 major_neg_line,
                 f"net gex           {net_value}",
-                f"current           {current_price:<8}   {current_delta}",
+                sum_oi_line,
+                delta_rr_line,
+                *maxchange_lines,
             ]
         body = "\n".join(lines)
         return f"```ansi\n{body}\n```"
@@ -1892,8 +2088,43 @@ class TradeBot(commands.Bot):
             lines.append(f"{label:<17}{current_txt:<10} ({prev_txt})")
 
         append_prev_line('zero gamma', 'zero_gamma')
-        append_prev_line('call wall', 'call_wall')
-        append_prev_line('put wall', 'put_wall')
+        classic_label_width = 19
+        wall_label_width = max(classic_label_width - 4, 1)
+        call_gap = '  '
+        put_gap = '  '
+
+        call_wall_line = self._format_wall_line(
+            data,
+            'call',
+            'call wall',
+            fmt_price,
+            label_width=wall_label_width,
+            gap_override=call_gap,
+            default_line=self._format_wall_short_line(
+                'call wall',
+                data.get('major_pos_vol'),
+                fmt_price,
+                label_width=wall_label_width,
+                gap=call_gap,
+            ),
+        ) + '  '
+        put_wall_line = self._format_wall_line(
+            data,
+            'put',
+            'put wall',
+            fmt_price,
+            label_width=wall_label_width,
+            gap_override=put_gap,
+            default_line=self._format_wall_short_line(
+                'put wall',
+                data.get('major_neg_vol'),
+                fmt_price,
+                label_width=wall_label_width,
+                gap=put_gap,
+            ),
+        ) + '  '
+        lines.append(call_wall_line)
+        lines.append(put_wall_line)
 
         def fmt_net_change(delta) -> str:
             if not isinstance(delta, (int, float)):

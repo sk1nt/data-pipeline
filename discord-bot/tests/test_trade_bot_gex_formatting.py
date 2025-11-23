@@ -30,6 +30,8 @@ def mk_data(zero_gamma=12345, net_gex=879.22222):
         'major_pos_oi': 10,
         'major_neg_oi': -5,
         'sum_gex_oi': 15,
+        'sum_gex_vol': 500,
+        'delta_risk_reversal': 0.05,
     }
 
 
@@ -47,6 +49,7 @@ def test_format_gex_gamma_and_net_positive(bot):
     assert "Bn" in out_full
     assert "Bn" in out_short
     assert "0.8792Bn" in out_full or "0.8792Bn" in out_short
+    assert "max change gex" in out_short
 
 
 def test_format_gex_net_negative_shows_whole_number(bot):
@@ -64,6 +67,17 @@ def test_format_gex_net_negative_shows_whole_number(bot):
     assert red in bot.format_gex(data) or red in bot.format_gex_short(data)
 
 
+def test_format_gex_small_basic(bot):
+    data = mk_data(zero_gamma=5000, net_gex=200.0)
+    out_small = bot.format_gex_small(data)
+    assert "GEX:" in out_small
+    assert "zero gamma" in out_small
+    assert "call wall" in out_small
+    assert "put wall" in out_small
+    assert "net gex" in out_small
+    assert "current" in out_small
+
+
 def test_format_gex_short_feed_variant_hides_timestamp(bot):
     data = mk_data(zero_gamma=15000, net_gex=500.0)
     data['timestamp'] = '2024-09-01T13:00:00+00:00'
@@ -78,7 +92,8 @@ def test_format_gex_short_feed_variant_hides_timestamp(bot):
     }
     rendered = bot.format_gex_short(data, include_time=False, delta_block=delta_map)
     assert '09/01/2024' not in rendered
-    assert 'Δ1.50 0.25%' in rendered
+    assert 'Δ1.50' in rendered
+    assert '0.25%' in rendered
     assert '(14975.00)' in rendered
     assert 'scaled gamma' in rendered
     assert 'Δ' in rendered

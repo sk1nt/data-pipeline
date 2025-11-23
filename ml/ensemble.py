@@ -203,6 +203,11 @@ if __name__ == '__main__':
             mlflow_utils.ensure_sqlite_tracking()
         except Exception:
             pass
+        try:
+            import mlflow_utils
+            mlflow_utils.ensure_sqlite_tracking()
+        except Exception:
+            pass
         mlflow.set_experiment(args.experiment)
 
     # Test single model ensemble

@@ -258,6 +258,11 @@ def main():
     parser.add_argument('--mlflow_experiment', default='feature_subset_training', help='MLflow experiment name')
     args = parser.parse_args()
 
+    try:
+        import mlflow_utils
+        mlflow_utils.ensure_sqlite_tracking()
+    except Exception:
+        pass
     mlflow.set_experiment(args.mlflow_experiment)
 
     # Load data

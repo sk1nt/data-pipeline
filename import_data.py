@@ -114,7 +114,8 @@ class DataImporter:
         sum_gex_vol DOUBLE,
         sum_gex_oi DOUBLE,
         delta_risk_reversal DOUBLE,
-        max_priors VARCHAR
+        max_priors VARCHAR,
+        strikes VARCHAR
         """
         strike_schema = """
         timestamp BIGINT,
@@ -148,6 +149,11 @@ class DataImporter:
         with self.db_utils:
             conn = self.db_utils.conn
             conn.execute("BEGIN TRANSACTION")
+            # Ensure new fields present in schema
+            try:
+                conn.execute("ALTER TABLE gex_snapshots ADD COLUMN IF NOT EXISTS strikes VARCHAR")
+            except Exception:
+                pass
             conn.execute("DELETE FROM gex_snapshots")
             conn.execute("DELETE FROM gex_strikes")
 
@@ -168,7 +174,8 @@ class DataImporter:
                 sum_gex_vol,
                 sum_gex_oi,
                 delta_risk_reversal,
-                CAST(max_priors AS VARCHAR) AS max_priors
+                CAST(max_priors AS VARCHAR) AS max_priors,
+                CAST(strikes AS VARCHAR) AS strikes
             FROM {source}
             """
 

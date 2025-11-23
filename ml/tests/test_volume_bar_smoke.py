@@ -20,7 +20,8 @@ def test_volume_bar_smoke(tmp_path):
     env = os.environ.copy()
     # Ensure MLflow writes into ml/ during the test
     env['MLFLOW_TRACKING_URI'] = f"sqlite:///{ml_dir / 'mlflow.db'}"
-    env['MLFLOW_ARTIFACT_URI'] = f"file://{ml_dir / 'mlruns'}"
+    # Use triple slash in file URI for compatibility
+    env['MLFLOW_ARTIFACT_URI'] = f"file:///{ml_dir / 'mlruns'}"
     # Clean up any root-level mlruns leftover from previous runs to ensure test isolation
     import shutil
     root_mlruns = repo_root / 'mlruns'
