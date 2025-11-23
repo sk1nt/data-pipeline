@@ -186,6 +186,7 @@ class ServiceManager:
     def __init__(self) -> None:
         self.tastytrade: Optional[TastyTradeStreamer] = None
         self.gex_poller: Optional[GEXBotPoller] = None
+        self.gex_nq_poller: Optional[GEXBotPoller] = None
         self.redis_client: Optional[RedisClient] = None
         self.rts: Optional[RedisTimeSeriesClient] = None
         self.flush_worker: Optional[RedisFlushWorker] = None
@@ -224,12 +225,12 @@ class ServiceManager:
         self._ensure_event_loop()
         self._ensure_redis_clients()
         self._silence_streamer_logs()
-        for service in ("tastytrade", "schwab", "gex_poller", "redis_flush", "discord_bot"):
+        for service in ("tastytrade", "schwab", "gex_poller", "gex_nq_poller", "redis_flush", "discord_bot"):
             self.start_service(service)
 
     async def stop(self) -> None:
         """Stop all managed services in a best-effort fashion."""
-        for service in ("tastytrade", "schwab", "gex_poller", "redis_flush", "discord_bot"):
+        for service in ("tastytrade", "schwab", "gex_poller", "gex_nq_poller", "redis_flush", "discord_bot"):
             await self.stop_service(service)
 
     def status(self) -> Dict[str, Any]:
@@ -255,6 +256,7 @@ class ServiceManager:
             "tastytrade_streamer": tasty_status,
             "schwab_streamer": schwab_status,
             "gex_poller": getattr(self.gex_poller, "status", lambda: {})(),
+            "gex_nq_poller": getattr(self.gex_nq_poller, "status", lambda: {})(),
             "redis_flush_worker": getattr(self.flush_worker, "status", lambda: {})(),
             "discord_bot": getattr(
                 self.discord_bot, "status", lambda: {"running": False, "enabled": settings.discord_bot_enabled}
@@ -321,6 +323,28 @@ class ServiceManager:
             )
             self.gex_poller.start()
             LOGGER.info("GEXBot poller started")
+        elif name == "gex_nq_poller" and settings.gex_nq_polling_enabled and settings.gexbot_api_key:
+            if self.gex_nq_poller:
+                return
+            symbols = settings.gex_nq_poll_symbol_list
+            if not symbols:
+                LOGGER.warning("No symbols configured for NQ poller; skipping start")
+                return
+            self.gex_nq_poller = GEXBotPoller(
+                GEXBotPollerSettings(
+                    api_key=settings.gexbot_api_key,
+                    symbols=symbols,
+                    interval_seconds=settings.gex_nq_poll_interval_seconds,
+                    aggregation_period=settings.gex_nq_poll_aggregation,
+                    rth_interval_seconds=settings.gex_nq_poll_rth_interval_seconds,
+                    off_hours_interval_seconds=settings.gex_nq_poll_off_hours_interval_seconds,
+                    dynamic_schedule=settings.gex_nq_poll_dynamic_schedule,
+                ),
+                redis_client=self.redis_client,
+                ts_client=self.rts,
+            )
+            self.gex_nq_poller.start()
+            LOGGER.info("GEXBot NQ poller started")
         elif name == "redis_flush":
             if self.flush_worker:
                 return
@@ -349,6 +373,10 @@ class ServiceManager:
             await self.gex_poller.stop()
             self.gex_poller = None
             LOGGER.info("GEXBot poller stopped")
+        elif name == "gex_nq_poller" and self.gex_nq_poller:
+            await self.gex_nq_poller.stop()
+            self.gex_nq_poller = None
+            LOGGER.info("GEXBot NQ poller stopped")
         elif name == "redis_flush" and self.flush_worker:
             await self.flush_worker.stop()
             self.flush_worker = None
@@ -719,7 +747,7 @@ async def ingest_ml_trade(trade: MLTradePayload) -> Dict[str, Any]:
 
 
 CONTROL_ACTIONS = {"start", "stop", "restart"}
-CONTROL_SERVICES = {"tastytrade", "schwab", "gex_poller", "redis_flush", "discord_bot"}
+CONTROL_SERVICES = {"tastytrade", "schwab", "gex_poller", "gex_nq_poller", "redis_flush", "discord_bot"}
 
 
 @app.post("/control/{service}/{action}")
@@ -769,6 +797,7 @@ STATUS_PAGE = """
     <button onclick=\"controlService('discord_bot','restart')\">Restart Discord Bot</button>
     <button onclick=\"controlService('tastytrade','restart')\">Restart TastyTrade</button>
     <button onclick=\"controlService('gex_poller','restart')\">Restart GEX Poller</button>
+    <button onclick=\"controlService('gex_nq_poller','restart')\">Restart NQ Poller</button>
     <button onclick="controlService('schwab','restart')">Restart Schwab Streamer</button>
     <button onclick=\"controlService('redis_flush','restart')\">Restart Flush Worker</button>
   </div>

@@ -82,6 +82,11 @@ if __name__ == '__main__':
     args = p.parse_args()
 
     # Setup MLflow
+    try:
+        import mlflow_utils
+        mlflow_utils.ensure_sqlite_tracking()
+    except Exception:
+        pass
     mlflow.set_experiment(args.mlflow_experiment)
 
     try:

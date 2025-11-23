@@ -8,6 +8,7 @@ Key improvements:
 - Focus on precision for profitable trading
 """
 import argparse
+import sys
 import numpy as np
 import torch
 import torch.nn as nn
@@ -104,9 +105,17 @@ if __name__ == '__main__':
     p.add_argument('--commission_penalty', type=float, default=0.42, help='Commission cost per trade (round trip)')
     p.add_argument('--mlflow_experiment', default='trading_model_training', help='MLflow experiment name')
     p.add_argument('--target_precision', type=float, default=0.6, help='Target precision for early stopping')
+    p.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'], help='Device to run training on')
+    p.add_argument('--sample', default=None, type=int, help='Limit dataset to first N samples (reduce memory)')
+    p.add_argument('--backtest-days', default=None, type=str, help='Comma-separated list of days to run PnL backtest after training (e.g. 20251021,20251022)')
     args = p.parse_args()
 
     # Setup MLflow
+    try:
+        import mlflow_utils
+        mlflow_utils.ensure_sqlite_tracking()
+    except Exception:
+        pass
     mlflow.set_experiment(args.mlflow_experiment)
 
     try:
@@ -117,6 +126,10 @@ if __name__ == '__main__':
     data = np.load(input_path)
     X = data['X']
     y_raw = data['y']
+    if args.sample is not None and args.sample > 0:
+        print(f"Limiting dataset to first {args.sample} samples")
+        X = X[: args.sample]
+        y_raw = y_raw[: args.sample]
     y = (y_raw > 0).astype(np.float32)
 
     print(f"Dataset: {len(X)} samples, {X.shape[1]} timesteps, {X.shape[2]} features")
@@ -167,12 +180,17 @@ if __name__ == '__main__':
             train_ds = TensorDataset(torch.from_numpy(X_train).float(), torch.from_numpy(y_train).float())
             val_ds = TensorDataset(torch.from_numpy(X_val).float(), torch.from_numpy(y_val).float())
 
-            train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True, pin_memory=torch.cuda.is_available())
-            val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False, pin_memory=torch.cuda.is_available())
-
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            if torch.cuda.is_available():
+            # Device selection (allow forced CPU for memory-constrained environments)
+            if args.device == 'auto':
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            else:
+                device = torch.device(args.device)
+            if device.type == 'cuda':
                 torch.backends.cudnn.benchmark = True
+
+            pin_memory = (device.type == 'cuda')
+            train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True, pin_memory=pin_memory)
+            val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False, pin_memory=pin_memory)
 
             pos_weight = pos_weight.to(device)
             loss_fn = TradingLoss(pos_weight, commission_cost=args.commission_penalty)
@@ -226,9 +244,9 @@ if __name__ == '__main__':
                 if precision > best_precision:
                     best_precision = precision
                     patience = 0
-                            fold_out = str(resolve_cli_path(args.out)).replace('.pt', f'_fold{fold}.pt')
-                            Path(fold_out).parent.mkdir(parents=True, exist_ok=True)
-                            torch.save(model.state_dict(), fold_out)
+                    fold_out = str(resolve_cli_path(args.out)).replace('.pt', f'_fold{fold}.pt')
+                    Path(fold_out).parent.mkdir(parents=True, exist_ok=True)
+                    torch.save(model.state_dict(), fold_out)
                     print(f"  → Saved model with precision {precision:.3f}")
                 else:
                     patience += 1
@@ -264,15 +282,28 @@ if __name__ == '__main__':
 
         # Save final model (last fold)
         if fold_results:
-            final_model_path = str(resolve_cli_path(args.out)).replace('.pt', f'_fold{len(fold_results)-1}.pt')
-            import shutil
-            shutil.copy(final_model_path, str(resolve_cli_path(args.out)))
-            print(f"Saved final model to {str(resolve_cli_path(args.out))}")
+            base_out = str(resolve_cli_path(args.out)).replace('.pt', '')
+            candidate = f"{base_out}_fold{fold_results[-1]['fold']}.pt"
+            import glob
+            if Path(candidate).exists():
+                final_model_path = candidate
+            else:
+                matches = sorted(glob.glob(f"{base_out}_fold*.pt"), key=lambda p: Path(p).stat().st_mtime)
+                final_model_path = matches[-1] if matches else None
+            if final_model_path and Path(final_model_path).exists():
+                import shutil
+                shutil.copy(final_model_path, str(resolve_cli_path(args.out)))
+                print(f"Saved final model to {str(resolve_cli_path(args.out))}")
+            else:
+                print("No fold model file found to copy as final model; skipping final copy")
 
-            # Log model to MLflow
-            model = LSTMModel(X.shape[2], dropout=args.dropout, model_type=args.model_type)
-            model.load_state_dict(torch.load(str(resolve_cli_path(args.out))))
-            mlflow.pytorch.log_model(model, "model")
+            # Log model to MLflow (only if we have a final model artifact)
+            if final_model_path and Path(final_model_path).exists():
+                model = LSTMModel(X.shape[2], dropout=args.dropout, model_type=args.model_type)
+                model.load_state_dict(torch.load(final_model_path))
+                mlflow.pytorch.log_model(model, "model")
+            else:
+                print("No final model exists to log to MLflow; skipping model log")
 
         print("\n🎯 Production-ready model training complete!")
         print(f"Target precision: {args.target_precision}")
@@ -281,3 +312,50 @@ if __name__ == '__main__':
             print("✅ SUCCESS: Model meets trading precision requirements!")
         else:
             print("⚠️  WARNING: Model below target precision - may need more data/tuning")
+
+        # Optionally run PnL backtest for selected days and surface metrics to MLflow
+        if args.backtest_days:
+            try:
+                import subprocess
+                import re
+                from pathlib import Path
+                days = args.backtest_days
+                cmd = [sys.executable, '-m', 'ml.pnl_backtest', '--model', str(resolve_cli_path(args.out)), '--days', days, '--window', str(60), '--instrument', 'MNQ', '--threshold', '0.5']
+                print('Running backtest post-training:', ' '.join(cmd))
+                res = subprocess.run(cmd, capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[1]))
+                out_text = res.stdout + '\n' + res.stderr
+                print(out_text)
+                # Parse summary lines
+                total_pnl = None
+                trades = None
+                win_rate = None
+                for line in out_text.splitlines():
+                    if 'Total PnL:' in line:
+                        m = re.search(r'Total PnL:\s*\$([\-\d.,]+)', line)
+                        if m:
+                            total_pnl = float(m.group(1).replace(',',''))
+                    if 'Total Trades:' in line or 'Total trades:' in line:
+                        m = re.search(r'Total (Trades|trades):\s*(\d+)', line)
+                        if m:
+                            trades = int(m.group(2))
+                    if 'Average win rate:' in line:
+                        m = re.search(r'Average win rate:\s*([\d\.]+)%', line)
+                        if m:
+                            win_rate = float(m.group(1))
+                if total_pnl is not None:
+                    try:
+                        mlflow.log_metric('post_training_total_pnl', float(total_pnl))
+                    except Exception:
+                        pass
+                if trades is not None:
+                    try:
+                        mlflow.log_metric('post_training_total_trades', int(trades))
+                    except Exception:
+                        pass
+                if win_rate is not None:
+                    try:
+                        mlflow.log_metric('post_training_avg_win_rate', float(win_rate))
+                    except Exception:
+                        pass
+            except Exception as e:
+                print('Backtest processing failed:', e)

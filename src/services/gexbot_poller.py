@@ -167,27 +167,30 @@ class GEXBotPoller:
     ) -> Optional[Dict[str, Any]]:
         base_url = f"https://api.gexbot.com/{symbol}/classic/{self.settings.aggregation_period}"
 
-        async def _endpoint(suffix: str = "") -> Optional[Dict[str, Any]]:
-            url = f"{base_url}{suffix}?key={self.settings.api_key}"
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    LOGGER.debug(
-                        "GEXBot %s%s returned %s",
-                        symbol,
-                        suffix or "",
-                        resp.status,
-                    )
-                    return None
-                return await resp.json()
+        async def _endpoint() -> Optional[Dict[str, Any]]:
+            url = f"{base_url}?key={self.settings.api_key}"
+            try:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        LOGGER.debug(
+                            "GEXBot %s returned %s",
+                            symbol,
+                            resp.status,
+                        )
+                        return None
+                    return await resp.json()
+            except asyncio.CancelledError:
+                raise
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                LOGGER.debug("GEXBot %s request failed: %s", symbol, exc)
+                return None
 
         zero = await _endpoint()
-        majors = await _endpoint("/majors") if zero else None
-        maxchange = await _endpoint("/maxchange") if zero else None
-        if not zero and not majors and not maxchange:
+        if not zero:
             return None
 
-        result = self._combine_payloads(symbol, zero, majors, maxchange)
-        result["raw"] = {"zero": zero, "majors": majors, "maxchange": maxchange}
+        result = self._combine_payloads(symbol, zero)
+        result["raw"] = {"zero": zero}
         return result
 
     async def _record_timeseries(self, snapshot: Dict[str, Any]) -> None:
@@ -199,8 +202,6 @@ class GEXBotPoller:
         self,
         symbol: str,
         zero: Optional[Dict[str, Any]],
-        majors: Optional[Dict[str, Any]],
-        maxchange: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         def _first(*values):
             for value in values:
@@ -208,17 +209,11 @@ class GEXBotPoller:
                     return value
             return None
 
-        timestamp = _first(
-            zero.get("timestamp") if zero else None,
-            majors.get("timestamp") if majors else None,
-            maxchange.get("timestamp") if maxchange else None,
-        )
+        zero_payload = zero or {}
+        timestamp = _first(zero_payload.get("timestamp"))
         if isinstance(timestamp, (int, float)):
             timestamp = datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat()
-
-        zero_payload = zero or {}
-        majors_payload = majors or {}
-        maxchange_payload = maxchange or {}
+        maxchange_payload = zero_payload.get("maxchange") if isinstance(zero_payload, dict) else {}
         maxchange_windows: Dict[str, list[float]] = {}
         if isinstance(maxchange_payload, dict):
             for window, data in maxchange_payload.items():
@@ -235,14 +230,11 @@ class GEXBotPoller:
                     maxchange_windows[window] = [strike, delta]
 
         net_gex = _first(
-            majors_payload.get("net_gex_vol"),
-            majors_payload.get("net_gex"),
             zero_payload.get("net_gex"),
             zero_payload.get("net_gex_vol"),
             zero_payload.get("sum_gex_vol"),
         )
         net_gex_oi = _first(
-            majors_payload.get("net_gex_oi"),
             zero_payload.get("net_gex_oi"),
             zero_payload.get("sum_gex_oi"),
         )
@@ -252,54 +244,34 @@ class GEXBotPoller:
             "timestamp": timestamp,
             "spot": _first(
                 zero_payload.get("spot"),
-                majors_payload.get("spot"),
-                maxchange_payload.get("spot"),
             ),
             "zero_gamma": _first(
                 zero_payload.get("zero_gamma"),
-                maxchange_payload.get("zero_gamma"),
             ),
             "net_gex": net_gex,
             "net_gex_oi": net_gex_oi,
             "sum_gex_vol": zero_payload.get("sum_gex_vol"),
             "sum_gex_oi": zero_payload.get("sum_gex_oi"),
             "major_pos_vol": _first(
-                majors_payload.get("major_pos_vol"),
-                majors_payload.get("mpos_vol"),
                 zero_payload.get("major_pos_vol"),
-                zero_payload.get("mpos_vol"),
             ),
             "major_neg_vol": _first(
-                majors_payload.get("major_neg_vol"),
-                majors_payload.get("mneg_vol"),
                 zero_payload.get("major_neg_vol"),
-                zero_payload.get("mneg_vol"),
             ),
             "major_pos_oi": _first(
-                majors_payload.get("major_pos_oi"),
-                majors_payload.get("mpos_oi"),
                 zero_payload.get("major_pos_oi"),
-                zero_payload.get("mpos_oi"),
             ),
             "major_neg_oi": _first(
-                majors_payload.get("major_neg_oi"),
-                majors_payload.get("mneg_oi"),
                 zero_payload.get("major_neg_oi"),
-                zero_payload.get("mneg_oi"),
             ),
             "major_pos_strike": _first(
-                majors_payload.get("major_pos_strike"),
                 zero_payload.get("major_pos_strike"),
-                maxchange_payload.get("major_pos_strike"),
             ),
             "major_neg_strike": _first(
-                majors_payload.get("major_neg_strike"),
                 zero_payload.get("major_neg_strike"),
-                maxchange_payload.get("major_neg_strike"),
             ),
             "delta_risk_reversal": _first(
                 zero_payload.get("delta_risk_reversal"),
-                maxchange_payload.get("delta_risk_reversal"),
             ),
             "maxchange": maxchange_windows,
         }

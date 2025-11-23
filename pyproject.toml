@@ -32,7 +32,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["backend"]
+packages = ["backend", "src"]
 
 [tool.ruff]
 line-length = 88

@@ -222,6 +222,11 @@ def main():
     parser.add_argument('--commission_cost', type=float, default=0.42, help='Commission cost per trade')
     args = parser.parse_args()
 
+    try:
+        import mlflow_utils
+        mlflow_utils.ensure_sqlite_tracking()
+    except Exception:
+        pass
     mlflow.set_experiment(args.mlflow_experiment)
 
     # Load data and models

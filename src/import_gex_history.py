@@ -154,6 +154,11 @@ class GEXHistoryImporter:
         ticker_sql = (ticker or "UNKNOWN").upper()
         day_str = trade_day.isoformat()
         with gex_db.gex_data_connection() as conn:
+            # Ensure new columns exist
+            try:
+                conn.execute("ALTER TABLE gex_snapshots ADD COLUMN IF NOT EXISTS strikes VARCHAR")
+            except Exception:
+                pass
             conn.execute(
                 """
                 DELETE FROM gex_snapshots
@@ -184,7 +189,8 @@ class GEXHistoryImporter:
                     sum_gex_vol,
                     sum_gex_oi,
                     delta_risk_reversal,
-                    CASE WHEN max_priors IS NULL THEN NULL ELSE to_json(max_priors) END AS max_priors
+                    CASE WHEN max_priors IS NULL THEN NULL ELSE to_json(max_priors) END AS max_priors,
+                    CASE WHEN strikes IS NULL THEN NULL ELSE to_json(strikes) END AS strikes
                 FROM {table_name}
                 """
             )

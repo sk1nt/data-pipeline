@@ -7,14 +7,20 @@ import argparse
 import subprocess
 import json
 import time
+try:
+    from ml.path_utils import resolve_cli_path
+except Exception:
+    from path_utils import resolve_cli_path
 
-BASE = Path(__file__).resolve().parent / 'experiments'
+ML_DIR = Path(__file__).resolve().parent
+BASE = ML_DIR / 'experiments'
 BASE.mkdir(parents=True, exist_ok=True)
 
 
 def run_cmd(cmd):
     print('Running:', ' '.join(cmd))
-    res = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    # Run from within ml/ to ensure relative paths resolve correctly
+    res = subprocess.run(cmd, check=True, capture_output=True, text=True, cwd=str(ML_DIR))
     return res.stdout
 
 
@@ -33,21 +39,23 @@ def main():
     models = [m.strip() for m in args.models.split(',') if m.strip()]
     results = {}
 
+    # Resolve input to repo-local path to avoid accidental root writes
+    args.input = str(resolve_cli_path(args.input))
     for m in models:
         if m == 'lstm':
-            cmd = ['python', 'train_lstm.py', '--input', args.input, '--epochs', str(args.epochs), '--batch', str(args.batch), '--out', f'models/lstm_compare_{timestamp}.pt']
+            cmd = ['python', str(ML_DIR / 'train_lstm.py'), '--input', args.input, '--epochs', str(args.epochs), '--batch', str(args.batch), '--out', str(ML_DIR / 'models' / f'lstm_compare_{timestamp}.pt')]
         elif m == 'cnn':
-            cmd = ['python', 'train_cnn.py', '--input', args.input, '--epochs', str(args.epochs), '--batch', str(args.batch), '--out', f'models/cnn_compare_{timestamp}.pt']
+            cmd = ['python', str(ML_DIR / 'train_cnn.py'), '--input', args.input, '--epochs', str(args.epochs), '--batch', str(args.batch), '--out', str(ML_DIR / 'models' / f'cnn_compare_{timestamp}.pt')]
         elif m == 'tcn':
-            cmd = ['python', 'train_tcn.py', '--input', args.input, '--epochs', str(args.epochs), '--batch', str(args.batch), '--out', f'models/tcn_compare_{timestamp}.pt']
+            cmd = ['python', str(ML_DIR / 'train_tcn.py'), '--input', args.input, '--epochs', str(args.epochs), '--batch', str(args.batch), '--out', str(ML_DIR / 'models' / f'tcn_compare_{timestamp}.pt')]
         elif m == 'transformer':
-            cmd = ['python', 'train_transformer.py', '--input', args.input, '--epochs', str(args.epochs), '--batch', str(args.batch), '--out', f'models/transformer_compare_{timestamp}.pt']
+            cmd = ['python', str(ML_DIR / 'train_transformer.py'), '--input', args.input, '--epochs', str(args.epochs), '--batch', str(args.batch), '--out', str(ML_DIR / 'models' / f'transformer_compare_{timestamp}.pt')]
         elif m == 'gru':
-            cmd = ['python', 'train_lstm.py', '--input', args.input, '--epochs', str(args.epochs), '--batch', str(args.batch), '--model_type', 'gru', '--out', f'models/gru_compare_{timestamp}.pt']
+            cmd = ['python', str(ML_DIR / 'train_lstm.py'), '--input', args.input, '--epochs', str(args.epochs), '--batch', str(args.batch), '--model_type', 'gru', '--out', str(ML_DIR / 'models' / f'gru_compare_{timestamp}.pt')]
         elif m == 'lightgbm':
-            cmd = ['python', 'train_lightgbm.py', '--input', args.input, '--out', f'models/lightgbm_compare_{timestamp}.pkl']
+            cmd = ['python', str(ML_DIR / 'train_lightgbm.py'), '--input', args.input, '--out', str(ML_DIR / 'models' / f'lightgbm_compare_{timestamp}.pkl')]
         elif m == 'xgboost':
-            cmd = ['python', 'train_xgboost.py', '--input', args.input, '--out', f'models/xgboost_compare_{timestamp}.pkl']
+            cmd = ['python', str(ML_DIR / 'train_xgboost.py'), '--input', args.input, '--out', str(ML_DIR / 'models' / f'xgboost_compare_{timestamp}.pkl')]
         else:
             print('Unknown model', m)
             continue
