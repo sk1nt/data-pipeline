@@ -1,0 +1,76 @@
+{
+  "metrics": {
+    "total_return": 0.0,
+    "sharpe_ratio": 0.0,
+    "max_drawdown": 0.0,
+    "win_rate": 0.0,
+    "profit_factor": 0.0,
+    "total_trades": 0,
+    "avg_trade_pnl": 0.0,
+    "final_capital": 100000
+  },
+  "trades": [],
+  "portfolio_values": [],
+  "config": {
+    "models": [
+      {
+        "name": "lstm_attention_positive",
+        "type": "rnn",
+        "path": "ml/models/best_rnn_model.pth",
+        "regime": "positive",
+        "sequence_length": 60,
+        "input_size": 38
+      },
+      {
+        "name": "transformer_negative",
+        "type": "transformer",
+        "path": "ml/models/best_transformer_model.pth",
+        "regime": "negative",
+        "sequence_length": 60,
+        "input_size": 38
+      },
+      {
+        "name": "tcn_any",
+        "type": "tcn",
+        "path": "ml/models/best_tcn_model.pth",
+        "regime": "any",
+        "sequence_length": 60,
+        "input_size": 38
+      },
+      {
+        "name": "lightgbm_fallback",
+        "type": "boosting",
+        "variant": "lightgbm",
+        "path": "ml/models/best_boosting_lightgbm_model.txt",
+        "regime": "any"
+      }
+    ],
+    "gex_model_path": "ml/models/gex_regime_classifier.txt",
+    "risk_params": {
+      "max_positions": 1,
+      "max_drawdown_pct": 0.05,
+      "base_position_size": 1
+    },
+    "trading_params": {
+      "min_signal_interval": 60,
+      "min_confidence": 0.6,
+      "rth_start": "09:30",
+      "rth_end": "16:00",
+      "max_holding_time": 300,
+      "stop_loss_pct": 0.02,
+      "take_profit_pct": 0.02
+    },
+    "data_params": {
+      "tick_window": 60,
+      "feature_buffer_size": 100,
+      "gex_update_interval": 300
+    },
+    "backtest_params": {
+      "start_date": "2025-09-01",
+      "end_date": "2025-11-21",
+      "initial_capital": 100000,
+      "commission_per_contract": 0.25,
+      "slippage_ticks": 0.25
+    }
+  }
+}
