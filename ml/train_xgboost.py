@@ -50,6 +50,11 @@ if __name__ == '__main__':
         try:
             import mlflow
             import mlflow.xgboost
+            try:
+                import mlflow_utils
+                mlflow_utils.ensure_sqlite_tracking()
+            except Exception:
+                pass
             mlflow.start_run()
             mlflow.log_params({'use_gpu': args.use_gpu})
             mlflow.log_metric('auc', float(auc))
