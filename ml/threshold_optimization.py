@@ -12,9 +12,6 @@ import mlflow
 import mlflow.pytorch
 import mlflow.lightgbm
 import pandas as pd
-from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
-from datetime import datetime
-import polars as pl
 
 # Model paths
 LSTM_MODEL = Path('ml/models/lstm_large_dropout.pt')
@@ -720,11 +717,16 @@ def main():
             mlflow.log_param("position_sizing", result['position_sizing'])
             mlflow.log_param("commission_cost", args.commission_cost)
 
-            mlflow.log_metric("net_pnl", result['net_pnl'])
-            mlflow.log_metric("win_rate", result['win_rate'])
-            mlflow.log_metric("trades_taken", result['trades_taken'])
-            mlflow.log_metric("edge", result['edge'])
-            mlflow.log_metric("pnl_per_trade", result['pnl_per_trade'])
+            # Standardized metric logging + validation tags
+            try:
+                import mlflow_utils
+                mlflow_utils.log_trading_metrics(result, break_even_win_rate=result.get('break_even_win_rate'))
+            except Exception:
+                mlflow.log_metric("net_pnl", result['net_pnl'])
+                mlflow.log_metric("win_rate", result['win_rate'])
+                mlflow.log_metric("trades_taken", result['trades_taken'])
+                mlflow.log_metric("edge", result['edge'])
+                mlflow.log_metric("pnl_per_trade", result['pnl_per_trade'])
 
     # Save detailed results
     df_results = pd.DataFrame(all_results)

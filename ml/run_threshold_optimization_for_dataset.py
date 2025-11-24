@@ -4,7 +4,6 @@ Overlays the DATASET constant and optional model paths before calling the module
 """
 import argparse
 from pathlib import Path
-import importlib
 
 def main():
     p = argparse.ArgumentParser()

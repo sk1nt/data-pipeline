@@ -9,12 +9,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import precision_score, recall_score
 import mlflow
 import mlflow.pytorch
-from pathlib import Path
-import json
-from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -177,7 +173,6 @@ def train_model(X, y, feature_indices, subset_name, epochs=20, batch_size=64, co
         val_loss /= len(val_loader)
 
         # Calculate validation metrics and P&L
-        val_preds_binary = np.array(val_preds) > 0.5
         val_targets_binary = np.array(val_targets) > 0
 
         # Calculate P&L at optimal threshold (0.3)

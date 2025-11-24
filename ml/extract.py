@@ -8,6 +8,7 @@ from pathlib import Path
 import duckdb
 import os
 import json as _json
+import numpy as np
 import pandas as pd
 from datetime import datetime
 
@@ -225,7 +226,6 @@ def extract_1s_bars(symbol: str, date: str, tick_parquet_root: str = 'data/tick'
         df_ticks = con.execute(f"SELECT CAST(timestamp AS TIMESTAMP) as timestamp, price, {volume_col} AS volume FROM read_parquet('{parquet_path}') ORDER BY timestamp").fetchdf()
         if df_ticks is None or df_ticks.empty:
             raise RuntimeError('No ticks found for symbol/date parquet')
-        import numpy as np
         if bar_type == 'volume':
             sizes = df_ticks['volume'].astype(int).values
             cum = sizes.cumsum()
@@ -240,11 +240,17 @@ def extract_1s_bars(symbol: str, date: str, tick_parquet_root: str = 'data/tick'
         grouped = df_ticks.groupby('bar_id')
         # Build OHLCV per bar
         # Calculate VWAP per grouped bar
-        df = grouped.agg({'timestamp': 'first', 'price': ['first', 'max', 'min', 'last'], 'volume': 'sum', 'price': lambda s: (s * df_ticks.loc[s.index, 'volume']).sum()})
-        # The previous aggregation gives 'price' aggregated with custom; compute vwap by dividing by volume
-        # Flatten multiindex
-        df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        df = df.reset_index(drop=True)
+        df = grouped.agg(
+            timestamp=('timestamp', 'first'),
+            open=('price', 'first'),
+            high=('price', 'max'),
+            low=('price', 'min'),
+            close=('price', 'last'),
+            volume=('volume', 'sum'),
+            vwap_num=('price', lambda s: (s * df_ticks.loc[s.index, 'volume']).sum()),
+        ).reset_index(drop=True)
+        df['vwap'] = df['vwap_num'] / df['volume'].replace(0, np.nan)
+        df = df.drop(columns=['vwap_num'])
     if df is None or df.empty:
         raise RuntimeError('No ticks found for symbol/date parquet')
 

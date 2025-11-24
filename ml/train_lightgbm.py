@@ -7,7 +7,6 @@ Usage:
 import argparse
 import numpy as np
 import lightgbm as lgb
-import sys
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, accuracy_score
 import pickle

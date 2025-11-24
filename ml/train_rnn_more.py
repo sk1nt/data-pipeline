@@ -3,7 +3,6 @@ Train a longer LSTM run using the preprocessed dataset.
 This script builds on `train_lstm.py` but runs more epochs and saves a checkpoint.
 It expects `output/*.npz` to exist (created by `preprocess.py`).
 """
-from pathlib import Path
 import argparse
 import numpy as np
 import torch

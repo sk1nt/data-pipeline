@@ -240,7 +240,7 @@ if __name__ == '__main__':
         print(f"Edge: {(win_rate - break_even_win_rate):.1%}")
 
     # Log to MLflow
-    with mlflow.start_run(run_name=f"production_lstm_mnq"):
+    with mlflow.start_run(run_name="production_lstm_mnq"):
         mlflow.log_param("commission_cost", args.commission_cost)
         mlflow.log_param("oversample", args.oversample)
         mlflow.log_param("dropout", args.dropout)
@@ -258,7 +258,7 @@ if __name__ == '__main__':
 
     print("\n✅ Production model training complete!")
     print(f"Model saved to {args.out}")
-    print(f"Ready for live trading evaluation!")
+    print("Ready for live trading evaluation!")
 
     if final_precision >= 0.5 and win_rate >= 0.55:
         print("🎯 EXCELLENT: Model exceeds profitability requirements!")

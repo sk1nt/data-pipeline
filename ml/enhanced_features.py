@@ -22,7 +22,6 @@ def add_advanced_technical_indicators(df):
         close = df['close'].values
         high = df['high'].values
         low = df['low'].values
-        open_ = df['open'].values
         volume = df['volume'].values
 
         # Trend indicators
@@ -295,7 +294,7 @@ def main():
     # Print feature statistics
     print("\nFeature Statistics:")
     print(f"  Total features: {len(feature_cols)}")
-    print(f"  Categories:")
+    print("  Categories:")
     categories = {}
     for col in feature_cols:
         category = col.split('_')[0] if '_' in col else 'other'
