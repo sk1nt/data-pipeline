@@ -19,9 +19,10 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 
 # Model paths
-LSTM_MODEL = Path('ml/models/lstm_large_dropout.pt')
-LSTM_CV_MODELS = [Path(f'ml/models/lstm_cv_fold{i}.pt') for i in range(5)]
-LGB_MODEL = Path('ml/models/lightgbm_tuned.pkl')
+# Updated base models trained on October 2025 28-feature dataset
+LSTM_MODEL = Path('ml/models/lstm_production_oct_all.pt')
+LSTM_CV_MODELS = [Path(f'ml/models/lstm_cv_fold{i}_oct_all.pt') for i in range(5)]
+LGB_MODEL = Path('ml/models/lightgbm_oct_all.pkl')
 
 # Dataset
 DATASET = 'output/MNQ_2025-11-11_1s_w60s_h1.npz'
@@ -71,19 +72,25 @@ def load_base_models():
 
     # Load LSTM
     if LSTM_MODEL.exists():
-        lstm_model = LSTMModel(input_dim, hidden_dim=256, num_layers=2, model_type='lstm')
-        lstm_model.load_state_dict(torch.load(LSTM_MODEL, weights_only=True))
-        lstm_model.eval()
-        models['lstm'] = lstm_model
+        try:
+            lstm_model = LSTMModel(input_dim, hidden_dim=256, num_layers=2, model_type='lstm')
+            lstm_model.load_state_dict(torch.load(LSTM_MODEL, weights_only=True))
+            lstm_model.eval()
+            models['lstm'] = lstm_model
+        except Exception as e:
+            print(f"Skipping LSTM_MODEL due to load error: {e}")
 
     # Load CV LSTMs
     cv_models = []
     for cv_model_path in LSTM_CV_MODELS:
         if cv_model_path.exists():
-            model = LSTMModel(input_dim, hidden_dim=256, num_layers=2, model_type='lstm')
-            model.load_state_dict(torch.load(cv_model_path, weights_only=True))
-            model.eval()
-            cv_models.append(model)
+            try:
+                model = LSTMModel(input_dim, hidden_dim=256, num_layers=2, model_type='lstm')
+                model.load_state_dict(torch.load(cv_model_path, weights_only=True))
+                model.eval()
+                cv_models.append(model)
+            except Exception as e:
+                print(f"Skipping CV model {cv_model_path} due to load error: {e}")
     if cv_models:
         models['cv_lstms'] = cv_models
 
@@ -434,14 +441,10 @@ def main():
                     import mlflow_utils
                     mlflow_utils.log_trading_metrics(metrics)
                 except Exception:
-        try:
-            import mlflow_utils
-            mlflow_utils.log_trading_metrics(metrics)
-        except Exception:
-            mlflow.log_metric("net_pnl", metrics['net_pnl'])
-            mlflow.log_metric("win_rate", metrics['win_rate'])
-            mlflow.log_metric("trades_taken", metrics['trades_taken'])
-            mlflow.log_metric("edge", metrics['edge'])
+                    mlflow.log_metric("net_pnl", metrics['net_pnl'])
+                    mlflow.log_metric("win_rate", metrics['win_rate'])
+                    mlflow.log_metric("trades_taken", metrics['trades_taken'])
+                    mlflow.log_metric("edge", metrics['edge'])
 
         except Exception as e:
             print(f"Error with {config_name}: {e}")

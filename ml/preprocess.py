@@ -38,6 +38,11 @@ def labels_from_close(df: pd.Series, horizon: int = 1):
     returns = (future - df) / df
     return returns[:-horizon]
 
+def cost_aware_labels(returns: pd.Series, breakeven: float):
+    """Binarize returns with a profit threshold; ignore tiny moves."""
+    labels = (returns > breakeven).astype(float)
+    return labels
+
 
 def williams_r(high, low, close, period=14):
     hh = high.rolling(period).max()
@@ -79,6 +84,8 @@ if __name__ == '__main__':
     p.add_argument('--bar-size', default=1, type=float, help='Bar size parameter (seconds for time; volume threshold for volume, dollar threshold for dollar bars).')
     p.add_argument('--features', default='open,high,low,close,volume,gex_zero,nq_spot,williams_r,rsi,macd,macd_signal,bb_upper,bb_lower,vwap,bb3_upper,bb3_lower')
     p.add_argument('--label-source', default='close', choices=['close','nq_spot','gex_zero'], help='Use this column to build labels instead of close')
+    p.add_argument('--cost-aware', action='store_true', help='Label positive only if future return exceeds commission+slippage break-even')
+    p.add_argument('--breakeven', type=float, default=0.0042, help='Break-even fraction (commission / price). Default 0.0042=0.42/100')
     args = p.parse_args()
     # Resolve inputs - can be comma-separated list or glob
     import glob
@@ -141,12 +148,14 @@ if __name__ == '__main__':
         df['vwap'] = (df['close'] * df['volume']).cumsum() / df['volume'].cumsum()
     features = [f.strip() for f in args.features.split(',') if f.strip()]
     df = df.sort_values('timestamp').reset_index(drop=True)
-    # Keep only features that exist in the dataframe
-    existing_features = [f for f in features if f in df.columns]
-    missing = set(features) - set(existing_features)
+    # Ensure all requested features exist; fill missing with zeros so shapes stay consistent
+    missing = [f for f in features if f not in df.columns]
     if missing:
-        print('Warning: missing features in parquet and will be skipped:', missing)
-    features = existing_features
+        print('Warning: missing features; filling with zeros:', missing)
+        for f in missing:
+            df[f] = 0.0
+    # Preserve original requested order
+    features = [f for f in features if f in df.columns]
     # Drop rows where requested features or the label source have NaNs to avoid NaNs in windows
     subset_cols = features[:]  # feature subset for dropna
     if args.label_source in df.columns:
@@ -172,7 +181,6 @@ if __name__ == '__main__':
         returns = labels_from_close(df['close'], horizon=args.horizon)
     else:
         # labels from arbitrary numeric series: future - current normalized by current
-        # map aliases
         label_col = args.label_source
         if args.label_source == 'nq_spot' and 'nq_spot' not in df.columns and 'spot_price' in df.columns:
             label_col = 'spot_price'
@@ -186,6 +194,9 @@ if __name__ == '__main__':
     if X.shape[0] == 0:
         raise RuntimeError('Not enough data to create any windows with given window/horizon.')
     y = returns[args.window - 1: args.window - 1 + X.shape[0]]
+    # Cost-aware binarization if requested
+    if args.cost_aware:
+        y = cost_aware_labels(y, args.breakeven)
     # Filter NaN labels and corresponding windows
     import numpy as np
     y_arr = np.asarray(y)
