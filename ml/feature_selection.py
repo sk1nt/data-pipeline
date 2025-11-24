@@ -257,11 +257,23 @@ def evaluate_feature_subset(X, y, feature_indices, subset_name, mlflow_experimen
         mlflow.log_param("commission_cost", commission_cost)
         mlflow.log_param("samples_used", n_samples)
 
-        mlflow.log_metric("win_rate", win_rate)
-        mlflow.log_metric("net_pnl", net_pnl)
-        mlflow.log_metric("trades_taken", trades_taken)
-        mlflow.log_metric("edge", edge)
-        mlflow.log_metric("total_commissions", total_commissions)
+        try:
+            import mlflow_utils
+            mlflow_utils.log_trading_metrics(
+                {
+                    'win_rate': win_rate,
+                    'net_pnl': net_pnl,
+                    'trades_taken': trades_taken,
+                    'edge': edge,
+                    'total_commissions': total_commissions,
+                }
+            )
+        except Exception:
+            mlflow.log_metric("win_rate", win_rate)
+            mlflow.log_metric("net_pnl", net_pnl)
+            mlflow.log_metric("trades_taken", trades_taken)
+            mlflow.log_metric("edge", edge)
+            mlflow.log_metric("total_commissions", total_commissions)
 
     return {
         'subset': subset_name,
