@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Retrain LSTM model and scaler with enhanced GEX features."""
 
-import argparse
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -11,9 +9,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import pickle
-from pathlib import Path
-import mlflow
-import mlflow.pytorch
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
@@ -230,7 +225,7 @@ def retrain_scaler_and_model(X, y, model_path='ml/models/enhanced_gex_model.pt',
     final_recall = recall_score(test_targets, test_preds_binary, zero_division=0)
     final_f1 = f1_score(test_targets, test_preds_binary, zero_division=0)
 
-    print(f"Test Results:")
+    print("Test Results:")
     print(f"  Accuracy: {final_accuracy:.4f}")
     print(f"  Precision: {final_precision:.4f}")
     print(f"  Recall: {final_recall:.4f}")
@@ -259,8 +254,8 @@ if __name__ == '__main__':
     model, scaler, metrics = retrain_scaler_and_model(X, y)
 
     print("\n✅ Retraining complete!")
-    print(f"Model: ml/models/enhanced_gex_model.pt")
-    print(f"Scaler: ml/models/enhanced_gex_scaler.pkl")
+    print("Model: ml/models/enhanced_gex_model.pt")
+    print("Scaler: ml/models/enhanced_gex_scaler.pkl")
     print(f"Features: {X.shape[2]} (enhanced with comprehensive GEX signals)")
     print(f"Test Accuracy: {metrics['accuracy']:.4f}")
     print(f"Test F1 Score: {metrics['f1']:.4f}")

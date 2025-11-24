@@ -112,54 +112,6 @@ def predict_ensemble(models, X, method='average', weights=None, batch_size=1024)
 
         preds.extend(ensemble_pred.astype(int))
 
-def predict_ensemble(models, X, method='average', weights=None, batch_size=1024):
-    lstm_model, lgb_model = models
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    if isinstance(lstm_model, list):
-        # CV models
-        lstm_models = lstm_model
-        for m in lstm_models:
-            m.to(device)
-    else:
-        lstm_model.to(device)
-
-    preds = []
-    for i in range(0, len(X), batch_size):
-        batch = X[i:i+batch_size]
-        batch_tensor = torch.from_numpy(batch).float().to(device)
-
-        if isinstance(lstm_model, list):
-            # Average predictions from CV models
-            lstm_preds = []
-            for m in lstm_models:
-                with torch.no_grad():
-                    logits = m(batch_tensor)
-                    pred = torch.sigmoid(logits).cpu().numpy().flatten()
-                    lstm_preds.append(pred)
-            lstm_pred = np.mean(lstm_preds, axis=0)
-        else:
-            with torch.no_grad():
-                logits = lstm_model(batch_tensor)
-                lstm_pred = torch.sigmoid(logits).cpu().numpy().flatten()
-
-        # LightGBM on flattened batch (since it's tree-based)
-        batch_flat = batch.reshape(batch.shape[0], -1)
-        lgb_pred = lgb_model.predict(batch_flat)
-
-        if method == 'average':
-            if weights is None:
-                weights = [0.5, 0.5]
-            ensemble_pred = (weights[0] * lstm_pred + weights[1] * lgb_pred) > 0.5
-        elif method == 'vote':
-            lstm_binary = (lstm_pred > 0.5).astype(int)
-            lgb_binary = (lgb_pred > 0.5).astype(int)
-            ensemble_pred = (lstm_binary + lgb_binary) >= 1  # majority vote for 2 models
-        else:
-            raise ValueError(f"Unknown method: {method}")
-
-        preds.extend(ensemble_pred.astype(int))
-
     return np.array(preds)
 
 def calculate_trading_metrics(preds, labels, commission_cost=0.42, avg_profit_per_win=10.0):

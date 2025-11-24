@@ -3,8 +3,6 @@
 This sets the `DATASET` global variable in the imported module then calls its main().
 """
 import argparse
-from pathlib import Path
-import importlib
 
 def main():
     p = argparse.ArgumentParser()

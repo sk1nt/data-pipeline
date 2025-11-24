@@ -155,12 +155,12 @@ def main():
     parser.add_argument('--commission_cost', type=float, default=0.42, help='Commission cost per trade')
     args = parser.parse_args()
 
-        try:
-            import mlflow_utils
-            mlflow_utils.ensure_sqlite_tracking()
-        except Exception:
-            pass
-        mlflow.set_experiment(args.mlflow_experiment)
+    try:
+        import mlflow_utils
+        mlflow_utils.ensure_sqlite_tracking()
+    except Exception:
+        pass
+    mlflow.set_experiment(args.mlflow_experiment)
 
     results = []
 
@@ -229,12 +229,25 @@ def main():
                         mlflow.log_param("lstm_weight", weights[0])
                         mlflow.log_param("lgb_weight", weights[1])
 
-                    mlflow.log_metric("accuracy", accuracy)
-                    mlflow.log_metric("trades_taken", trading_metrics['trades_taken'])
-                    mlflow.log_metric("win_rate", trading_metrics['win_rate'])
-                    mlflow.log_metric("net_pnl", trading_metrics['net_pnl'])
-                    mlflow.log_metric("total_commissions", trading_metrics['total_commissions'])
-                    mlflow.log_metric("edge", trading_metrics['edge'])
+                    try:
+                        import mlflow_utils
+                        mlflow_utils.log_trading_metrics(
+                            {
+                                'trades_taken': trading_metrics['trades_taken'],
+                                'net_pnl': trading_metrics['net_pnl'],
+                                'win_rate': trading_metrics['win_rate'],
+                                'edge': trading_metrics['edge'],
+                                'total_commissions': trading_metrics['total_commissions'],
+                            }
+                        )
+                        mlflow.log_metric("accuracy", accuracy)
+                    except Exception:
+                        mlflow.log_metric("accuracy", accuracy)
+                        mlflow.log_metric("trades_taken", trading_metrics['trades_taken'])
+                        mlflow.log_metric("win_rate", trading_metrics['win_rate'])
+                        mlflow.log_metric("net_pnl", trading_metrics['net_pnl'])
+                        mlflow.log_metric("total_commissions", trading_metrics['total_commissions'])
+                        mlflow.log_metric("edge", trading_metrics['edge'])
 
                 # Store results
                 results.append({

@@ -9,7 +9,6 @@ Usage:
 If Optuna is not installed, it falls back to a simple random search.
 """
 import argparse
-import os
 from pathlib import Path
 import datetime
 import numpy as np

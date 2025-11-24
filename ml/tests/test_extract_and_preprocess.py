@@ -1,4 +1,3 @@
-import os
 import subprocess
 from pathlib import Path
 ML_DIR = Path(__file__).resolve().parents[1]

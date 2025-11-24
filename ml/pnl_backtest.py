@@ -9,14 +9,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from datetime import datetime
-import math
 
 from ml.backtest_model import load_model_and_scaler, preprocess_day_data
 try:
     import mlflow
 except Exception:
     mlflow = None
+try:
+    import mlflow_utils
+except Exception:
+    mlflow_utils = None
 
 
 def simulate_price_pnl(closes, preds, sequence_length, horizon=1, contract_value=5.0, commission=0.42, slippage=0.0, position_size=1, stop_loss=None, take_profit=None):
@@ -42,7 +44,6 @@ def simulate_price_pnl(closes, preds, sequence_length, horizon=1, contract_value
         # Evaluate in-between prices for early stop / take profit triggers
         if stop_loss is not None or take_profit is not None:
             path_prices = closes.iloc[idx:exit_idx+1].values
-            triggered = False
             for j in range(1, len(path_prices)):
                 price_at_j = float(path_prices[j])
                 # For long positions check stop_loss first
@@ -50,13 +51,11 @@ def simulate_price_pnl(closes, preds, sequence_length, horizon=1, contract_value
                     stop_price = entry_price - (stop_loss / contract_value)
                     if price_at_j <= stop_price:
                         exit_price = price_at_j
-                        triggered = True
                         break
                 if take_profit is not None:
                     tp_price = entry_price + (take_profit / contract_value)
                     if price_at_j >= tp_price:
                         exit_price = price_at_j
-                        triggered = True
                         break
         # long trade
         gross = (exit_price - entry_price) * contract_value * position_size
@@ -257,19 +256,27 @@ def main():
     total_trades = sum(r['trades'] for r in outputs)
     total_pnl = sum(r['total_pnl'] for r in outputs)
     avg_win_rate = np.mean([r['win_rate'] for r in outputs]) if outputs else 0
+    pnl_series = [t['pnl'] for r in outputs for t in r.get('trades_list', [])]
+    sharpe, max_dd = (0.0, 0.0)
+    if mlflow_utils is not None:
+        try:
+            sharpe, max_dd = mlflow_utils.compute_sharpe_max_drawdown(pnl_series)
+        except Exception:
+            pass
     print("\nSUMMARY")
     print(f"Days processed: {len(outputs)}")
     print(f"Total trades: {total_trades}")
     print(f"Total PnL: ${total_pnl:.2f}")
     print(f"Average win rate: {avg_win_rate:.2%}")
+    print(f"Sharpe (per trade): {sharpe:.3f} | Max drawdown: ${max_dd:.2f}")
 
     # MLflow logging
     if args.mlflow and mlflow is not None:
-        try:
-            import mlflow_utils
-            mlflow_utils.ensure_sqlite_tracking()
-        except Exception:
-            pass
+        if mlflow_utils is not None:
+            try:
+                mlflow_utils.ensure_sqlite_tracking()
+            except Exception:
+                pass
         mlflow.set_experiment(args.experiment)
         with mlflow.start_run(run_name=f"pnl_backtest_{args.instrument}_{','.join(days)}"):
             mlflow.log_param('model', str(model_path))
@@ -281,9 +288,21 @@ def main():
             mlflow.log_param('instrument', args.instrument)
             mlflow.log_param('commission_per_side', args.commission_per_side)
             mlflow.log_param('commission_roundtrip', commission)
-            mlflow.log_metric('total_trades', int(total_trades))
-            mlflow.log_metric('total_pnl', float(total_pnl))
-            mlflow.log_metric('avg_win_rate', float(avg_win_rate))
+            metrics = {
+                'trades_taken': total_trades,
+                'net_pnl': total_pnl,
+                'win_rate': avg_win_rate,
+                'pnl_series': pnl_series,
+            }
+            if mlflow_utils is not None:
+                mlflow_utils.log_trading_metrics(metrics)
+            else:
+                mlflow.log_metric('trades_taken', int(total_trades))
+                mlflow.log_metric('net_pnl', float(total_pnl))
+                mlflow.log_metric('win_rate', float(avg_win_rate))
+                mlflow.log_metric('pnl_per_trade', float(total_pnl) / float(total_trades) if total_trades else 0.0)
+                mlflow.log_metric('sharpe', sharpe)
+                mlflow.log_metric('max_drawdown', max_dd)
 
             # Save CSV summary and log as artifact
             import csv

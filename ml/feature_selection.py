@@ -6,15 +6,11 @@ Uses multiple techniques to identify the most predictive features from the 60-fe
 import argparse
 import numpy as np
 import pandas as pd
-from sklearn.feature_selection import SelectKBest, mutual_info_regression, RFE
+from sklearn.feature_selection import SelectKBest, mutual_info_regression
 from sklearn.linear_model import LassoCV, LogisticRegression
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 import torch
-import torch.nn as nn
-import joblib
-from pathlib import Path
 import mlflow
 import mlflow.pytorch
 import warnings
@@ -68,7 +64,7 @@ def mutual_info_selection(X_flat, y, feature_names, k=20):
     y_binary = (y > 0).astype(int)
 
     selector = SelectKBest(score_func=mutual_info_regression, k=k)
-    X_selected = selector.fit_transform(X_flat, y_binary)
+    selector.fit_transform(X_flat, y_binary)
 
     # Get selected feature indices and scores
     selected_indices = selector.get_support(indices=True)
@@ -79,7 +75,7 @@ def mutual_info_selection(X_flat, y, feature_names, k=20):
 
     print(f"Top {k} features by mutual information:")
     for feat, score in zip(selected_features, selected_scores):
-        print(".4f")
+        print(f"{feat}: {score:.4f}")
 
     return selected_indices, selected_features, scores
 
@@ -108,9 +104,7 @@ def lasso_selection(X_flat, y, feature_names, alpha_range=None):
     print("Top features by coefficient magnitude:")
     sorted_idx = np.argsort(np.abs(selected_coeffs))[::-1]
     for i in sorted_idx[:10]:
-        feat = selected_features[i]
-        coeff = selected_coeffs[i]
-        print(".4f")
+        print(f"{selected_features[i]}: {selected_coeffs[i]:.4f}")
 
     return selected_indices, selected_features, coefficients
 
@@ -131,8 +125,7 @@ def random_forest_importance(X_flat, y, feature_names, n_estimators=100):
 
     print("Top 20 features by Random Forest importance:")
     for i in range(min(20, len(indices))):
-        idx = indices[i]
-        print(".4f")
+        print(f"{feature_names[indices[i]]}: {importances[indices[i]]:.4f}")
 
     return indices, importances
 
@@ -153,7 +146,7 @@ def correlation_analysis(X_flat, y, feature_names, threshold=0.1):
 
     print("Top 20 features by correlation with target:")
     for feat, abs_corr, corr in correlations[:20]:
-        print(".4f")
+        print(f"{feat}: {corr:.4f} (|corr|={abs_corr:.4f})")
 
     # Select features above threshold
     selected = [(feat, corr) for feat, abs_corr, corr in correlations if abs_corr >= threshold]
@@ -219,7 +212,6 @@ def evaluate_feature_subset(X, y, feature_indices, subset_name, mlflow_experimen
     X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
 
     # Use Logistic Regression instead of LSTM for faster evaluation
-    from sklearn.linear_model import LogisticRegression
 
     # Flatten for sklearn
     X_train_flat = X_train[:, -1, :]  # Use last timestep

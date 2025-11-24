@@ -7,25 +7,15 @@ Consumes real-time tick data from Redis and GEX updates to make live trading dec
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
 import pandas as pd
 import torch
-import requests
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-import sys
-
-# Add project root to path
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-if str(PROJECT_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from src.lib.redis_client import RedisClient
 from ml.backtest_model import load_model_and_scaler
-from src.services.redis_timeseries import RedisTimeSeriesClient
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

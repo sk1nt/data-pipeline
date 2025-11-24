@@ -69,7 +69,6 @@ def test_volume_bar_smoke(tmp_path):
     import joblib
     import numpy as np
     from sklearn.model_selection import train_test_split
-    from sklearn.metrics import roc_auc_score
     try:
         from lightgbm import LGBMClassifier
     except Exception:

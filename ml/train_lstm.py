@@ -239,7 +239,8 @@ if __name__ == '__main__':
         # Optionally run PnL backtest and log results
         if args.backtest_days:
             try:
-                import subprocess, re
+                import subprocess
+                import re
                 days = args.backtest_days
                 cmd = [sys.executable, '-m', 'ml.pnl_backtest', '--model', str(resolve_cli_path(args.out)), '--days', days, '--window', '60', '--instrument', 'MNQ', '--threshold', '0.5']
                 res = subprocess.run(cmd, capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[1]))

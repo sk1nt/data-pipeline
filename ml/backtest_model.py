@@ -105,7 +105,7 @@ def load_model_and_scaler(model_path):
                         except Exception:
                             pass
                     return xgb_model, scaler, {'model_type': 'xgboost'}
-                except Exception as e2:
+                except Exception:
                     # If all loading attempts fail, raise the original exception
                     raise RuntimeError(f"Failed to load model at {model_path}: {e}") from e
     elif ext in ('.model', '.txt'):
@@ -285,7 +285,7 @@ def load_enhanced_gex_data():
             pri_1m = priors[1][1] if len(priors) > 1 else 0  
             pri_5m = priors[4][1] if len(priors) > 4 else 0
             return pd.Series([current, pri_1m, pri_5m], index=['max_priors_current', 'max_priors_1m', 'max_priors_5m'])
-        except:
+        except Exception:
             return pd.Series([0, 0, 0], index=['max_priors_current', 'max_priors_1m', 'max_priors_5m'])
     
     # Apply extraction
@@ -932,7 +932,7 @@ def main():
         # GEX regime breakdown
         if args.use_gex_filter and 'gex_regime' in df_results.columns:
             regime_counts = df_results['gex_regime'].value_counts()
-            print(f"\nGEX Regime Distribution:")
+            print("\nGEX Regime Distribution:")
             for regime, count in regime_counts.items():
                 regime_pnl = df_results[df_results['gex_regime'] == regime]['net_pnl'].sum()
                 print(f"  {regime}: {count} days, P&L: ${regime_pnl:.2f}")
@@ -968,6 +968,18 @@ def main():
         }
         all_results.append(ratio_summary)
 
+        status, issues = ('ok', [])
+        try:
+            if 'mlflow_utils' in globals():
+                status, issues = mlflow_utils.validate_trading_metrics(
+                    trades=total_trades,
+                    net_pnl=total_pnl,
+                    win_rate=avg_win_rate,
+                    break_even_win_rate=None,
+                )
+        except Exception:
+            pass
+
         # Log to MLflow for this ratio
         with mlflow.start_run(run_name=f"backtest_ratio_{ratio}_{len(results)}_days{'_gex_filter' if args.use_gex_filter else ''}"):
             mlflow.log_param("model_path", args.model)
@@ -988,6 +1000,9 @@ def main():
             mlflow.log_metric("total_commissions", total_commissions)
             mlflow.log_metric("total_slippage", total_slippage)
             mlflow.log_metric("pnl_per_day", total_pnl / len(results))
+            mlflow.set_tag("status", status)
+            if issues:
+                mlflow.set_tag("validation_issues", ",".join(issues))
 
             # Log daily results
             for i, result in enumerate(results):

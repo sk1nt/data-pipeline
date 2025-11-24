@@ -200,7 +200,6 @@ def train_stacking_model(base_predictions, labels, meta_model_type='logistic'):
         # Scale features for neural network
         scaler = StandardScaler()
         X_meta_train_scaled = scaler.fit_transform(X_meta_train)
-        X_meta_val_scaled = scaler.transform(X_meta_val)
 
         # Convert to binary labels
         y_binary = (y_meta_train > 0).astype(int)
