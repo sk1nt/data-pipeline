@@ -113,6 +113,22 @@ if __name__ == '__main__':
         df['gex_zero'] = df['zero_gamma']
     if 'spot_price' in df.columns and 'nq_spot' not in df.columns:
         df['nq_spot'] = df['spot_price']
+    
+    # Normalize OHLC column names to lowercase for technical indicators
+    column_mapping = {}
+    if 'Open' in df.columns and 'open' not in df.columns:
+        column_mapping['Open'] = 'open'
+    if 'High' in df.columns and 'high' not in df.columns:
+        column_mapping['High'] = 'high'
+    if 'Low' in df.columns and 'low' not in df.columns:
+        column_mapping['Low'] = 'low'
+    if 'Close' in df.columns and 'close' not in df.columns:
+        column_mapping['Close'] = 'close'
+    if 'TotalVolume' in df.columns and 'volume' not in df.columns:
+        column_mapping['TotalVolume'] = 'volume'
+    
+    df = df.rename(columns=column_mapping)
+    
     # Compute technical indicators
     df['williams_r'] = williams_r(df['high'], df['low'], df['close'])
     df['rsi'] = rsi(df['close'])
