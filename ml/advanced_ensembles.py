@@ -430,10 +430,18 @@ def main():
                 mlflow.log_param("threshold", 0.3)
                 mlflow.log_param("commission_cost", args.commission_cost)
 
-                mlflow.log_metric("net_pnl", metrics['net_pnl'])
-                mlflow.log_metric("win_rate", metrics['win_rate'])
-                mlflow.log_metric("trades_taken", metrics['trades_taken'])
-                mlflow.log_metric("edge", metrics['edge'])
+                try:
+                    import mlflow_utils
+                    mlflow_utils.log_trading_metrics(metrics)
+                except Exception:
+        try:
+            import mlflow_utils
+            mlflow_utils.log_trading_metrics(metrics)
+        except Exception:
+            mlflow.log_metric("net_pnl", metrics['net_pnl'])
+            mlflow.log_metric("win_rate", metrics['win_rate'])
+            mlflow.log_metric("trades_taken", metrics['trades_taken'])
+            mlflow.log_metric("edge", metrics['edge'])
 
         except Exception as e:
             print(f"Error with {config_name}: {e}")
@@ -488,10 +496,14 @@ def main():
                     for i, weight in enumerate(weights):
                         mlflow.log_param(f"weight_{model_names[i]}", weight)
 
-                mlflow.log_metric("net_pnl", metrics['net_pnl'])
-                mlflow.log_metric("win_rate", metrics['win_rate'])
-                mlflow.log_metric("trades_taken", metrics['trades_taken'])
-                mlflow.log_metric("edge", metrics['edge'])
+                try:
+                    import mlflow_utils
+                    mlflow_utils.log_trading_metrics(metrics)
+                except Exception:
+                    mlflow.log_metric("net_pnl", metrics['net_pnl'])
+                    mlflow.log_metric("win_rate", metrics['win_rate'])
+                    mlflow.log_metric("trades_taken", metrics['trades_taken'])
+                    mlflow.log_metric("edge", metrics['edge'])
 
         except Exception as e:
             print(f"Error with {config_name}: {e}")

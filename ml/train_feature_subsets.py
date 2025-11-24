@@ -296,10 +296,22 @@ def main():
                 mlflow.log_param("epochs", args.epochs)
                 mlflow.log_param("commission_cost", args.commission_cost)
 
-                mlflow.log_metric("win_rate", metrics['win_rate'])
-                mlflow.log_metric("net_pnl", metrics['net_pnl'])
-                mlflow.log_metric("trades_taken", metrics['trades_taken'])
-                mlflow.log_metric("edge", metrics['edge'])
+                try:
+                    import mlflow_utils
+                    mlflow_utils.log_trading_metrics(
+                        {
+                            'win_rate': metrics['win_rate'],
+                            'net_pnl': metrics['net_pnl'],
+                            'trades_taken': metrics['trades_taken'],
+                            'edge': metrics['edge'],
+                            'total_commissions': metrics['trades_taken'] * args.commission_cost,
+                        }
+                    )
+                except Exception:
+                    mlflow.log_metric("win_rate", metrics['win_rate'])
+                    mlflow.log_metric("net_pnl", metrics['net_pnl'])
+                    mlflow.log_metric("trades_taken", metrics['trades_taken'])
+                    mlflow.log_metric("edge", metrics['edge'])
 
                 mlflow.pytorch.log_model(model, "model")
 
