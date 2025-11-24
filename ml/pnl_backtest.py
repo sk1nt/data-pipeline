@@ -136,7 +136,12 @@ def predict_from_model(model, X, device='cpu', batch_size=256):
 
 def load_day_parquet(path):
     df = pd.read_parquet(path)
-    df['timestamp'] = pd.to_datetime(df['timestamp']) if 'timestamp' in df.columns else df.index
+    # Normalize column casing for compatibility across generated datasets
+    df.columns = [c.lower() for c in df.columns]
+    if 'totalvolume' in df.columns and 'volume' not in df.columns:
+        df = df.rename(columns={'totalvolume': 'volume'})
+    if 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
     if df.index.dtype == 'O':
         df = df.set_index('timestamp')
     return df
