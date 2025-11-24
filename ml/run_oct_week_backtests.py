@@ -1,36 +1,25 @@
 #!/usr/bin/env python3
-"""Run PnL simulation across multiple models for the first full week of a month.
-
-Computes the first Monday of the month and runs Friday-inclusive (Mon-Fri) backtests
-for the `MODELS` defined below.
+"""Run PnL simulation across multiple models for the October week and log results.
 """
-import argparse
 import subprocess
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 
 ML_DIR = Path(__file__).resolve().parent
 MODELS = [
+    # (model_path, scaler, instrument); make absolute paths under ml/models
     (str(ML_DIR / 'models' / 'lstm_trading.pt'), str(ML_DIR / 'models' / 'scaler_13_features.pkl'), 'MNQ'),
     (str(ML_DIR / 'models' / 'lstm_production.pt'), str(ML_DIR / 'models' / 'scaler_13_features.pkl'), 'MNQ'),
     (str(ML_DIR / 'models' / 'enhanced_production.pt'), str(ML_DIR / 'models' / 'enhanced_gex_scaler.pkl'), 'MNQ'),
     (str(ML_DIR / 'models' / 'lightgbm_tuned.pkl'), str(ML_DIR / 'models' / 'scaler_13_features.pkl'), 'MNQ'),
 ]
 
-
-def first_monday(year: int, month: int) -> datetime:
-    d = datetime(year, month, 1)
-    # Monday is weekday() == 0
-    offset = (0 - d.weekday()) % 7
-    return d + timedelta(days=offset)
-
-
-def run_for_model(model_spec, days, experiment, bar_type='time', bar_size=1):
+def run_for_model(model_spec, days):
     model, scaler, instrument = model_spec
     cmd = [
         sys.executable, '-m', 'ml.pnl_backtest',
-        '--mlflow', '--experiment', experiment,
+        '--mlflow', '--experiment', 'oct_week_multi_model',
         '--model', model,
         '--days', ','.join(days),
         '--window', '60',
@@ -39,12 +28,13 @@ def run_for_model(model_spec, days, experiment, bar_type='time', bar_size=1):
     ]
     if scaler:
         cmd += ['--scaler', scaler]
-    cmd += ['--bar-type', bar_type, '--bar-size', str(bar_size)]
+    # Add stop loss and position sizing defaults
     cmd += ['--position_size', '1', '--stop_loss', '100', '--take_profit', '200']
     print('Running:', ' '.join(cmd))
+    # Run from repo root so package imports (`import ml`) resolve correctly in the child process
     res = subprocess.run(cmd, check=False, capture_output=True, text=True, cwd=str(ML_DIR.parent))
     print(res.stdout)
-    # Parse summary to detect catastrophic runs
+    # Parse summary to detect catastrophic runs and surface quickly
     total_pnl = None
     avg_win_rate = None
     total_trades = None
@@ -64,35 +54,25 @@ def run_for_model(model_spec, days, experiment, bar_type='time', bar_size=1):
 
     if total_pnl is not None and total_trades:
         if total_trades > 1000 and total_pnl < -50000:
-            print(f\"❌ Catastrophic PnL detected for {model}: total_pnl={total_pnl}, trades={total_trades}. Stopping remaining runs.\")
+            print(f"❌ Catastrophic PnL detected for {model}: total_pnl={total_pnl}, trades={total_trades}. Stopping remaining runs.")
             return 2
         if avg_win_rate is not None and avg_win_rate < 0.05:
-            print(f\"⚠️  Very low win rate ({avg_win_rate:.2%}) for {model}; consider checking commissions/thresholds.\")
+            print(f"⚠️  Very low win rate ({avg_win_rate:.2%}) for {model}; consider checking commissions/thresholds.")
+
     if res.returncode != 0:
         print('Error:', res.stderr)
     return res.returncode
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--year', type=int, default=2025)
-    parser.add_argument('--month', type=int, required=True)
-    parser.add_argument('--experiment', default=None, help='MLflow experiment name')
-    parser.add_argument('--bar-type', default='time', choices=['time','volume','dollar'], help='Bar type to locate preprocessed files')
-    parser.add_argument('--bar-size', default=1, type=float, help='Bar size parameter to locate preprocessed files')
-    args = parser.parse_args()
-    exp = args.experiment or f'first_week_{args.year}_{args.month:02d}_multi_model'
-
-    start = first_monday(args.year, args.month)
-    days = [(start + timedelta(days=i)).strftime('%Y%m%d') for i in range(5)]
-
-    print(f"First full week for {args.year}-{args.month:02d} starting {start.date()} => days: {days}")
-
+    # Oct week: 2025-10-20 -> 2025-10-24
+    days = [d.strftime('%Y%m%d') for d in [datetime(2025, 10, 20), datetime(2025, 10, 21), datetime(2025, 10, 22), datetime(2025, 10, 23), datetime(2025, 10, 24)]]
     for spec in MODELS:
-        rc = run_for_model(spec, days, exp, bar_type=args.bar_type, bar_size=args.bar_size)
+        rc = run_for_model(spec, days)
+        if rc == 2:
+            break
         if rc != 0:
             print(f"Model {spec[0]} failed with exit code {rc}")
-
 
 if __name__ == '__main__':
     main()
