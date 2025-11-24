@@ -389,6 +389,10 @@ def preprocess_day_data(parquet_file, scaler, sequence_length=60, required_featu
             'spot': 'spot_price'
         })
         print(f"After renaming: {list(df.columns[:10])}")
+        # Normalize timestamp to datetime and index for alignment
+        if 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+            df = df.set_index('timestamp', drop=False)
         
         # For 38-feature models, skip GEX alignment since processed data already has GEX features
         if not use_enhanced_features:
