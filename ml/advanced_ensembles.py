@@ -19,9 +19,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 
 # Model paths
-LSTM_MODEL = Path('models/lstm_large_dropout.pt')
-LSTM_CV_MODELS = [Path(f'models/lstm_cv_fold{i}.pt') for i in range(5)]
-LGB_MODEL = Path('models/lightgbm_tuned.pkl')
+LSTM_MODEL = Path('ml/models/lstm_large_dropout.pt')
+LSTM_CV_MODELS = [Path(f'ml/models/lstm_cv_fold{i}.pt') for i in range(5)]
+LGB_MODEL = Path('ml/models/lightgbm_tuned.pkl')
 
 # Dataset
 DATASET = 'output/MNQ_2025-11-11_1s_w60s_h1.npz'
@@ -511,8 +511,8 @@ def main():
 
     # Save detailed results
     df_results = pd.DataFrame(results)
-    df_results.to_csv('advanced_ensembles_results.csv', index=False)
-    print("\nDetailed results saved to advanced_ensembles_results.csv")
+    df_results.to_csv('ml/advanced_ensembles_results.csv', index=False)
+    print("\nDetailed results saved to ml/advanced_ensembles_results.csv")
 
     print("\n✅ Advanced ensemble testing complete!")
     best = results[0]
