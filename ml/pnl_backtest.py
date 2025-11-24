@@ -140,10 +140,14 @@ def load_day_parquet(path):
     df.columns = [c.lower() for c in df.columns]
     if 'totalvolume' in df.columns and 'volume' not in df.columns:
         df = df.rename(columns={'totalvolume': 'volume'})
+    # Normalize timestamp columns
     if 'timestamp' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-    if df.index.dtype == 'O':
-        df = df.set_index('timestamp')
+        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    if 'gex_timestamp' in df.columns:
+        df['gex_timestamp'] = pd.to_datetime(df['gex_timestamp'], errors='coerce')
+    if 'timestamp' in df.columns:
+        if df.index.dtype == 'O':
+            df = df.set_index('timestamp')
     return df
 
 
