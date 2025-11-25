@@ -210,7 +210,11 @@ class TradeBot(commands.Bot):
                         "**Account Management:**\n"
                         "• `!tt` - Display account summary (balances and basic info)\n"
                         "• `!tt status` - Show trading status (options level, frozen, margin call, etc.)\n"
-                        "• `!tt account <account_id>` - Switch to a different account\n\n"
+                        "• `!tt account <account_id>` - Switch to a different account\n"
+                        "• `!tt accounts` - List all accounts\n"
+                        "• `!tt pos` - Show current positions\n"
+                        "• `!tt future` - List available futures\n"
+                        "• `!tt orders` - Show open orders\n\n"
                         "**Trading Commands:**\n"
                         "• `!tt b/buy <symbol> <tp_ticks> [quantity=1]` - Place market buy order with take profit\n"
                         "• `!tt s/sell <symbol> <tp_ticks> [quantity=1]` - Place market sell order with take profit\n"
@@ -254,6 +258,38 @@ class TradeBot(commands.Bot):
                         await self._send_dm_or_warn(ctx, result)
                     except Exception as e:
                         await self._send_dm_or_warn(ctx, f'Order failed: {e}')
+                    return
+                if subcommand == 'accounts':
+                    accounts = await asyncio.to_thread(self.tastytrade_client.get_accounts)
+                    if accounts:
+                        msg = "**TastyTrade Accounts:**\n" + "\n".join([f"• {acc.get('account-number', 'N/A')}: {acc.get('description', 'N/A')}" for acc in accounts])
+                    else:
+                        msg = "No accounts found."
+                    await self._send_dm_or_warn(ctx, msg)
+                    return
+                if subcommand == 'pos':
+                    positions = await asyncio.to_thread(self.tastytrade_client.get_positions)
+                    if positions:
+                        msg = "**Positions:**\n" + "\n".join([f"• {pos.get('symbol', 'N/A')}: {pos.get('quantity', 0)} @ {pos.get('average-price', 'N/A')}" for pos in positions])
+                    else:
+                        msg = "No positions."
+                    await self._send_dm_or_warn(ctx, msg)
+                    return
+                if subcommand == 'future':
+                    futures = await asyncio.to_thread(self.tastytrade_client.get_futures_list)
+                    if futures:
+                        msg = "**Futures:**\n" + "\n".join([f"• {fut.get('symbol', 'N/A')}: {fut.get('description', 'N/A')}" for fut in futures])
+                    else:
+                        msg = "No futures found."
+                    await self._send_dm_or_warn(ctx, msg)
+                    return
+                if subcommand == 'orders':
+                    orders = await asyncio.to_thread(self.tastytrade_client.get_orders)
+                    if orders:
+                        msg = "**Orders:**\n" + "\n".join([f"• {ord.get('id', 'N/A')}: {ord.get('action', 'N/A')} {ord.get('quantity', 0)} {ord.get('symbol', 'N/A')} @ {ord.get('price', 'N/A')}" for ord in orders])
+                    else:
+                        msg = "No orders."
+                    await self._send_dm_or_warn(ctx, msg)
                     return
                 # Default to summary
                 summary = await self._fetch_tastytrade_summary()

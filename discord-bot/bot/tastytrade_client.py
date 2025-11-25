@@ -61,11 +61,11 @@ class TastyTradeClient:
             self._active_account = account_number
             return True
 
-    def list_account_numbers(self) -> list[str]:
+    def get_accounts(self) -> list:
         with self._lock:
             session = self._ensure_session()
             self._refresh_accounts(session)
-            return list(self._accounts.keys())
+            return [{'account-number': acc.account_number, 'description': acc.nickname or 'N/A'} for acc in self._accounts.values()]
 
     def get_account_summary(self) -> AccountSummary:
         with self._lock:
@@ -208,48 +208,51 @@ class TastyTradeClient:
                 "order-type": "Market",
                 "legs": [
                     {
-                        "instrument-type": "Equity" if not symbol.startswith('/') else "Future",
+                        "instrument-type": "Equity" if not symbol.startswith('/') else "Futures",
                         "symbol": symbol,
                         "quantity": quantity,
-                        "action": action.capitalize()
+                        "action": action.lower()
                     }
                 ]
             }
-            market_order_id = session._post(f'/accounts/{account.id}/orders', market_order_data)['data']['id']
+            market_order_id = session._post(f'/accounts/{account.account_number}/orders', market_order_data)['data']['id']
 
             # Place TP limit order
-            tp_action = 'Buy' if action.upper() == 'SELL' else 'Sell'
+            tp_action = 'buy' if action.upper() == 'SELL' else 'sell'
             tp_order_data = {
                 "time-in-force": "GTC",
                 "order-type": "Limit",
                 "price": tp_price,
                 "legs": [
                     {
-                        "instrument-type": "Equity" if not symbol.startswith('/') else "Future",
+                        "instrument-type": "Equity" if not symbol.startswith('/') else "Futures",
                         "symbol": symbol,
                         "quantity": quantity,
                         "action": tp_action
                     }
                 ]
             }
-            tp_order_id = session._post(f'/accounts/{account.id}/orders', tp_order_data)['data']['id']
+            tp_order_id = session._post(f'/accounts/{account.account_number}/orders', tp_order_data)['data']['id']
 
             return f"Placed market {action.lower()} {quantity} {symbol} (ID: {market_order_id}) and TP at {tp_price:.2f} (ID: {tp_order_id})"
 
     def _normalize_symbol(self, symbol: str) -> str:
         symbol = symbol.upper().strip()
-        if symbol in ['NQ', 'MNQ', 'ES', 'MES']:
-            return f"/{symbol}:XCME"
-        return f"/{symbol}"
+        futures = ['NQ', 'MNQ', 'ES', 'MES', 'RTY', 'YM']
+        if symbol in futures or symbol.startswith('/'):
+            if not symbol.startswith('/'):
+                symbol = f"/{symbol}:XCME"
+            return symbol
+        return symbol
 
     def _get_current_price(self, session, symbol: str) -> float:
         # Get quote
         if symbol.startswith('/'):
             # Future
-            quote_data = session._get(f'/instruments/future-quotes?symbol={symbol}')['data']['items']
+            quote_data = session._get(f'/quotes/futures?symbol={symbol}')['data']['items']
         else:
             # Equity
-            quote_data = session._get(f'/instruments/equity-quotes?symbol={symbol}')['data']['items']
+            quote_data = session._get(f'/quotes/equities?symbol={symbol}')['data']['items']
         if quote_data:
             bid = quote_data[0].get('bid-price')
             ask = quote_data[0].get('ask-price')
