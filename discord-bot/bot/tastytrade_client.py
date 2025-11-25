@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Optional
 from tastytrade.order import NewOrder, Leg, OrderType, OrderTimeInForce, OrderAction, InstrumentType
+from tastytrade.instruments import Future, FutureProduct
 
 try:  # pragma: no cover - optional dependency
     from tastytrade.session import Session
@@ -49,6 +50,8 @@ class TastyTradeClient:
         self._lock = threading.Lock()
         self._accounts: Dict[str, Account] = {}
         self._active_account = default_account
+        self._symbol_cache: Dict[str, Dict[str, any]] = {}
+
 
     @property
     def active_account(self) -> Optional[str]:
@@ -161,9 +164,75 @@ class TastyTradeClient:
             )
         else:
             # refresh if token expired
-            if datetime.now(timezone.utc) >= getattr(self._session, "session_expiration", datetime.now(timezone.utc)):
-                self._session.refresh()
+            try:
+                if datetime.now(timezone.utc) >= getattr(self._session, "session_expiration", datetime.now(timezone.utc)):
+                    self._session.refresh()
+            except Exception as exc:  # pragma: no cover - handle invalid grant
+                msg = str(exc).lower()
+                if 'invalid_grant' in msg or 'grant revoked' in msg or 'invalid_token' in msg:
+                    # Attempt to recreate session once with existing refresh_token
+                    try:
+                        self._session = Session(
+                            provider_secret=self._client_secret,
+                            refresh_token=self._refresh_token,
+                            is_test=self._use_sandbox,
+                        )
+                        return self._session
+                    except Exception:
+                        raise
+                raise
         return self._session
+
+    def set_refresh_token(self, refresh_token: str) -> None:
+        """Replace stored refresh token and reinitialize session with new token."""
+        refresh_token = (refresh_token or '').strip()
+        if not refresh_token:
+            raise ValueError('refresh_token must be provided')
+        self._refresh_token = refresh_token
+        # recreate session using new refresh token
+        self._session = Session(provider_secret=self._client_secret, refresh_token=self._refresh_token, is_test=self._use_sandbox)
+        # clear cached symbols to avoid possible stale mappings
+        self._symbol_cache.clear()
+
+    def _resolve_front_month_symbol(self, product_code: str) -> Optional[str]:
+        """Return front-month TW symbol (like /NQZ5) for a product code like 'NQ'. Caches to avoid repeated API calls."""
+        product_code = product_code.upper().replace('/', '') if product_code else ''
+        if not product_code:
+            return None
+        cache = self._symbol_cache.get(product_code)
+        now = datetime.now(timezone.utc)
+        if cache and (now - cache.get('ts', now)).total_seconds() < 60 * 60:
+            return cache.get('symbol')
+        # Fetch futures by product code
+        try:
+            session = self._ensure_session()
+            # Use Future.get with product_codes to enumerate contracts
+            futures = Future.get(session, symbols=None, product_codes=[product_code])
+            candidates = [f for f in futures if getattr(f, 'is_tradeable', True)]
+            # Prefer next_active_month, then active_month, then the closest expiration
+            selected: Optional[Future] = None
+            for f in candidates:
+                if getattr(f, 'next_active_month', False):
+                    selected = f
+                    break
+            if selected is None:
+                for f in candidates:
+                    if getattr(f, 'active_month', False):
+                        selected = f
+                        break
+            if selected is None and candidates:
+                candidates.sort(key=lambda f: getattr(f, 'expiration_date', datetime.max))
+                selected = candidates[0]
+            if selected:
+                # Use streamer_symbol if available, otherwise symbol
+                sym = getattr(selected, 'streamer_symbol', None) or getattr(selected, 'symbol', None) or ''
+                sym = f"/{sym}" if sym and not sym.startswith('/') else sym
+                self._symbol_cache[product_code] = {'symbol': sym, 'ts': now}
+                return sym
+        except Exception:
+            # if we can't fetch front month, return None and let caller fallback
+            return None
+        return None
 
     def _refresh_accounts(self, session: Session) -> None:
         accounts = Account.get(session)
@@ -272,9 +341,17 @@ class TastyTradeClient:
 
     def _normalize_symbol(self, symbol: str) -> str:
         symbol = symbol.upper().strip()
-        futures = {'NQ': 'NQZ5', 'MNQ': 'MNQZ5', 'ES': 'ESZ5', 'MES': 'MESZ5', 'RTY': 'RTYZ5', 'YM': 'YMZ5'}
+        futures = {'NQ', 'MNQ', 'ES', 'MES', 'RTY', 'YM'}
+        # if already a futures contract like /NQZ5 or NQZ5, ensure leading '/'
+        if symbol.startswith('/'):
+            return symbol
+        # check product codes
         if symbol in futures:
-            return f"/{futures[symbol]}"
+            resolved = self._resolve_front_month_symbol(symbol)
+            if resolved:
+                return resolved
+            # fallback: return a reasonable default with X CME code
+            return f"/{symbol}Z9"
         return symbol
 
     def _get_current_price(self, session, symbol: str) -> float:

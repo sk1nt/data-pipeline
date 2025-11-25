@@ -213,7 +213,7 @@ class TradeBot(commands.Bot):
                         "• `!tt account <account_id>` - Switch to a different account\n"
                         "• `!tt accounts` - List all accounts\n"
                         "• `!tt pos` - Show current positions\n"
-                        "• `!tt future` - List available futures\n"
+                        "• `!tt future` / `!tt futures` - List available futures\n"
                         "• `!tt orders` - Show open orders\n\n"
                         "**Trading Commands:**\n"
                         "• `!tt b/buy <symbol> <tp_ticks> [quantity=1]` - Place market buy order with take profit\n"
@@ -250,10 +250,18 @@ class TradeBot(commands.Bot):
                         except ValueError:
                             await self._send_dm_or_warn(ctx, 'Invalid quantity.')
                             return
+                    # dry-run flag: optional 5th arg 'live' to execute against production
+                    dry_run = True
+                    if len(args) >= 5:
+                        if args[4].lower() in ('live', 'execute', 'send'):
+                            dry_run = False
+                        elif args[4].lower() in ('dry', 'dryrun', 'test'):
+                            dry_run = True
                     try:
                         result = await asyncio.to_thread(
                             self.tastytrade_client.place_market_order_with_tp,
                             symbol, action, quantity, tp_ticks
+                            , dry_run
                         )
                         await self._send_dm_or_warn(ctx, result)
                     except Exception as e:
@@ -275,7 +283,7 @@ class TradeBot(commands.Bot):
                         msg = "No positions."
                     await self._send_dm_or_warn(ctx, msg)
                     return
-                if subcommand == 'future':
+                if subcommand == 'future' or subcommand == 'futures':
                     futures = await asyncio.to_thread(self.tastytrade_client.get_futures_list)
                     if futures:
                         msg = "**Futures:**\n" + "\n".join([f"• {fut.get('symbol', 'N/A')}: {fut.get('description', 'N/A')}" for fut in futures])
@@ -284,6 +292,17 @@ class TradeBot(commands.Bot):
                     await self._send_dm_or_warn(ctx, msg)
                     return
                 if subcommand == 'orders':
+                                    if subcommand == 'auth' and len(args) >= 3 and args[1].lower() == 'refresh':
+                                        # !tt auth refresh <token>
+                                        if not await self._ensure_privileged(ctx):
+                                            return
+                                        new_token = args[2]
+                                        try:
+                                            await asyncio.to_thread(self.tastytrade_client.set_refresh_token, new_token)
+                                            await self._send_dm_or_warn(ctx, 'TastyTrade refresh token updated; session reinitialized.')
+                                        except Exception as exc:
+                                            await self._send_dm_or_warn(ctx, f'Failed to update refresh token: {exc}')
+                                        return
                     orders = await asyncio.to_thread(self.tastytrade_client.get_orders)
                     if orders:
                         msg = "**Orders:**\n" + "\n".join([f"• {ord.get('id', 'N/A')}: {ord.get('action', 'N/A')} {ord.get('quantity', 0)} {ord.get('symbol', 'N/A')} @ {ord.get('price', 'N/A')}" for ord in orders])
