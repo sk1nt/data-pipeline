@@ -1071,6 +1071,34 @@ async def lookup_gex_snapshot(symbol: str) -> Dict[str, Any]:
     }
 
 
+@app.get("/sc")
+async def sierra_chart_bridge(symbol: str = "NQ_NDX") -> Dict[str, Any]:
+    """Expose the latest sum_gex_vol for Sierra Chart polling."""
+    normalized = symbol.upper()
+    redis_conn = _get_redis_client()
+    key = f"{SNAPSHOT_KEY_PREFIX}{normalized}"
+    raw = redis_conn.get(key)
+    if not raw:
+        raise HTTPException(status_code=404, detail=f"Snapshot not available for {normalized}")
+    try:
+        snapshot = json.loads(raw)
+    except Exception:
+        try:
+            snapshot = json.loads(raw.decode("utf-8"))
+        except Exception:
+            snapshot = {"raw": raw.decode("utf-8", errors="replace")}
+    if not isinstance(snapshot, dict):
+        raise HTTPException(status_code=502, detail="Snapshot payload malformed")
+    value = snapshot.get("sum_gex_vol")
+    if value is None:
+        raise HTTPException(status_code=404, detail=f"sum_gex_vol missing for {normalized}")
+    return {
+        "symbol": normalized,
+        "sum_gex_vol": value,
+        "timestamp": snapshot.get("timestamp"),
+    }
+
+
 async def _trigger_queue_processing() -> None:
     """Kick processing of any queued historical imports on a worker thread."""
     try:
