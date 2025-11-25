@@ -5,6 +5,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Optional
+from tastytrade.order import NewOrder, Leg, OrderType, OrderTimeInForce, OrderAction, InstrumentType
 
 try:  # pragma: no cover - optional dependency
     from tastytrade.session import Session
@@ -36,12 +37,14 @@ class TastyTradeClient:
         refresh_token: str,
         default_account: Optional[str] = None,
         use_sandbox: bool = False,
+        dry_run: bool = True,
     ) -> None:
         if Session is None or Account is None:
             raise RuntimeError("tastytrade package is not installed")
         self._client_secret = client_secret
         self._refresh_token = refresh_token
         self._use_sandbox = use_sandbox
+        self._dry_run = dry_run
         self._session: Optional[Session] = None
         self._lock = threading.Lock()
         self._accounts: Dict[str, Account] = {}
@@ -69,8 +72,19 @@ class TastyTradeClient:
 
     def get_account_summary(self) -> AccountSummary:
         with self._lock:
-            session = self._ensure_session()
-            account = self._ensure_active_account(session)
+            try:
+                session = self._ensure_session()
+                account = self._ensure_active_account(session)
+            except Exception as exc:
+                msg = str(exc)
+                print(f"TastyTrade session/account init failed: {msg}")
+                if 'invalid_grant' in msg or 'Grant revoked' in msg or 'invalid_token' in msg:
+                    raise RuntimeError(
+                        "TastyTrade authentication failed (refresh token invalid or revoked). "
+                        "Run `python scripts/get_tastytrade_refresh_token.py --sandbox` to retrieve a new token, "
+                        "update your .env with TASTYTRADE_REFRESH_TOKEN, and restart the bot."
+                    )
+                raise
             balances = account.get_balances(session)
             bp = self._pick_buying_power(balances)
             return AccountSummary(
@@ -107,7 +121,7 @@ class TastyTradeClient:
             session = self._ensure_session()
             account = self._ensure_active_account(session)
             # Use the session to make API call to trading-status endpoint
-            return session._get(f'/accounts/{account.id}/trading-status')
+            return session._get(f'/accounts/{account.account_number}/trading-status')
 
     def get_positions(self) -> list:
         with self._lock:
@@ -124,8 +138,15 @@ class TastyTradeClient:
             return [order.__dict__ for order in orders]
 
     def get_futures_list(self) -> list:
-        # Return a list of common futures symbols
-        return ['/NQ:XCME', '/ES:XCME', '/MNQ:XCME', '/MES:XCME', '/RTY:XCME', '/YM:XCME']
+        # Return a list of common futures symbols with descriptions
+        return [
+            {'symbol': '/NQ:XCME', 'description': 'E-mini Nasdaq-100 Futures'},
+            {'symbol': '/ES:XCME', 'description': 'E-mini S&P 500 Futures'},
+            {'symbol': '/MNQ:XCME', 'description': 'Micro E-mini Nasdaq-100 Futures'},
+            {'symbol': '/MES:XCME', 'description': 'Micro E-mini S&P 500 Futures'},
+            {'symbol': '/RTY:XCME', 'description': 'E-mini Russell 2000 Futures'},
+            {'symbol': '/YM:XCME', 'description': 'E-mini Dow Futures'},
+        ]
 
     # ------------------------------------------------------------------
     # internal helpers
@@ -184,6 +205,7 @@ class TastyTradeClient:
         quantity: int,
         tp_ticks: float,
         tick_size: float = 0.25,
+        dry_run: Optional[bool] = None,
     ) -> str:
         """Place a market order and a TP limit order."""
         with self._lock:
@@ -192,6 +214,9 @@ class TastyTradeClient:
 
             # Normalize symbol
             symbol = self._normalize_symbol(symbol)
+
+            # Determine instrument type enum
+            inst_type = InstrumentType.FUTURE if symbol.startswith('/') else InstrumentType.EQUITY
 
             # Get current price (approximate from quote)
             current_price = self._get_current_price(session, symbol)
@@ -202,47 +227,54 @@ class TastyTradeClient:
             else:
                 tp_price = current_price - (tp_ticks * tick_size)
 
-            # Place market order
-            market_order_data = {
-                "time-in-force": "Day",
-                "order-type": "Market",
-                "legs": [
-                    {
-                        "instrument-type": "Equity" if not symbol.startswith('/') else "Futures",
-                        "symbol": symbol,
-                        "quantity": quantity,
-                        "action": action.lower()
-                    }
-                ]
-            }
-            market_order_id = session._post(f'/accounts/{account.account_number}/orders', market_order_data)['data']['id']
+            # Build Leg and NewOrder using SDK models
+            leg_action = OrderAction.BUY if action.upper() == 'BUY' else OrderAction.SELL
+            leg = Leg(instrument_type=inst_type, symbol=symbol, action=leg_action, quantity=quantity)
+            market_order = NewOrder(time_in_force=OrderTimeInForce.DAY, order_type=OrderType.MARKET, legs=[leg])
+            print(f"Sending market NewOrder (dry-run={self._use_sandbox}): {market_order}")
+            # Use account.place_order to post the typed model (dry-run in sandbox)
+            try:
+                eff_dry = self._dry_run if dry_run is None else bool(dry_run)
+                placed_market = account.place_order(session, market_order, dry_run=eff_dry)
+                market_order_id = getattr(placed_market, 'id', None)
+            except Exception as exc:
+                msg = str(exc)
+                print(f"Market order failed: {msg}")
+                if 'invalid_grant' in msg or 'Grant revoked' in msg or 'invalid_token' in msg:
+                    raise RuntimeError(
+                        "TastyTrade authentication failed (refresh token invalid or revoked). "
+                        "Run `python scripts/get_tastytrade_refresh_token.py --sandbox` to retrieve a new token, "
+                        "update your .env with TASTYTRADE_REFRESH_TOKEN, and restart the bot."
+                    )
+                raise
 
             # Place TP limit order
-            tp_action = 'buy' if action.upper() == 'SELL' else 'sell'
-            tp_order_data = {
-                "time-in-force": "GTC",
-                "order-type": "Limit",
-                "price": tp_price,
-                "legs": [
-                    {
-                        "instrument-type": "Equity" if not symbol.startswith('/') else "Futures",
-                        "symbol": symbol,
-                        "quantity": quantity,
-                        "action": tp_action
-                    }
-                ]
-            }
-            tp_order_id = session._post(f'/accounts/{account.account_number}/orders', tp_order_data)['data']['id']
+            tp_action = OrderAction.BUY if action.upper() == 'SELL' else OrderAction.SELL
+            tp_leg = Leg(instrument_type=inst_type, symbol=symbol, action=tp_action, quantity=quantity)
+            tp_order = NewOrder(time_in_force=OrderTimeInForce.GTC, order_type=OrderType.LIMIT, price=tp_price, legs=[tp_leg])
+            print(f"Sending TP NewOrder (dry-run={self._use_sandbox}): {tp_order}")
+            try:
+                placed_tp = account.place_order(session, tp_order, dry_run=eff_dry)
+                tp_order_id = getattr(placed_tp, 'id', None)
+            except Exception as exc:
+                msg = str(exc)
+                print(f"TP order failed: {msg}")
+                if 'invalid_grant' in msg or 'Grant revoked' in msg or 'invalid_token' in msg:
+                    raise RuntimeError(
+                        "TastyTrade authentication failed (refresh token invalid or revoked). "
+                        "Run `python scripts/get_tastytrade_refresh_token.py --sandbox` to retrieve a new token, "
+                        "update your .env with TASTYTRADE_REFRESH_TOKEN, and restart the bot."
+                    )
+                raise
+            # No additional outer error handling past TP order except
 
             return f"Placed market {action.lower()} {quantity} {symbol} (ID: {market_order_id}) and TP at {tp_price:.2f} (ID: {tp_order_id})"
 
     def _normalize_symbol(self, symbol: str) -> str:
         symbol = symbol.upper().strip()
-        futures = ['NQ', 'MNQ', 'ES', 'MES', 'RTY', 'YM']
-        if symbol in futures or symbol.startswith('/'):
-            if not symbol.startswith('/'):
-                symbol = f"/{symbol}:XCME"
-            return symbol
+        futures = {'NQ': 'NQZ5', 'MNQ': 'MNQZ5', 'ES': 'ESZ5', 'MES': 'MESZ5', 'RTY': 'RTYZ5', 'YM': 'YMZ5'}
+        if symbol in futures:
+            return f"/{futures[symbol]}"
         return symbol
 
     def _get_current_price(self, session, symbol: str) -> float:
