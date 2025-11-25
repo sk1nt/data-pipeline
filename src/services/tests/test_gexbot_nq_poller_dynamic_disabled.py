@@ -36,18 +36,20 @@ class FakeRedisClient:
 
 
 @pytest.mark.asyncio
-async def test_dynamic_symbol_sync_fetches_snapshot_and_persists():
-    # Setup a poller with a fake redis; base symbols exclude 'META'
-    settings = GEXBotPollerSettings(api_key='apikey', symbols=['NQ_NDX', 'ES_SPX'])
+async def test_nq_poller_ignores_dynamic_enrollment():
+    settings = GEXBotPollerSettings(api_key='apikey', symbols=['NQ_NDX'])
     fake_redis = FakeRedisClient()
     poller = GEXBotPoller(settings, redis_client=fake_redis, ts_client=None)
+
+    # add_symbol_for_day no longer exists
+    assert not hasattr(poller, 'add_symbol_for_day')
 
     # Add dynamic key externally to simulate other process writing it
     expires_at = (datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(hours=24)).isoformat()
     dynamic_payload = [{'symbol': 'META', 'expires_at': expires_at}]
     fake_redis.set_cached('gexbot:symbols:dynamic', dynamic_payload, ttl_seconds=86400)
 
-    # Monkeypatch _fetch_symbol to return a synthetic snapshot
+    # Monkeypatch _fetch_symbol to return a snapshot if called
     async def fake_fetch_symbol(session, symbol):
         now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
         return {
@@ -67,8 +69,11 @@ async def test_dynamic_symbol_sync_fetches_snapshot_and_persists():
 
     poller._fetch_symbol = fake_fetch_symbol
 
-    # Dynamic sync removed: _sync_dynamic_symbols is a no-op and should not fetch META
+    # Run sync - poller should not fetch dynamic symbols
+    # _sync_dynamic_symbols is now a no-op and should not fetch external dynamic symbols
     await poller._sync_dynamic_symbols(None)
+
+    # The poller should not have fetched META
     assert 'META' not in poller.latest
-    snapshot_key = 'gex:snapshot:META'
-    assert snapshot_key not in fake_redis._store
+    assert 'gex:snapshot:META' not in fake_redis._store
+    assert 'META' not in poller._dynamic_symbols

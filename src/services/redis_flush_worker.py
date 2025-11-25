@@ -32,7 +32,6 @@ class FlushWorkerSettings:
     parquet_dir: Path = Path(settings.timeseries_parquet_dir)
     gex_snapshot_db: Path = settings.data_path / "gex_data.db"
     gex_snapshot_prefix: str = "gex:snapshot:"
-    gex_dynamic_key: str = "gexbot:symbols:dynamic"
     tick_db_path: Path = Path(settings.tick_db_path)
     depth_db_path: Path = Path(settings.depth_db_path)
     tick_parquet_dir: Path = Path(settings.tick_parquet_dir)
@@ -537,28 +536,7 @@ class RedisFlushWorker:
 
     def _collect_gex_symbols(self) -> Set[str]:
         symbols = {s.strip().upper() for s in settings.gex_symbol_list if s.strip()}
-        dynamic_raw = self.redis_client.client.get(self.settings.gex_dynamic_key)
-        if dynamic_raw:
-            try:
-                decoded = dynamic_raw.decode() if isinstance(dynamic_raw, (bytes, bytearray)) else dynamic_raw
-                dynamic_symbols = json.loads(decoded)
-                if isinstance(dynamic_symbols, list):
-                    now = datetime.utcnow().replace(tzinfo=timezone.utc)
-                    for entry in dynamic_symbols:
-                        if isinstance(entry, str):
-                            symbols.add(entry.upper())
-                            continue
-                        if isinstance(entry, dict):
-                            raw_symbol = entry.get("symbol")
-                            if not raw_symbol:
-                                continue
-                            expires_raw = entry.get("expires_at") or entry.get("expiry")
-                            expires_at = self._parse_dynamic_expiry(expires_raw)
-                            if expires_at and expires_at <= now:
-                                continue
-                            symbols.add(str(raw_symbol).upper())
-            except json.JSONDecodeError:
-                LOGGER.warning("Invalid dynamic symbol cache; ignoring")
+        # Dynamic symbol enrollment no longer used — only use configured symbol list
         return symbols
 
     @staticmethod

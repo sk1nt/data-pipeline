@@ -1,6 +1,0 @@
-{
-  "tcn": "Epoch 7 val_acc=0.8840\nEpoch 8 val_acc=0.8840\nEpoch 9 val_acc=0.8840\nEpoch 10 val_acc=0.8840\nSaved TCN model to models/tcn_compare_20251119T004912.pt",
-  "transformer": "Epoch 7 val_acc=0.8720\nEpoch 8 val_acc=0.8720\nEpoch 9 val_acc=0.8720\nEpoch 10 val_acc=0.8720\nSaved Transformer model to models/transformer_compare_20251119T004912.pt",
-  "lstm": "Epoch 7/10 val_acc=0.9062\nEpoch 8/10 val_acc=0.9062\nEpoch 9/10 val_acc=0.9062\nEpoch 10/10 val_acc=0.9062\nSaved LSTM model to models/lstm_compare_20251119T004912.pt",
-  "lightgbm": "AUC: 0.7718404198553945 ACC: 0.9061421670117322\nSaved model to models/lightgbm_compare_20251119T004912.pkl"
-}

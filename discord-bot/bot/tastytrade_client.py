@@ -7,10 +7,11 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 try:  # pragma: no cover - optional dependency
-    from tastytrade import OAuthSession
+    from tastytrade.session import Session
     from tastytrade.account import Account, AccountBalance
-except ImportError:  # pragma: no cover
-    OAuthSession = None  # type: ignore
+except ImportError as exc:  # pragma: no cover - optional dependency
+    print(f"ImportError in tastytrade_client: {exc}")
+    Session = None  # type: ignore
     Account = None  # type: ignore
     AccountBalance = None  # type: ignore
 
@@ -36,12 +37,12 @@ class TastyTradeClient:
         default_account: Optional[str] = None,
         use_sandbox: bool = False,
     ) -> None:
-        if OAuthSession is None or Account is None:
+        if Session is None or Account is None:
             raise RuntimeError("tastytrade package is not installed")
         self._client_secret = client_secret
         self._refresh_token = refresh_token
         self._use_sandbox = use_sandbox
-        self._session: Optional[OAuthSession] = None
+        self._session: Optional[Session] = None
         self._lock = threading.Lock()
         self._accounts: Dict[str, Account] = {}
         self._active_account = default_account
@@ -101,13 +102,20 @@ class TastyTradeClient:
             }
             return overview
 
+    def get_trading_status(self) -> Dict[str, any]:
+        with self._lock:
+            session = self._ensure_session()
+            account = self._ensure_active_account(session)
+            # Use the session to make API call to trading-status endpoint
+            return session._get(f'/accounts/{account.id}/trading-status')
+
     # ------------------------------------------------------------------
     # internal helpers
 
-    def _ensure_session(self) -> OAuthSession:
-        assert OAuthSession is not None  # for type checkers
+    def _ensure_session(self) -> Session:
+        assert Session is not None  # for type checkers
         if self._session is None:
-            self._session = OAuthSession(
+            self._session = Session(
                 provider_secret=self._client_secret,
                 refresh_token=self._refresh_token,
                 is_test=self._use_sandbox,
@@ -118,13 +126,13 @@ class TastyTradeClient:
                 self._session.refresh()
         return self._session
 
-    def _refresh_accounts(self, session: OAuthSession) -> None:
+    def _refresh_accounts(self, session: Session) -> None:
         accounts = Account.get(session)
         self._accounts = {acct.account_number: acct for acct in accounts}
         if not self._active_account and accounts:
             self._active_account = accounts[0].account_number
 
-    def _ensure_active_account(self, session: OAuthSession) -> Account:
+    def _ensure_active_account(self, session: Session) -> Account:
         self._refresh_accounts(session)
         if not self._active_account or self._active_account not in self._accounts:
             if not self._accounts:
@@ -141,14 +149,93 @@ class TastyTradeClient:
         except (TypeError, ValueError):
             return 0.0
 
-    def _pick_buying_power(self, balances: AccountBalance) -> float:
-        for attr in (
-            "available_trading_funds",
-            "equity_buying_power",
-            "derivative_buying_power",
-            "day_trading_buying_power",
-        ):
-            value = getattr(balances, attr, None)
-            if value is not None:
-                return self._to_float(value)
-        return self._to_float(balances.net_liquidating_value)
+    @staticmethod
+    def _pick_buying_power(balances) -> float:
+        # Prioritize derivative buying power for futures/options
+        return (
+            balances.derivative_buying_power or
+            balances.equity_buying_power or
+            balances.day_trading_buying_power or
+            0.0
+        )
+
+    def place_market_order_with_tp(
+        self,
+        symbol: str,
+        action: str,
+        quantity: int,
+        tp_ticks: float,
+        tick_size: float = 0.25,
+    ) -> str:
+        """Place a market order and a TP limit order."""
+        with self._lock:
+            session = self._ensure_session()
+            account = self._ensure_active_account(session)
+
+            # Normalize symbol
+            symbol = self._normalize_symbol(symbol)
+
+            # Get current price (approximate from quote)
+            current_price = self._get_current_price(session, symbol)
+
+            # Calculate TP price
+            if action.upper() == 'BUY':
+                tp_price = current_price + (tp_ticks * tick_size)
+            else:
+                tp_price = current_price - (tp_ticks * tick_size)
+
+            # Place market order
+            market_order_data = {
+                "time-in-force": "Day",
+                "order-type": "Market",
+                "legs": [
+                    {
+                        "instrument-type": "Equity" if not symbol.startswith('/') else "Future",
+                        "symbol": symbol,
+                        "quantity": quantity,
+                        "action": action.capitalize()
+                    }
+                ]
+            }
+            market_order_id = session._post(f'/accounts/{account.id}/orders', market_order_data)['data']['id']
+
+            # Place TP limit order
+            tp_action = 'Buy' if action.upper() == 'SELL' else 'Sell'
+            tp_order_data = {
+                "time-in-force": "GTC",
+                "order-type": "Limit",
+                "price": tp_price,
+                "legs": [
+                    {
+                        "instrument-type": "Equity" if not symbol.startswith('/') else "Future",
+                        "symbol": symbol,
+                        "quantity": quantity,
+                        "action": tp_action
+                    }
+                ]
+            }
+            tp_order_id = session._post(f'/accounts/{account.id}/orders', tp_order_data)['data']['id']
+
+            return f"Placed market {action.lower()} {quantity} {symbol} (ID: {market_order_id}) and TP at {tp_price:.2f} (ID: {tp_order_id})"
+
+    def _normalize_symbol(self, symbol: str) -> str:
+        symbol = symbol.upper().strip()
+        if symbol in ['NQ', 'MNQ', 'ES', 'MES']:
+            return f"/{symbol}:XCME"
+        return f"/{symbol}"
+
+    def _get_current_price(self, session, symbol: str) -> float:
+        # Get quote
+        if symbol.startswith('/'):
+            # Future
+            quote_data = session._get(f'/instruments/future-quotes?symbol={symbol}')['data']['items']
+        else:
+            # Equity
+            quote_data = session._get(f'/instruments/equity-quotes?symbol={symbol}')['data']['items']
+        if quote_data:
+            bid = quote_data[0].get('bid-price')
+            ask = quote_data[0].get('ask-price')
+            if bid and ask:
+                return (bid + ask) / 2
+        # Fallback
+        return 4000.0

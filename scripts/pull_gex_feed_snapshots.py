@@ -299,7 +299,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--redis-password", default=os.getenv("REDIS_PASSWORD"))
     parser.add_argument(
         "--redis-cache-key",
-        default="gex:nq_ndx:latest",
+        default="gex:snapshot:NQ_NDX",
         help="Key TradeBot polls first (default: %(default)s)",
     )
     parser.add_argument(

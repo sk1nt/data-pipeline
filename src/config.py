@@ -14,123 +14,150 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 load_dotenv(".env")
 
 
+def env_field(*env_names: str, default: Any = None, **kwargs: Any):
+    """Map environment variables to BaseSettings fields without deprecated env= usage."""
+    if not env_names:
+        raise ValueError("env_field requires at least one environment variable name")
+    kwargs["validation_alias"] = AliasChoices(*env_names)
+    return Field(default=default, **kwargs)
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # Server settings
-    host: str = Field(default="0.0.0.0", env="HOST")
-    port: int = Field(default=8000, env="PORT")
-    reload: bool = Field(default=False, env="RELOAD")
+    host: str = env_field("HOST", default="0.0.0.0")
+    port: int = env_field("PORT", default=8000)
+    reload: bool = env_field("RELOAD", default=False)
 
     # Database settings
-    data_dir: str = Field(default="data", env="DATA_DIR")
+    data_dir: str = env_field("DATA_DIR", default="data")
 
     # Logging settings
-    log_level: str = Field(default="INFO", env="LOG_LEVEL")
-    log_file: Optional[str] = Field(default=None, env="LOG_FILE")
+    log_level: str = env_field("LOG_LEVEL", default="INFO")
+    log_file: Optional[str] = env_field("LOG_FILE")
 
     # Rate limiting
-    rate_limit_gex: str = Field(default="100/minute", env="RATE_LIMIT_GEX")
-    rate_limit_history: str = Field(default="10/minute", env="RATE_LIMIT_HISTORY")
-    rate_limit_webhook: str = Field(default="100/minute", env="RATE_LIMIT_WEBHOOK")
-    rate_limit_health: str = Field(default="60/minute", env="RATE_LIMIT_HEALTH")
+    rate_limit_gex: str = env_field("RATE_LIMIT_GEX", default="100/minute")
+    rate_limit_history: str = env_field("RATE_LIMIT_HISTORY", default="10/minute")
+    rate_limit_webhook: str = env_field("RATE_LIMIT_WEBHOOK", default="100/minute")
+    rate_limit_health: str = env_field("RATE_LIMIT_HEALTH", default="60/minute")
 
     # CORS settings
-    cors_origins: str = Field(default="*", env="CORS_ORIGINS")
+    cors_origins: str = env_field("CORS_ORIGINS", default="*")
 
     # Data pipeline settings
-    max_import_attempts: int = Field(default=3, env="MAX_IMPORT_ATTEMPTS")
-    import_timeout: int = Field(default=300, env="IMPORT_TIMEOUT")  # seconds
-    staging_dir: str = Field(default="data/source/gexbot", env="STAGING_DIR")
-    parquet_dir: str = Field(default="data/parquet/gexbot", env="PARQUET_DIR")
-    redis_retention_ms: int = Field(default=86_400_000, env="REDIS_RETENTION_MS")
-    flush_interval_seconds: int = Field(default=600, env="FLUSH_INTERVAL_SECONDS")
-    flush_schedule_mode: str = Field(default="daily", env="FLUSH_SCHEDULE_MODE")
-    flush_daily_time: str = Field(default="00:30", env="FLUSH_DAILY_TIME")
-    redis_host: str = Field(default="localhost", env="REDIS_HOST")
-    redis_port: int = Field(default=6379, env="REDIS_PORT")
-    redis_db: int = Field(default=0, env="REDIS_DB")
-    redis_password: Optional[str] = Field(default=None, env="REDIS_PASSWORD")
-    timeseries_db_path: str = Field(default="data/redis_timeseries.db", env="TIMESERIES_DB_PATH")
-    timeseries_parquet_dir: str = Field(default="data/parquet/timeseries", env="TIMESERIES_PARQUET_DIR")
-    tick_db_path: str = Field(default="data/tick_data.db", env="TICK_DB_PATH")
-    depth_db_path: str = Field(default="data/tick_mbo_data.db", env="DEPTH_DB_PATH")
-    tick_parquet_dir: str = Field(default="data/parquet/tick", env="TICK_PARQUET_DIR")
-    depth_parquet_dir: str = Field(default="data/parquet/depth", env="DEPTH_PARQUET_DIR")
-    service_control_token: Optional[str] = Field(default=None, env="SERVICE_CONTROL_TOKEN")
+    max_import_attempts: int = env_field("MAX_IMPORT_ATTEMPTS", default=3)
+    import_timeout: int = env_field("IMPORT_TIMEOUT", default=300)  # seconds
+    staging_dir: str = env_field("STAGING_DIR", default="data/source/gexbot")
+    parquet_dir: str = env_field("PARQUET_DIR", default="data/parquet/gexbot")
+    redis_retention_ms: int = env_field("REDIS_RETENTION_MS", default=86_400_000)
+    flush_interval_seconds: int = env_field("FLUSH_INTERVAL_SECONDS", default=600)
+    flush_schedule_mode: str = env_field("FLUSH_SCHEDULE_MODE", default="daily")
+    flush_daily_time: str = env_field("FLUSH_DAILY_TIME", default="00:30")
+    redis_host: str = env_field("REDIS_HOST", default="localhost")
+    redis_port: int = env_field("REDIS_PORT", default=6379)
+    redis_db: int = env_field("REDIS_DB", default=0)
+    redis_password: Optional[str] = env_field("REDIS_PASSWORD")
+    timeseries_db_path: str = env_field("TIMESERIES_DB_PATH", default="data/redis_timeseries.db")
+    timeseries_parquet_dir: str = env_field(
+        "TIMESERIES_PARQUET_DIR",
+        default="data/parquet/timeseries",
+    )
+    tick_db_path: str = env_field("TICK_DB_PATH", default="data/tick_data.db")
+    depth_db_path: str = env_field("DEPTH_DB_PATH", default="data/tick_mbo_data.db")
+    tick_parquet_dir: str = env_field("TICK_PARQUET_DIR", default="data/parquet/tick")
+    depth_parquet_dir: str = env_field("DEPTH_PARQUET_DIR", default="data/parquet/depth")
+    service_control_token: Optional[str] = env_field("SERVICE_CONTROL_TOKEN")
 
     # Discord bot control
-    discord_bot_enabled: bool = Field(default=False, env="DISCORD_BOT_ENABLED")
+    discord_bot_enabled: bool = env_field("DISCORD_BOT_ENABLED", default=False)
 
     # TastyTrade DXLink streamer
-    tastytrade_stream_enabled: bool = Field(default=False, env="TASTYTRADE_STREAM_ENABLED")
-    tastytrade_symbols: str = Field(default="MES,MNQ,NQ,SPY,QQQ,VIX", env="TASTYTRADE_STREAM_SYMBOLS")
-    tastytrade_depth_levels: int = Field(default=40, env="TASTYTRADE_DEPTH_LEVELS")
-    tastytrade_client_id: Optional[str] = Field(default=None, env="TASTYTRADE_CLIENT_ID")
-    tastytrade_client_secret: Optional[str] = Field(default=None, env="TASTYTRADE_CLIENT_SECRET")
-    tastytrade_refresh_token: Optional[str] = Field(default=None, env="TASTYTRADE_REFRESH_TOKEN")
+    tastytrade_stream_enabled: bool = env_field("TASTYTRADE_STREAM_ENABLED", default=False)
+    tastytrade_symbols: str = env_field(
+        "TASTYTRADE_STREAM_SYMBOLS",
+        default="MES,MNQ,NQ,SPY,QQQ,VIX",
+    )
+    tastytrade_depth_levels: int = env_field("TASTYTRADE_DEPTH_LEVELS", default=40)
+    tastytrade_client_id: Optional[str] = env_field("TASTYTRADE_CLIENT_ID")
+    tastytrade_client_secret: Optional[str] = env_field("TASTYTRADE_CLIENT_SECRET")
+    tastytrade_refresh_token: Optional[str] = env_field("TASTYTRADE_REFRESH_TOKEN")
 
     # GEXBot poller
     gex_polling_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("GEXBOT_POLLING_ENABLED"),
     )
-    gex_poll_interval_seconds: int = Field(default=60, env="GEXBOT_POLL_INTERVAL_SECONDS")
-    gex_poll_rth_interval_seconds: int = Field(
-        default=1,
-        env="GEXBOT_POLL_RTH_INTERVAL_SECONDS",
+    gex_poll_interval_seconds: float = env_field(
+        "GEXBOT_POLL_INTERVAL_SECONDS",
+        default=60.0,
     )
-    gex_poll_off_hours_interval_seconds: int = Field(
-        default=300,
-        env="GEXBOT_POLL_OFF_HOURS_INTERVAL_SECONDS",
+    gex_poll_rth_interval_seconds: float = env_field(
+        "GEXBOT_POLL_RTH_INTERVAL_SECONDS",
+        default=1.0,
     )
-    gex_poll_dynamic_schedule: bool = Field(
+    gex_poll_off_hours_interval_seconds: float = env_field(
+        "GEXBOT_POLL_OFF_HOURS_INTERVAL_SECONDS",
+        default=300.0,
+    )
+    gex_poll_dynamic_schedule: bool = env_field(
+        "GEXBOT_POLL_DYNAMIC_SCHEDULE",
         default=True,
-        env="GEXBOT_POLL_DYNAMIC_SCHEDULE",
     )
     gex_poll_symbols: str = Field(
-        default="ES_SPX,SPY,QQQ,SPX,NDX",
+        default="ES_SPX,SPY,QQQ,NDX",
         validation_alias=AliasChoices("GEXBOT_POLL_SYMBOLS"),
     )
     gex_poll_aggregation: str = Field(
         default="zero",
         validation_alias=AliasChoices("GEXBOT_POLL_AGGREGATION"),
     )
-    gexbot_api_key: Optional[str] = Field(default=None, env="GEXBOT_API_KEY")
+    gexbot_api_key: Optional[str] = env_field("GEXBOT_API_KEY")
     gex_nq_polling_enabled: bool = Field(
         default=False,
         # Accept both legacy and canonical env var names; pydantic's validation alias
         # ensures truthy values are coerced correctly from env strings like 'true'.
         validation_alias=AliasChoices("GEXBOT_NQ_POLLING_ENABLED"),
     )
-    gex_nq_poll_symbols: str = Field(
-        default="NQ_NDX",
-        env="GEXBOT_NQ_POLL_SYMBOLS",
+    gex_nq_poll_symbols: str = env_field(
+        "GEXBOT_NQ_POLL_SYMBOLS",
+        default="NQ_NDX,SPX",
     )
-    gex_nq_poll_interval_seconds: int = Field(
-        default=60,
-        env="GEXBOT_NQ_POLL_INTERVAL_SECONDS",
+    gex_nq_poll_interval_seconds: float = env_field(
+        "GEXBOT_NQ_POLL_INTERVAL_SECONDS",
+        default=60.0,
     )
-    gex_nq_poll_rth_interval_seconds: int = Field(
-        default=1,
-        env="GEXBOT_NQ_POLL_RTH_INTERVAL_SECONDS",
+    gex_nq_poll_rth_interval_seconds: float = env_field(
+        "GEXBOT_NQ_POLL_RTH_INTERVAL_SECONDS",
+        default=1.0,
     )
-    gex_nq_poll_off_hours_interval_seconds: int = Field(
-        default=300,
-        env="GEXBOT_NQ_POLL_OFF_HOURS_INTERVAL_SECONDS",
+    gex_nq_poll_off_hours_interval_seconds: float = env_field(
+        "GEXBOT_NQ_POLL_OFF_HOURS_INTERVAL_SECONDS",
+        default=300.0,
     )
-    gex_nq_poll_dynamic_schedule: bool = Field(
+    gex_nq_poll_dynamic_schedule: bool = env_field(
+        "GEXBOT_NQ_POLL_DYNAMIC_SCHEDULE",
         default=True,
-        env="GEXBOT_NQ_POLL_DYNAMIC_SCHEDULE",
     )
-    gex_nq_poll_aggregation: str = Field(
+    gex_nq_poll_aggregation: str = env_field(
+        "GEXBOT_NQ_POLL_AGGREGATION",
         default="zero",
-        env="GEXBOT_NQ_POLL_AGGREGATION",
+    )
+    gexbot_nq_poll_symbols: str = env_field(
+        "GEXBOT_NQ_POLL_SYMBOLS",
+        default="NQ_NDX",
+    )
+
+    # Sierra Chart bridge (optional)
+    sierra_chart_output_path: Optional[str] = env_field(
+        "SIERRA_CHART_OUTPUT_PATH",
+        default="/mnt/c/SierraChart/Data/gex_data.json",
     )
 
     # Schwab streaming
-    schwab_enabled: bool = Field(default=False, env="SCHWAB_ENABLED")
-    schwab_stream_paused: bool = Field(default=True, env="SCHWAB_STREAM_PAUSED")
+    schwab_enabled: bool = env_field("SCHWAB_ENABLED", default=False)
+    schwab_stream_paused: bool = env_field("SCHWAB_STREAM_PAUSED", default=True)
     schwab_client_id: Optional[str] = Field(
         default=None,
         validation_alias=AliasChoices("SCHWAB_CLIENT_ID", "SCHWAB_APPKEY"),
@@ -143,29 +170,29 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("SCHWAB_REFRESH_TOKEN", "SCHWAB_RTOKEN"),
     )
-    schwab_account_id: Optional[str] = Field(default=None, env="SCHWAB_ACCOUNT_ID")
-    schwab_rest_url: str = Field(default="https://api.schwab.com/v1", env="SCHWAB_REST_URL")
-    schwab_auth_url: str = Field(
+    schwab_account_id: Optional[str] = env_field("SCHWAB_ACCOUNT_ID")
+    schwab_rest_url: str = env_field("SCHWAB_REST_URL", default="https://api.schwab.com/v1")
+    schwab_auth_url: str = env_field(
+        "SCHWAB_AUTH_URL",
         default="https://api.schwab.com/oauth2/v1/authorize",
-        env="SCHWAB_AUTH_URL",
     )
-    schwab_token_url: str = Field(
+    schwab_token_url: str = env_field(
+        "SCHWAB_TOKEN_URL",
         default="https://api.schwab.com/v1/oauth/token",
-        env="SCHWAB_TOKEN_URL",
     )
-    schwab_token_auth_method: str = Field(
+    schwab_token_auth_method: str = env_field(
+        "SCHWAB_TOKEN_AUTH_METHOD",
         default="form",
-        env="SCHWAB_TOKEN_AUTH_METHOD",
     )
-    schwab_stream_url: str = Field(default="wss://stream.schwab.com/v1", env="SCHWAB_STREAM_URL")
-    schwab_symbols: str = Field(default="MNQ,MES,SPY,QQQ,VIX", env="SCHWAB_SYMBOLS")
-    schwab_tick_channel: str = Field(default="market_data:ticks", env="SCHWAB_TICK_CHANNEL")
-    schwab_level2_channel: str = Field(default="market_data:level2", env="SCHWAB_LEVEL2_CHANNEL")
-    schwab_heartbeat_seconds: int = Field(default=15, env="SCHWAB_HEARTBEAT_SECONDS")
-    schwab_redirect_uri: Optional[str] = Field(default=None, env="SCHWAB_REDIRECT_URI")
-    schwab_scope: str = Field(
+    schwab_stream_url: str = env_field("SCHWAB_STREAM_URL", default="wss://stream.schwab.com/v1")
+    schwab_symbols: str = env_field("SCHWAB_SYMBOLS", default="MNQ,MES,SPY,QQQ,VIX")
+    schwab_tick_channel: str = env_field("SCHWAB_TICK_CHANNEL", default="market_data:ticks")
+    schwab_level2_channel: str = env_field("SCHWAB_LEVEL2_CHANNEL", default="market_data:level2")
+    schwab_heartbeat_seconds: int = env_field("SCHWAB_HEARTBEAT_SECONDS", default=15)
+    schwab_redirect_uri: Optional[str] = env_field("SCHWAB_REDIRECT_URI")
+    schwab_scope: str = env_field(
+        "SCHWAB_SCOPE",
         default="readonly",
-        env="SCHWAB_SCOPE",
     )
 
     model_config = SettingsConfigDict(
@@ -217,6 +244,10 @@ class Settings(BaseSettings):
     @property
     def gex_nq_poll_symbol_list(self) -> list[str]:
         return [symbol.strip().upper() for symbol in self.gex_nq_poll_symbols.split(",") if symbol.strip()]
+
+    @property
+    def gexbot_nq_poll_symbol_list(self) -> list[str]:
+        return [symbol.strip().upper() for symbol in self.gexbot_nq_poll_symbols.split(",") if symbol.strip()]
 
     @property
     def redis_params(self) -> Dict[str, Any]:

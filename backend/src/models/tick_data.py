@@ -8,7 +8,7 @@ class TickData(BaseModel):
     timestamp: datetime
     price: Decimal = Field(..., gt=0)
     volume: Optional[int] = Field(None, ge=0)
-    tick_type: str  # trade, bid, ask
+    tick_type: str  # trade, bid, ask, gex
     source: str  # sierra_chart, gexbot, tastyttrade
 
     @field_validator('symbol')
@@ -21,6 +21,6 @@ class TickData(BaseModel):
     @field_validator('tick_type')
     @classmethod
     def validate_tick_type(cls, v):
-        if v not in ['trade', 'bid', 'ask']:
-            raise ValueError('tick_type must be one of: trade, bid, ask')
+        if v not in ['trade', 'bid', 'ask', 'gex']:
+            raise ValueError('tick_type must be one of: trade, bid, ask, gex')
         return v

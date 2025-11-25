@@ -21,12 +21,10 @@ This short guide collects practical advice used in production trading systems. T
   - LightGBM often wins in live setups due to easier tuning and generalization.
 
 Practical checks to add to codebase
-- Use time-aggregated dataset generation in `ml/extract.py`/`ml/preprocess.py` as an option (volume or dollar bars) in addition to 1s bars.
-- Include a `--commission-per-side` or `--slippage-ms` CLI option on scripts like `pnl_backtest.py` and `train_*` to make transaction-cost assumptions explicit and consistent.
-- Add unit/regression tests that assert any new dataset or model run does not create `mlruns` or artifacts in repo root (CI guard already included; consider an automated test that runs a small sample).
+- Keep dataset generation scripts flexible enough to produce both time-based bars and volume/dollar bars; this logic now lives in the standalone modeling repo that replaced the legacy `ml/` directory here.
+- Include knobs for commissions/slippage in any backtest CLI so the assumptions stay explicit and consistent with live trading.
+- Add unit/regression tests in the modeling repo to ensure training outputs and runs are redirected to their own workspace (no more guarding against root-level `mlruns` in this project).
 
 References
-- `ml/preprocess.py`, `ml/pnl_backtest.py`, `ml/extract.py`
+- Modeling scripts now live in the dedicated ML repository.
 - Consider article: 'Volume Bars and Dollar Bars for Trading' for more on bar types.
-
-If you'd like, I can implement the following next: add a CLI flag in `ml/extract.py`/`ml/preprocess.py` to produce volume- or dollar-bars, add an optional commission/slippage CLI param to backtests, and add a small test case ensuring no root-level `mlruns` are created. Which should I do first?

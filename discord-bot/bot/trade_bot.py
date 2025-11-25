@@ -54,18 +54,21 @@ class TradeBot(commands.Bot):
         self.gex_feed_enabled = bool(getattr(config, 'gex_feed_enabled', False))
         self.gex_feed_channel_ids = getattr(config, 'gex_feed_channel_ids', None)
         self.gex_feed_symbol = (getattr(config, 'gex_feed_symbol', 'NQ_NDX') or 'NQ_NDX').upper()
-        self.gex_feed_update_seconds = max(0.5, float(getattr(config, 'gex_feed_update_seconds', 1.0) or 1.0))
+        # Slightly faster default cadence; allow overrides down to 250ms
+        self.gex_feed_update_seconds = max(0.25, float(getattr(config, 'gex_feed_update_seconds', 0.5) or 0.5))
         self.gex_feed_refresh_minutes = max(1, int(getattr(config, 'gex_feed_refresh_minutes', 5) or 5))
         self.gex_feed_window_seconds = max(15, int(getattr(config, 'gex_feed_window_seconds', 60) or 60))
         self.gex_feed_force_window = bool(getattr(config, 'gex_feed_force_window', False))
-        self.gex_feed_aggregation_seconds = max(0.1, float(getattr(config, 'gex_feed_aggregation_seconds', 1.0) or 1.0))
+        self.gex_feed_aggregation_seconds = max(0.25, float(getattr(config, 'gex_feed_aggregation_seconds', 0.25) or 0.25))
         metrics_key = getattr(config, 'gex_feed_metrics_key', 'metrics:gex_feed') or 'metrics:gex_feed'
         metrics_enabled = bool(getattr(config, 'gex_feed_metrics_enabled', False))
         self._gex_feed_metrics = RedisGexFeedMetrics(self.redis_client, metrics_key, enabled=metrics_enabled)
-        self.gex_feed_backoff_base_seconds = max(self.gex_feed_update_seconds, float(getattr(config, 'gex_feed_backoff_base_seconds', self.gex_feed_update_seconds)))
-        self.gex_feed_backoff_max_seconds = max(self.gex_feed_backoff_base_seconds, float(getattr(config, 'gex_feed_backoff_max_seconds', 300.0)))
+        self.gex_feed_backoff_base_seconds = max(0.05, float(getattr(config, 'gex_feed_backoff_base_seconds', 0.25) or 0.25))
+        self.gex_feed_backoff_max_seconds = max(self.gex_feed_backoff_base_seconds, float(getattr(config, 'gex_feed_backoff_max_seconds', 1.0) or 1.0))
         self._gex_feed_backoff_seconds = 0.0
-        self.gexbot_dynamic_key = getattr(config, 'gexbot_dynamic_key', 'gexbot:symbols:dynamic')
+        self._gex_feed_block_until: Optional[datetime] = None
+        # Disable direct API polling for GEX snapshots when running inside the bot; rely on Redis/DuckDB
+        self.gex_api_enabled = os.getenv('GEX_API_ENABLED', 'false').lower() == 'true'
         self.gexbot_supported_key = getattr(config, 'gexbot_supported_key', 'gexbot:symbols:supported')
         default_symbols = getattr(config, 'gexbot_default_symbols', None)
         if not default_symbols:
@@ -98,17 +101,12 @@ class TradeBot(commands.Bot):
                     await ctx.send(f"Unsupported symbol '{symbol}'.\n{msg}")
                     return
 
-                await self._maybe_enroll_dynamic_symbol(ticker)
+                # Dynamic symbol enrollment removed; do not touch external keys
                 poller = getattr(self, 'gex_poller', None)
 
                 if poller:
                     try:
-                        base_symbols = getattr(poller, '_base_symbols', set()) or set()
-                        if ticker.upper() not in base_symbols and hasattr(poller, 'add_symbol_for_day'):
-                            try:
-                                poller.add_symbol_for_day(ticker)
-                            except Exception:
-                                pass
+                        # No dynamic enrollment; just fetch snapshot from poller if available
                         if hasattr(poller, 'fetch_symbol_now'):
                             snap = await poller.fetch_symbol_now(ticker)
                             if snap:
@@ -122,8 +120,12 @@ class TradeBot(commands.Bot):
                                 snap['major_neg_oi'] = snap.get('major_neg_oi') if snap.get('major_neg_oi') is not None else 0
                                 snap['sum_gex_oi'] = snap.get('sum_gex_oi') if snap.get('sum_gex_oi') is not None else 0
                                 snap['max_priors'] = snap.get('max_priors') or []
-                                await asyncio.to_thread(self.redis_client.setex, f"gex:{ticker.lower()}:latest", 300, json.dumps(snap, default=str))
-                                await asyncio.to_thread(self.redis_client.set, f"{self.redis_snapshot_prefix}{ticker.upper()}", json.dumps(snap, default=str))
+                                # Only write to the canonical snapshot key; do NOT create gex:{ticker}:latest
+                                await asyncio.to_thread(
+                                    self.redis_client.set,
+                                    f"{self.redis_snapshot_prefix}{ticker.upper()}",
+                                    json.dumps(snap, default=str),
+                                )
                                 formatter = self.format_gex if show_full else self.format_gex_small
                                 await ctx.send(formatter(snap))
                                 return
@@ -176,7 +178,15 @@ class TradeBot(commands.Bot):
                 if not self.tastytrade_client:
                     await self._send_dm_or_warn(ctx, 'TastyTrade client is not configured.')
                     return
-                subcommand = args[0].lower() if args else 'summary'
+                if not args:
+                    summary = await self._fetch_tastytrade_summary()
+                    if summary is None:
+                        await self._send_dm_or_warn(ctx, 'Unable to fetch TastyTrade summary.')
+                        return
+                    message = self.format_tastytrade_summary(summary)
+                    await self._send_dm_or_warn(ctx, message)
+                    return
+                subcommand = args[0].lower()
                 if subcommand == 'status':
                     overview = await self._fetch_tastytrade_overview()
                     if overview is None:
@@ -194,6 +204,58 @@ class TradeBot(commands.Bot):
                     )
                     await self._send_dm_or_warn(ctx, dm_msg)
                     return
+                if subcommand == 'help':
+                    help_msg = (
+                        "**TastyTrade Bot Commands (!tt):**\n\n"
+                        "**Account Management:**\n"
+                        "• `!tt` - Display account summary (balances and basic info)\n"
+                        "• `!tt status` - Show trading status (options level, frozen, margin call, etc.)\n"
+                        "• `!tt account <account_id>` - Switch to a different account\n\n"
+                        "**Trading Commands:**\n"
+                        "• `!tt b/buy <symbol> <tp_ticks> [quantity=1]` - Place market buy order with take profit\n"
+                        "• `!tt s/sell <symbol> <tp_ticks> [quantity=1]` - Place market sell order with take profit\n"
+                        "  - `<symbol>`: Stock ticker (e.g., AAPL) or future (e.g., /NQ:XCME)\n"
+                        "  - `<tp_ticks>`: Take profit distance in ticks (0.25 for stocks, varies for futures)\n"
+                        "  - `[quantity]`: Number of shares/contracts (default 1)\n\n"
+                        "**Examples:**\n"
+                        "• `!tt` - Show my account balances\n"
+                        "• `!tt status` - Check if my account is frozen or in margin call\n"
+                        "• `!tt account 123456789` - Switch to account 123456789\n"
+                        "• `!tt buy AAPL 4` - Buy 1 share of AAPL, TP 1 point above\n"
+                        "• `!tt sell /NQ:XCME 20 5` - Sell 5 NQ contracts, TP 5 points below\n\n"
+                        "**Notes:**\n"
+                        "• All commands require privileged access\n"
+                        "• Trading commands place both market and limit TP orders\n"
+                        "• Use in status channel or DM for privileged users"
+                    )
+                    await self._send_dm_or_warn(ctx, help_msg)
+                    return
+                # Trading commands
+                if subcommand in ['b', 's', 'buy', 'sell'] and len(args) >= 3:
+                    action = 'BUY' if subcommand in ['b', 'buy'] else 'SELL'
+                    symbol = args[1].upper()
+                    try:
+                        tp_ticks = float(args[2])
+                    except ValueError:
+                        await self._send_dm_or_warn(ctx, 'Invalid TP ticks.')
+                        return
+                    quantity = 1
+                    if len(args) >= 4:
+                        try:
+                            quantity = int(args[3])
+                        except ValueError:
+                            await self._send_dm_or_warn(ctx, 'Invalid quantity.')
+                            return
+                    try:
+                        result = await asyncio.to_thread(
+                            self.tastytrade_client.place_market_order_with_tp,
+                            symbol, action, quantity, tp_ticks
+                        )
+                        await self._send_dm_or_warn(ctx, result)
+                    except Exception as e:
+                        await self._send_dm_or_warn(ctx, f'Order failed: {e}')
+                    return
+                # Default to summary
                 summary = await self._fetch_tastytrade_summary()
                 if summary is None:
                     await self._send_dm_or_warn(ctx, 'Unable to fetch TastyTrade summary.')
@@ -220,6 +282,7 @@ class TradeBot(commands.Bot):
         if self._should_run_gex_feed() and not self._gex_feed_task:
             self._gex_feed_stop.clear()
             self._gex_feed_task = asyncio.create_task(self._run_gex_feed_loop())
+            print('GEX feed loop started')
 
     async def on_message(self, message):
         if message.author == self.user:
@@ -263,6 +326,7 @@ class TradeBot(commands.Bot):
 
     def _reset_feed_backoff(self) -> None:
         self._gex_feed_backoff_seconds = 0.0
+        self._gex_feed_block_until = None
 
     def _record_feed_rate_limit(self, status: Optional[int]) -> None:
         if status not in (427, 429):
@@ -271,7 +335,14 @@ class TradeBot(commands.Bot):
             self._gex_feed_backoff_seconds = self.gex_feed_backoff_base_seconds
         else:
             self._gex_feed_backoff_seconds = min(self.gex_feed_backoff_max_seconds, self._gex_feed_backoff_seconds * 2)
-        print(f"GEX feed rate-limited (HTTP {status}); backing off for {self._gex_feed_backoff_seconds:.1f}s")
+        block_for = self._gex_feed_backoff_seconds
+        self._gex_feed_block_until = datetime.now(timezone.utc) + timedelta(seconds=block_for)
+        print(f"GEX feed rate-limited (HTTP {status}); backing off for {block_for:.1f}s")
+
+    def _is_feed_blocked(self) -> bool:
+        if not self._gex_feed_block_until:
+            return False
+        return datetime.now(timezone.utc) < self._gex_feed_block_until
 
     def _handle_feed_http_exception(self, exc: discord.HTTPException) -> bool:
         status = getattr(exc, 'status', None)
@@ -282,9 +353,12 @@ class TradeBot(commands.Bot):
 
     async def _sleep_between_feed_updates(self) -> None:
         delay = self.gex_feed_update_seconds
-        if self._gex_feed_backoff_seconds:
+        if self._is_feed_blocked():
+            remaining = (self._gex_feed_block_until - datetime.now(timezone.utc)).total_seconds()
+            delay = max(delay, remaining)
+        elif self._gex_feed_backoff_seconds:
             delay = max(delay, self._gex_feed_backoff_seconds)
-        await asyncio.sleep(delay)
+        await asyncio.sleep(max(0.05, delay))
 
     async def _get_supported_tickers(self) -> dict:
         cache_key = 'gexbot:tickers:categories'
@@ -326,107 +400,12 @@ class TradeBot(commands.Bot):
                 msg += '\nAliases: ' + '; '.join(alias_texts)
         return msg
 
-    async def _maybe_enroll_dynamic_symbol(self, ticker: str) -> None:
-        normalized = (ticker or '').upper().strip()
-        if not normalized or normalized in self._gexbot_default_symbols:
-            return
-        entries = await self._load_dynamic_entries()
-        now = datetime.utcnow().replace(tzinfo=timezone.utc)
-        expires_at = (now + timedelta(hours=24)).astimezone(timezone.utc).isoformat()
-        entries[normalized] = expires_at
-        await self._write_dynamic_entries(entries)
-
-    async def _load_dynamic_entries(self) -> Dict[str, str]:
-        try:
-            raw = await asyncio.to_thread(self.redis_client.get, self.gexbot_dynamic_key)
-        except Exception:
-            raw = None
-        return self._parse_dynamic_entries(raw)
-
-    def _parse_dynamic_entries(self, raw: Any) -> Dict[str, str]:
-        entries: Dict[str, str] = {}
-        if not raw:
-            return entries
-        if isinstance(raw, (bytes, bytearray)):
-            try:
-                raw = raw.decode('utf-8')
-            except Exception:
-                return entries
-        try:
-            decoded = json.loads(raw) if isinstance(raw, str) else raw
-        except Exception:
-            decoded = raw
-        if not isinstance(decoded, list):
-            return entries
-        for item in decoded:
-            normalized = self._normalize_dynamic_entry(item)
-            if normalized:
-                entries[normalized['symbol']] = normalized['expires_at']
-        return entries
-
-    def _normalize_dynamic_entry(self, item: Any) -> Optional[Dict[str, str]]:
-        symbol: Optional[str] = None
-        expires_at: Optional[str] = None
-        if isinstance(item, str):
-            symbol = item.upper()
-        elif isinstance(item, dict):
-            raw_symbol = item.get('symbol')
-            if isinstance(raw_symbol, str) and raw_symbol.strip():
-                symbol = raw_symbol.upper()
-            elif raw_symbol is not None:
-                symbol = str(raw_symbol).upper()
-            expiry_raw = item.get('expires_at') or item.get('expiry')
-            if expiry_raw:
-                expires_at = self._normalize_datetime(expiry_raw)
-        if not symbol:
-            return None
-        if not expires_at:
-            expires_at = (datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(hours=24)).isoformat()
-        return {'symbol': symbol, 'expires_at': expires_at}
-
-    def _normalize_datetime(self, value: Any) -> Optional[str]:
-        if isinstance(value, (int, float)):
-            try:
-                return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat()
-            except Exception:
-                return None
-        if isinstance(value, str):
-            try:
-                parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
-            except ValueError:
-                return None
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(timezone.utc).isoformat()
-        return None
-
-    async def _write_dynamic_entries(self, entries: Dict[str, str]) -> None:
-        if not entries:
-            try:
-                await asyncio.to_thread(self.redis_client.delete, self.gexbot_dynamic_key)
-            except Exception:
-                pass
-            return
-        payload = [
-            {
-                'symbol': symbol,
-                'expires_at': expires,
-            }
-            for symbol, expires in sorted(entries.items())
-        ]
-        value = json.dumps(payload)
-        ttl = 86400
-        try:
-            await asyncio.to_thread(self.redis_client.setex, self.gexbot_dynamic_key, ttl, value)
-        except Exception:
-            try:
-                await asyncio.to_thread(self.redis_client.set, self.gexbot_dynamic_key, value)
-            except Exception:
-                pass
+    # Dynamic enrollment removed from bot; no write path for gexbot:symbols:dynamic
 
     async def _run_gex_feed_loop(self):
         try:
             while not self._gex_feed_stop.is_set():
+                print('GEX feed loop tick')
                 if not self._should_run_gex_feed():
                     await asyncio.sleep(60)
                     continue
@@ -473,6 +452,8 @@ class TradeBot(commands.Bot):
                     continue
             if hasattr(channel, 'send'):
                 channels.append(channel)
+        if not channels:
+            print(f"GEX feed: no channels resolved from IDs {ids}")
         return channels
 
     async def _run_gex_feed_session(self, channels: List[discord.abc.Messageable], session_end: datetime) -> None:
@@ -487,7 +468,11 @@ class TradeBot(commands.Bot):
             now = datetime.now(self.display_zone)
             if now >= session_end:
                 break
-            data = await self.get_gex_data(self.gex_feed_symbol)
+            if self._is_feed_blocked():
+                await self._sleep_between_feed_updates()
+                continue
+            # Prefer polling canonical Redis snapshot keys for the feed to avoid stale cache race conditions
+            data = await self.get_gex_snapshot(self.gex_feed_symbol)
             if not data:
                 await self._gex_feed_metrics.record_error(now, reason='no_data')
                 await self._sleep_between_feed_updates()
@@ -506,10 +491,8 @@ class TradeBot(commands.Bot):
             if pending_first_ts is None:
                 pending_first_ts = now
 
-            # Determine effective aggregation window (RTH session uses configured aggregator)
-            effective_agg_seconds = self.gex_feed_aggregation_seconds
-            # If update interval is longer than aggregation, adhere to update interval
-            effective_wait = max(effective_agg_seconds, self.gex_feed_update_seconds)
+            # Determine wait interval so we don't publish faster than configured cadence
+            effective_wait = max(0.05, self.gex_feed_update_seconds)
             age = (now - pending_first_ts).total_seconds() if pending_first_ts else 0
             if age >= effective_wait:
                 if not messages:
@@ -549,10 +532,13 @@ class TradeBot(commands.Bot):
 
     async def _post_feed_messages(self, channels: List[discord.abc.Messageable], content: str) -> Dict[int, discord.Message]:
         messages: Dict[int, discord.Message] = {}
+        if self._is_feed_blocked():
+            return messages
         rate_limited = False
         for channel in channels:
             try:
                 msg = await channel.send(content)
+                print(f"GEX feed: posted new message to channel {getattr(channel, 'id', 'unknown')}")
             except discord.HTTPException as exc:
                 if self._handle_feed_http_exception(exc):
                     rate_limited = True
@@ -568,6 +554,8 @@ class TradeBot(commands.Bot):
 
     async def _edit_feed_messages(self, messages: Dict[int, discord.Message], content: str) -> None:
         stale_ids = []
+        if self._is_feed_blocked():
+            return
         rate_limited = False
         for cid, msg in messages.items():
             try:
@@ -663,51 +651,36 @@ class TradeBot(commands.Bot):
         """
         display_symbol = (symbol or 'QQQ').upper()
         ticker = self.ticker_aliases.get(display_symbol, display_symbol)
-        cache_key = f"gex:{ticker.lower()}:latest"
+        # No transient cache key: use canonical snapshot key only
         snapshot_key = f"{self.redis_snapshot_prefix}{ticker.upper()}"
         async def finalize(data: dict) -> dict:
             data.setdefault('display_symbol', display_symbol)
-            await self._populate_wall_ladders(data, ticker, cache_key, snapshot_key)
+            # Only use snapshot_key for enrichment; transient cache key removed
+            await self._populate_wall_ladders(data, ticker, None, snapshot_key)
             return data
 
-        # 1) Try Redis cache (fast)
+        # Prefer the canonical snapshot key (written by poller/pipeline)
         try:
-            cached = await asyncio.to_thread(self.redis_client.get, cache_key)
-            if cached:
-                data = json.loads(cached)
-                # normalize timestamp to datetime
-                ts = data.get('timestamp')
-                if isinstance(ts, str):
-                    try:
-                        data['timestamp'] = datetime.fromisoformat(ts)
-                    except Exception:
-                        data['timestamp'] = datetime.fromtimestamp(float(ts)).astimezone(timezone.utc)
-
-                # check freshness
-                now = datetime.now(timezone.utc)
-                rec_ts = data.get('timestamp') or now
-                if isinstance(rec_ts, datetime):
-                    age = (now - (rec_ts if rec_ts.tzinfo else rec_ts.replace(tzinfo=timezone.utc))).total_seconds()
-                else:
-                    age = 9999
-
-                complete = self._has_snapshot_coverage(data)
-
-                if age <= 5 and complete:
-                    data['_freshness'] = 'current'
-                    # mark as redis cache-origin
-                    data['_source'] = 'redis-cache'
-                    return await finalize(data)
-                if age <= 30 and complete:
-                    # accept stale but attempt background refresh via API
-                    data['_freshness'] = 'stale'
-                    data['_source'] = 'redis-cache'
-                    asyncio.create_task(self._refresh_gex_from_api(ticker, cache_key, display_symbol))
-                    return await finalize(data)
-                # cached entry exists but lacks full snapshot; force refresh path
-                await asyncio.to_thread(self.redis_client.delete, cache_key)
+            snapshot = await asyncio.to_thread(self.redis_client.get, snapshot_key)
+            if snapshot:
+                normalized = self._normalize_snapshot_payload(snapshot, ticker)
+                if normalized:
+                    now = datetime.now(timezone.utc)
+                    ts = normalized.get('timestamp') or now
+                    if isinstance(ts, datetime):
+                        age = (now - (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc))).total_seconds()
+                    else:
+                        age = 9999
+                    normalized['display_symbol'] = display_symbol
+                    if age <= 30:
+                        normalized['_freshness'] = 'current' if age <= 5 else 'stale'
+                        normalized['_source'] = 'redis-snapshot'
+                        await asyncio.to_thread(self.redis_client.setex, snapshot_key, 300, json.dumps(normalized, default=str))
+                        return await finalize(normalized)
         except Exception as e:
-            print(f"Redis check failed: {e}")
+            print(f"Redis snapshot check failed: {e}")
+
+        # NOTE: transient cache key removed; only canonical snapshot key is used for feed and lookups
 
         # 1b) Try canonical snapshot key populated by the data pipeline
         try:
@@ -726,17 +699,17 @@ class TradeBot(commands.Bot):
                         normalized['_freshness'] = 'current'
                         # snapshot returned from the pipeline; mark as redis snapshot
                         normalized['_source'] = 'redis-snapshot'
-                        await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(normalized, default=str))
+                        await asyncio.to_thread(self.redis_client.setex, snapshot_key, 300, json.dumps(normalized, default=str))
                         return await finalize(normalized)
                     if age <= 30:
                         normalized['_freshness'] = 'stale'
                         normalized['_source'] = 'redis-snapshot'
-                        await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(normalized, default=str))
-                        asyncio.create_task(self._refresh_gex_from_api(ticker, cache_key, display_symbol))
+                        await asyncio.to_thread(self.redis_client.setex, snapshot_key, 300, json.dumps(normalized, default=str))
+                        asyncio.create_task(self._refresh_gex_from_api(ticker, snapshot_key, display_symbol))
                         return await finalize(normalized)
                     normalized['_freshness'] = 'incomplete'
                     normalized['_source'] = 'redis-snapshot'
-                    await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(normalized, default=str))
+                    await asyncio.to_thread(self.redis_client.setex, snapshot_key, 300, json.dumps(normalized, default=str))
                     return await finalize(normalized)
         except Exception as e:
             print(f"Snapshot redis check failed for {snapshot_key}: {e}")
@@ -830,22 +803,23 @@ class TradeBot(commands.Bot):
                 else:
                     data['_freshness'] = 'incomplete'
 
-                # cache result for future
-                await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(data, default=str))
+                # cache result for future by writing canonical snapshot key
+                await asyncio.to_thread(self.redis_client.setex, snapshot_key, 300, json.dumps(data, default=str))
                 return await finalize(data)
         except Exception as e:
             print(f"DuckDB query failed: {e}")
 
         # 3) Finally, poll the live API as a last resort
         try:
+            if not self.gex_api_enabled:
+                return None
             api_data = await self._poll_gexbot_api(ticker)
             if api_data:
                 api_data['_freshness'] = 'current'
                 api_data['_source'] = 'API'
                 api_data['display_symbol'] = display_symbol
-                await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(api_data, default=str))
                 try:
-                    await asyncio.to_thread(self.redis_client.set, snapshot_key, json.dumps(api_data, default=str))
+                    await asyncio.to_thread(self.redis_client.setex, snapshot_key, 300, json.dumps(api_data, default=str))
                 except Exception:
                     pass
                 return await finalize(api_data)
@@ -856,6 +830,8 @@ class TradeBot(commands.Bot):
 
     async def _poll_gexbot_api(self, ticker: str):
         """Poll the zero endpoint only, limiting outbound requests."""
+        if not self.gex_api_enabled:
+            return None
         api_key = os.getenv('GEXBOT_API_KEY', 'mW0CQI9onfOX')
         base = 'https://api.gexbot.com'
         zero_url = f"{base}/{ticker}/classic/zero?key={api_key}"
@@ -903,15 +879,58 @@ class TradeBot(commands.Bot):
 
         return data
 
-    async def _refresh_gex_from_api(self, ticker: str, cache_key: str, display_symbol: Optional[str] = None):
+    async def get_gex_snapshot(self, symbol: str):
+        """Fetch a GEX snapshot payload directly from the canonical redis snapshot key.
+
+        This returns normalized payload like `get_gex_data` with `_source` set to 'redis-snapshot'.
+        It intentionally avoids API or DB fallback to keep a predictable feed cadence.
+        """
+        if not symbol:
+            return None
+        display_symbol = (symbol or 'QQQ').upper()
+        ticker = self.ticker_aliases.get(display_symbol, display_symbol)
+        snapshot_key = f"{self.redis_snapshot_prefix}{ticker}"
+        try:
+            raw = await asyncio.to_thread(self.redis_client.get, snapshot_key)
+        except Exception as e:
+            print(f"Snapshot redis check failed for {snapshot_key}: {e}")
+            return None
+        if not raw:
+            return None
+        normalized = self._normalize_snapshot_payload(raw, ticker)
+        if not normalized:
+            return None
+        now = datetime.now(timezone.utc)
+        ts = normalized.get('timestamp') or now
+        if isinstance(ts, datetime):
+            age = (now - (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc))).total_seconds()
+        else:
+            age = 9999
+        normalized['display_symbol'] = display_symbol
+        normalized['_source'] = 'redis-snapshot'
+        if age <= 5:
+            normalized['_freshness'] = 'current'
+        elif age <= 30:
+            normalized['_freshness'] = 'stale'
+        else:
+            normalized['_freshness'] = 'incomplete'
+        try:
+            await self._populate_wall_ladders(normalized, ticker, None, snapshot_key)
+        except Exception:
+            pass
+        return normalized
+
+    async def _refresh_gex_from_api(self, ticker: str, snapshot_key: str, display_symbol: Optional[str] = None):
         """Background task to refresh cached snapshot from GEXBot API."""
+        if not self.gex_api_enabled:
+            return
         try:
             api_data = await self._poll_gexbot_api(ticker)
             if api_data:
                 api_data['_freshness'] = 'current'
                 if display_symbol:
                     api_data['display_symbol'] = display_symbol
-                await asyncio.to_thread(self.redis_client.setex, cache_key, 300, json.dumps(api_data, default=str))
+                await asyncio.to_thread(self.redis_client.setex, snapshot_key, 300, json.dumps(api_data, default=str))
         except Exception as e:
             print(f"Background refresh failed for {ticker}: {e}")
 
@@ -1031,7 +1050,7 @@ class TradeBot(commands.Bot):
             return False
         return True
 
-    async def _populate_wall_ladders(self, data: dict, ticker: str, cache_key: str, snapshot_key: str) -> None:
+    async def _populate_wall_ladders(self, data: dict, ticker: str, cache_key: Optional[str], snapshot_key: str) -> None:
         if not isinstance(data, dict) or not ticker:
             return
         if data.get('_wall_ladders_ready'):
@@ -1041,7 +1060,7 @@ class TradeBot(commands.Bot):
             data['_wall_ladders'] = summary
         data['_wall_ladders_ready'] = True
 
-    async def _build_wall_ladders(self, data: dict, ticker: str, cache_key: str, snapshot_key: str) -> Optional[dict]:
+    async def _build_wall_ladders(self, data: dict, ticker: str, cache_key: Optional[str], snapshot_key: str) -> Optional[dict]:
         strikes = self._normalize_strike_entries(data.get('strikes'))
         source = 'payload' if strikes else None
         if not strikes:
@@ -1066,10 +1085,10 @@ class TradeBot(commands.Bot):
     async def _load_strikes_from_cache(
         self,
         ticker: str,
-        cache_key: str,
+        cache_key: Optional[str],
         snapshot_key: str,
     ) -> Tuple[List[Tuple[float, float]], Optional[str]]:
-        keys = [cache_key, snapshot_key]
+        keys = [k for k in (cache_key, snapshot_key) if k]
         for key in keys:
             try:
                 raw = await asyncio.to_thread(self.redis_client.get, key)
@@ -1255,16 +1274,15 @@ class TradeBot(commands.Bot):
         return names
 
     def _init_tastytrade_client(self) -> Optional[TastyTradeClient]:
-        client_secret = os.getenv('TASTYTRADE_CLIENT_SECRET')
-        refresh_token = os.getenv('TASTYTRADE_REFRESH_TOKEN')
-        if not client_secret or not refresh_token:
+        creds = getattr(self.config, 'tastytrade_credentials', None)
+        if not creds or not creds.client_secret or not creds.refresh_token:
             return None
-        default_account = os.getenv('TASTYTRADE_ACCOUNT')
-        use_sandbox = os.getenv('TASTYTRADE_USE_SANDBOX', 'false').lower() == 'true'
+        default_account = creds.default_account
+        use_sandbox = creds.use_sandbox_environment
         try:
             return TastyTradeClient(
-                client_secret=client_secret,
-                refresh_token=refresh_token,
+                client_secret=creds.client_secret,
+                refresh_token=creds.refresh_token,
                 default_account=default_account,
                 use_sandbox=use_sandbox,
             )
@@ -1310,13 +1328,16 @@ class TradeBot(commands.Bot):
         channel_id = getattr(channel, 'id', None)
         if channel_id is None:
             return True
+        # Allow DMs for privileged commands
+        if getattr(channel, 'type', None) == discord.ChannelType.private:
+            return True
         return int(channel_id) in self.allowed_channel_ids
 
     async def _ensure_status_channel_access(self, ctx) -> bool:
         if not self._is_privileged_user(ctx):
             await ctx.send('You are not authorized to use this command.')
             return False
-        if self.status_channel_id and getattr(ctx.channel, 'id', None) != self.status_channel_id:
+        if self.status_channel_id and getattr(ctx.channel, 'id', None) != self.status_channel_id and getattr(ctx.channel, 'type', None) != discord.ChannelType.private:
             await ctx.send('This command may only be used in the status channel.')
             return False
         author_name = (getattr(ctx.author, 'name', '') or '').lower()
@@ -1425,7 +1446,7 @@ class TradeBot(commands.Bot):
         if not self.tastytrade_client:
             return None
         try:
-            return await asyncio.to_thread(self.tastytrade_client.get_account_overview)
+            return await asyncio.to_thread(self.tastytrade_client.get_trading_status)
         except Exception as exc:
             print(f"Failed to fetch TastyTrade overview: {exc}")
             return None
@@ -2268,24 +2289,22 @@ class TradeBot(commands.Bot):
         return "```ansi\n" + "\n".join(lines) + "\n```"
 
     def format_tastytrade_overview(self, overview: dict) -> str:
-        def fmt(value):
-            try:
-                return f"{float(value):,.2f}"
-            except (TypeError, ValueError):
-                return str(value)
+        def fmt_bool(value):
+            return "Yes" if value else "No"
 
         lines = [
-            f"TastyTrade status   account {overview.get('account_number', 'n/a')}",
-            f"available funds    {fmt(overview.get('available_trading_funds'))}",
-            f"equity BP          {fmt(overview.get('equity_buying_power'))}",
-            f"derivative BP      {fmt(overview.get('derivative_buying_power'))}",
-            f"day trade BP       {fmt(overview.get('day_trading_buying_power'))}",
-            f"net liq            {fmt(overview.get('net_liquidating_value'))}",
-            f"cash balance       {fmt(overview.get('cash_balance'))}",
-            f"margin equity      {fmt(overview.get('margin_equity'))}",
-            f"maintenance req    {fmt(overview.get('maintenance_requirement'))}",
-            f"day trade excess   {fmt(overview.get('day_trade_excess'))}",
-            f"pending cash       {fmt(overview.get('pending_cash'))}",
+            f"TastyTrade trading status   account {overview.get('account-number', 'n/a')}",
+            f"options level      {overview.get('options-level', 'n/a')}",
+            f"frozen             {fmt_bool(overview.get('is-frozen'))}",
+            f"closing only       {fmt_bool(overview.get('is-closing-only'))}",
+            f"margin call        {fmt_bool(overview.get('is-in-margin-call'))}",
+            f"pattern day trader {fmt_bool(overview.get('is-pattern-day-trader'))}",
+            f"futures enabled    {fmt_bool(overview.get('is-futures-enabled'))}",
+            f"crypto enabled     {fmt_bool(overview.get('is-cryptocurrency-enabled'))}",
+            f"equity offering    {fmt_bool(overview.get('is-equity-offering-enabled'))}",
+            f"day trade count    {overview.get('day-trade-count', 'n/a')}",
+            f"fee schedule       {overview.get('fee-schedule-name', 'n/a')}",
+            f"updated at         {overview.get('updated-at', 'n/a')}",
         ]
         return "```ansi\n" + "\n".join(lines) + "\n```"
 

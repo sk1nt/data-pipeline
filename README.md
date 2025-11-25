@@ -198,6 +198,10 @@ redis/                # Redis configuration
 specs/                # Feature specifications and plans
 ```
 
+## Machine Learning Tooling
+
+Model training, feature engineering, and MLflow orchestration previously lived under `ml/` in this repository. Those utilities now run on the original modeling workstation and have been removed from the pipeline tree to keep this machine focused on ingestion, orchestration, and the Discord bot. If you need to adjust datasets, feature builds, or training/backtest scripts, make those changes in the ML-specific repository and keep this project limited to data services plus alerting surfaces.
+
 ## Contributing
 
 1. Follow the specification-driven development process

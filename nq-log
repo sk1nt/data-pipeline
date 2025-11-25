@@ -1,0 +1,130 @@
+2025-11-24 10:51:44,521 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:44,633 DEBUG src.services.gexbot_poller: fetched ES_SPX ts=2025-11-24T15:51:41+00:00 in 0.236s
+2025-11-24 10:51:44,825 DEBUG src.services.gexbot_poller: fetched NDX ts=2025-11-24T15:51:42+00:00 in 0.191s
+2025-11-24 10:51:45,030 DEBUG src.services.gexbot_poller: fetched QQQ ts=2025-11-24T15:51:41+00:00 in 0.205s
+INFO:     127.0.0.1:60661 - "POST /uw HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51264 - "GET /status HTTP/1.1" 200 OK
+2025-11-24 10:51:45,303 DEBUG src.services.gexbot_poller: fetched SPX ts=2025-11-24T15:51:42+00:00 in 0.273s
+2025-11-24 10:51:45,511 DEBUG src.services.gexbot_poller: fetched SPY ts=2025-11-24T15:51:42+00:00 in 0.208s
+2025-11-24 10:51:45,549 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:42+00:00 in 1.028s
+2025-11-24 10:51:45,639 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:43+00:00 in 0.128s
+2025-11-24 10:51:45,684 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:43+00:00 in 0.135s
+2025-11-24 10:51:45,690 DEBUG src.services.gexbot_poller: poll-loop symbols=['ES_SPX', 'NDX', 'QQQ', 'SPX', 'SPY', 'UVXY'] interval=1.000s
+2025-11-24 10:51:45,736 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:45,793 DEBUG src.services.gexbot_poller: fetched ES_SPX ts=2025-11-24T15:51:42+00:00 in 0.103s
+2025-11-24 10:51:45,936 DEBUG src.services.gexbot_poller: fetched NDX ts=2025-11-24T15:51:43+00:00 in 0.144s
+2025-11-24 10:51:46,061 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:43+00:00 in 0.326s
+2025-11-24 10:51:46,066 DEBUG src.services.gexbot_poller: fetched QQQ ts=2025-11-24T15:51:42+00:00 in 0.130s
+2025-11-24 10:51:46,216 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:43+00:00 in 0.154s
+2025-11-24 10:51:46,457 DEBUG src.services.gexbot_poller: fetched SPX ts=2025-11-24T15:51:43+00:00 in 0.391s
+2025-11-24 10:51:46,737 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:46,751 DEBUG src.services.gexbot_poller: fetched SPY ts=2025-11-24T15:51:43+00:00 in 0.293s
+2025-11-24 10:51:46,870 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:44+00:00 in 0.119s
+2025-11-24 10:51:46,921 DEBUG src.services.gexbot_poller: poll-loop symbols=['ES_SPX', 'NDX', 'QQQ', 'SPX', 'SPY', 'UVXY'] interval=1.000s
+2025-11-24 10:51:47,073 DEBUG src.services.gexbot_poller: fetched ES_SPX ts=2025-11-24T15:51:44+00:00 in 0.152s
+INFO:     127.0.0.1:60661 - "POST /uw HTTP/1.1" 200 OK
+2025-11-24 10:51:47,239 DEBUG src.services.gexbot_poller: fetched NDX ts=2025-11-24T15:51:44+00:00 in 0.166s
+2025-11-24 10:51:47,376 DEBUG src.services.gexbot_poller: fetched QQQ ts=2025-11-24T15:51:44+00:00 in 0.136s
+2025-11-24 10:51:47,504 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:44+00:00 in 0.768s
+2025-11-24 10:51:47,635 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:45+00:00 in 0.131s
+2025-11-24 10:51:47,737 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:47,746 DEBUG src.services.gexbot_poller: fetched SPX ts=2025-11-24T15:51:44+00:00 in 0.370s
+2025-11-24 10:51:47,992 DEBUG src.services.gexbot_poller: fetched SPY ts=2025-11-24T15:51:44+00:00 in 0.246s
+2025-11-24 10:51:48,013 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:45+00:00 in 0.276s
+2025-11-24 10:51:48,074 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:45+00:00 in 0.082s
+2025-11-24 10:51:48,091 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:45+00:00 in 0.078s
+2025-11-24 10:51:48,125 DEBUG src.services.gexbot_poller: poll-loop symbols=['ES_SPX', 'NDX', 'QQQ', 'SPX', 'SPY', 'UVXY'] interval=1.000s
+INFO:     127.0.0.1:51264 - "GET /status HTTP/1.1" 200 OK
+2025-11-24 10:51:48,313 DEBUG src.services.gexbot_poller: fetched ES_SPX ts=2025-11-24T15:51:45+00:00 in 0.188s
+2025-11-24 10:51:48,612 DEBUG src.services.gexbot_poller: fetched NDX ts=2025-11-24T15:51:46+00:00 in 0.299s
+2025-11-24 10:51:48,738 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:48,934 DEBUG src.services.gexbot_poller: fetched QQQ ts=2025-11-24T15:51:45+00:00 in 0.322s
+2025-11-24 10:51:49,073 DEBUG src.services.gexbot_poller: fetched SPX ts=2025-11-24T15:51:46+00:00 in 0.139s
+INFO:     127.0.0.1:60661 - "POST /uw HTTP/1.1" 200 OK
+2025-11-24 10:51:49,143 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:46+00:00 in 0.404s
+2025-11-24 10:51:49,184 DEBUG src.services.gexbot_poller: fetched SPY ts=2025-11-24T15:51:46+00:00 in 0.111s
+2025-11-24 10:51:49,216 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:46+00:00 in 0.073s
+2025-11-24 10:51:49,476 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:47+00:00 in 0.292s
+2025-11-24 10:51:49,528 DEBUG src.services.gexbot_poller: poll-loop symbols=['ES_SPX', 'NDX', 'QQQ', 'SPX', 'SPY', 'UVXY'] interval=1.000s
+2025-11-24 10:51:49,739 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:49,832 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:47+00:00 in 0.093s
+2025-11-24 10:51:49,899 DEBUG src.services.gexbot_poller: fetched ES_SPX ts=2025-11-24T15:51:47+00:00 in 0.371s
+2025-11-24 10:51:49,974 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:47+00:00 in 0.142s
+2025-11-24 10:51:50,740 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:50,865 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:48+00:00 in 0.125s
+2025-11-24 10:51:51,077 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:48+00:00 in 0.212s
+INFO:     127.0.0.1:60661 - "POST /uw HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51264 - "GET /status HTTP/1.1" 200 OK
+2025-11-24 10:51:51,328 DEBUG src.services.gexbot_poller: fetched NDX ts=2025-11-24T15:51:48+00:00 in 1.429s
+2025-11-24 10:51:51,471 DEBUG src.services.gexbot_poller: fetched QQQ ts=2025-11-24T15:51:48+00:00 in 0.143s
+2025-11-24 10:51:51,741 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:51,960 DEBUG src.services.gexbot_poller: fetched SPX ts=2025-11-24T15:51:48+00:00 in 0.489s
+2025-11-24 10:51:52,027 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:49+00:00 in 0.285s
+2025-11-24 10:51:52,083 DEBUG src.services.gexbot_poller: fetched SPY ts=2025-11-24T15:51:49+00:00 in 0.123s
+2025-11-24 10:51:52,162 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:49+00:00 in 0.079s
+2025-11-24 10:51:52,182 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:49+00:00 in 0.156s
+2025-11-24 10:51:52,213 DEBUG src.services.gexbot_poller: poll-loop symbols=['ES_SPX', 'NDX', 'QQQ', 'SPX', 'SPY', 'UVXY'] interval=1.000s
+2025-11-24 10:51:52,574 DEBUG src.services.gexbot_poller: fetched ES_SPX ts=2025-11-24T15:51:49+00:00 in 0.361s
+2025-11-24 10:51:52,685 DEBUG src.services.gexbot_poller: fetched NDX ts=2025-11-24T15:51:50+00:00 in 0.111s
+2025-11-24 10:51:52,741 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:52,749 DEBUG src.services.gexbot_poller: fetched QQQ ts=2025-11-24T15:51:49+00:00 in 0.064s
+2025-11-24 10:51:52,864 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:50+00:00 in 0.123s
+2025-11-24 10:51:52,873 DEBUG src.services.gexbot_poller: fetched SPX ts=2025-11-24T15:51:49+00:00 in 0.124s
+INFO:     127.0.0.1:60661 - "POST /uw HTTP/1.1" 200 OK
+2025-11-24 10:51:53,187 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:50+00:00 in 0.323s
+2025-11-24 10:51:53,211 DEBUG src.services.gexbot_poller: fetched SPY ts=2025-11-24T15:51:50+00:00 in 0.338s
+2025-11-24 10:51:53,507 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:50+00:00 in 0.296s
+2025-11-24 10:51:53,558 DEBUG src.services.gexbot_poller: poll-loop symbols=['ES_SPX', 'NDX', 'QQQ', 'SPX', 'SPY', 'UVXY'] interval=1.000s
+2025-11-24 10:51:53,742 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:53,881 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:51+00:00 in 0.139s
+2025-11-24 10:51:54,010 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:51+00:00 in 0.128s
+2025-11-24 10:51:54,177 DEBUG src.services.gexbot_poller: fetched ES_SPX ts=2025-11-24T15:51:51+00:00 in 0.619s
+INFO:     127.0.0.1:51264 - "GET /status HTTP/1.1" 200 OK
+2025-11-24 10:51:54,445 DEBUG src.services.gexbot_poller: fetched NDX ts=2025-11-24T15:51:51+00:00 in 0.268s
+2025-11-24 10:51:54,613 DEBUG src.services.gexbot_poller: fetched QQQ ts=2025-11-24T15:51:51+00:00 in 0.167s
+2025-11-24 10:51:54,743 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:55,016 DEBUG src.services.gexbot_poller: fetched SPX ts=2025-11-24T15:51:52+00:00 in 0.403s
+2025-11-24 10:51:55,061 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:52+00:00 in 0.318s
+2025-11-24 10:51:55,175 DEBUG src.services.gexbot_poller: fetched SPY ts=2025-11-24T15:51:52+00:00 in 0.159s
+INFO:     127.0.0.1:60661 - "POST /uw HTTP/1.1" 200 OK
+2025-11-24 10:51:55,460 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:52+00:00 in 0.399s
+2025-11-24 10:51:55,530 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:53+00:00 in 0.356s
+2025-11-24 10:51:55,581 DEBUG src.services.gexbot_poller: poll-loop symbols=['ES_SPX', 'NDX', 'QQQ', 'SPX', 'SPY', 'UVXY'] interval=1.000s
+2025-11-24 10:51:55,672 DEBUG src.services.gexbot_poller: fetched ES_SPX ts=2025-11-24T15:51:52+00:00 in 0.091s
+2025-11-24 10:51:55,743 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:55,765 DEBUG src.services.gexbot_poller: fetched NDX ts=2025-11-24T15:51:53+00:00 in 0.093s
+2025-11-24 10:51:55,932 DEBUG src.services.gexbot_poller: fetched QQQ ts=2025-11-24T15:51:52+00:00 in 0.167s
+2025-11-24 10:51:56,101 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:53+00:00 in 0.358s
+2025-11-24 10:51:56,166 DEBUG src.services.gexbot_poller: fetched SPX ts=2025-11-24T15:51:53+00:00 in 0.234s
+2025-11-24 10:51:56,217 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:53+00:00 in 0.116s
+2025-11-24 10:51:56,280 DEBUG src.services.gexbot_poller: fetched SPY ts=2025-11-24T15:51:53+00:00 in 0.113s
+2025-11-24 10:51:56,659 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:54+00:00 in 0.379s
+2025-11-24 10:51:56,710 DEBUG src.services.gexbot_poller: poll-loop symbols=['ES_SPX', 'NDX', 'QQQ', 'SPX', 'SPY', 'UVXY'] interval=1.000s
+2025-11-24 10:51:56,744 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:57,101 DEBUG src.services.gexbot_poller: fetched ES_SPX ts=2025-11-24T15:51:54+00:00 in 0.391s
+2025-11-24 10:51:57,113 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:54+00:00 in 0.369s
+INFO:     127.0.0.1:60661 - "POST /uw HTTP/1.1" 200 OK
+2025-11-24 10:51:57,245 DEBUG src.services.gexbot_poller: fetched NDX ts=2025-11-24T15:51:54+00:00 in 0.144s
+INFO:     127.0.0.1:51264 - "GET /status HTTP/1.1" 200 OK
+2025-11-24 10:51:57,265 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:54+00:00 in 0.152s
+2025-11-24 10:51:57,413 DEBUG src.services.gexbot_poller: fetched QQQ ts=2025-11-24T15:51:54+00:00 in 0.167s
+2025-11-24 10:51:57,745 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:57,757 DEBUG src.services.gexbot_poller: fetched SPX ts=2025-11-24T15:51:54+00:00 in 0.344s
+2025-11-24 10:51:57,930 DEBUG src.services.gexbot_poller: fetched SPY ts=2025-11-24T15:51:54+00:00 in 0.173s
+2025-11-24 10:51:57,947 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:55+00:00 in 0.201s
+2025-11-24 10:51:58,022 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:55+00:00 in 0.092s
+2025-11-24 10:51:58,073 DEBUG src.services.gexbot_poller: poll-loop symbols=['ES_SPX', 'NDX', 'QQQ', 'SPX', 'SPY', 'UVXY'] interval=1.000s
+2025-11-24 10:51:58,131 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:55+00:00 in 0.184s
+2025-11-24 10:51:58,240 DEBUG src.services.gexbot_poller: fetched ES_SPX ts=2025-11-24T15:51:55+00:00 in 0.167s
+2025-11-24 10:51:58,535 DEBUG src.services.gexbot_poller: fetched NDX ts=2025-11-24T15:51:55+00:00 in 0.295s
+2025-11-24 10:51:58,746 DEBUG src.services.gexbot_poller: poll-loop symbols=['NQ_NDX', 'UVXY'] interval=1.000s
+2025-11-24 10:51:58,752 DEBUG src.services.gexbot_poller: fetched QQQ ts=2025-11-24T15:51:55+00:00 in 0.217s
+2025-11-24 10:51:58,831 DEBUG src.services.gexbot_poller: fetched SPX ts=2025-11-24T15:51:55+00:00 in 0.079s
+2025-11-24 10:51:58,988 DEBUG src.services.gexbot_poller: fetched SPY ts=2025-11-24T15:51:55+00:00 in 0.157s
+2025-11-24 10:51:59,066 DEBUG src.services.gexbot_poller: fetched NQ_NDX ts=2025-11-24T15:51:56+00:00 in 0.319s
+INFO:     127.0.0.1:60661 - "POST /uw HTTP/1.1" 200 OK
+2025-11-24 10:51:59,112 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:56+00:00 in 0.125s
+2025-11-24 10:51:59,163 DEBUG src.services.gexbot_poller: poll-loop symbols=['ES_SPX', 'NDX', 'QQQ', 'SPX', 'SPY', 'UVXY'] interval=1.000s
+2025-11-24 10:51:59,164 DEBUG src.services.gexbot_poller: fetched UVXY ts=2025-11-24T15:51:56+00:00 in 0.098s
+2025-11-24 10:51:59,284 DEBUG src.services.gexbot_poller: fetched ES_SPX ts=2025-11-24T15:51:56+00:00 in 0.121s
+2025-11-24 10:51:59,470 DEBUG src.services.gexbot_poller: fetched NDX ts=2025-11-24T15:51:56+00:00 in 0.186s

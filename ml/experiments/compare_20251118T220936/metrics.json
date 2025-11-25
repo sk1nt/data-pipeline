@@ -1,4 +1,0 @@
-{
-  "lstm": "Epoch 1/3 val_acc=0.9079\nEpoch 2/3 val_acc=0.9079\nEpoch 3/3 val_acc=0.9079\nSaved LSTM model to ml/models/lstm_compare_20251118T220936.pt",
-  "cnn": "Epoch 1 val_acc=0.8840\nEpoch 2 val_acc=0.8840\nEpoch 3 val_acc=0.8840\nSaved CNN model to ml/models/cnn_compare_20251118T220936.pt"
-}

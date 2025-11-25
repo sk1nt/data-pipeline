@@ -23,3 +23,4 @@ app = _module.app
 service_manager = _module.service_manager
 _trigger_queue_processing = _module._trigger_queue_processing
 gex_history_queue = _module.gex_history_queue
+ServiceManager = _module.ServiceManager
