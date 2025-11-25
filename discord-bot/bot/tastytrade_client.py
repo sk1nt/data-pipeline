@@ -109,6 +109,24 @@ class TastyTradeClient:
             # Use the session to make API call to trading-status endpoint
             return session._get(f'/accounts/{account.id}/trading-status')
 
+    def get_positions(self) -> list:
+        with self._lock:
+            session = self._ensure_session()
+            account = self._ensure_active_account(session)
+            positions = account.get_positions(session)
+            return [pos.__dict__ for pos in positions]
+
+    def get_orders(self) -> list:
+        with self._lock:
+            session = self._ensure_session()
+            account = self._ensure_active_account(session)
+            orders = account.get_orders(session)
+            return [order.__dict__ for order in orders]
+
+    def get_futures_list(self) -> list:
+        # Return a list of common futures symbols
+        return ['/NQ:XCME', '/ES:XCME', '/MNQ:XCME', '/MES:XCME', '/RTY:XCME', '/YM:XCME']
+
     # ------------------------------------------------------------------
     # internal helpers
 
