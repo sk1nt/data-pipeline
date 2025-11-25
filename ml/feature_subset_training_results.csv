@@ -1,5 +1,0 @@
-subset,num_features,win_rate,net_pnl,trades_taken,edge,commission_cost,threshold
-consensus_2plus,37,0,0.0,0,-0.041999999999999996,0.42,0.3
-consensus_3plus,14,0,0.0,0,-0.041999999999999996,0.42,0.3
-mutual_info,20,0,0.0,0,-0.041999999999999996,0.42,0.3
-original_13,13,0,0.0,0,-0.041999999999999996,0.42,0.3

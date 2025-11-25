@@ -1,6 +1,5 @@
 import sys
 import os
-import json
 import pytest
 from types import SimpleNamespace
 from datetime import datetime, timezone
@@ -99,14 +98,11 @@ async def test_dynamic_enrollment_and_cache_write(monkeypatch):
     # Call the command with 'TST'
     await cmd.callback(ctx, 'TST')
 
-    # Poller should have added TST and fetched
-    assert 'TST' in fake_poller.added
+    # Poller should have fetched TST (no dynamic enrollment required)
     assert 'TST' in fake_poller.fetched
 
-    # Redis should contain latest and snapshot keys
-    cache_key = 'gex:tst:latest'
+    # Redis should contain snapshot key (canonical source)
     snapshot_key = 'gex:snapshot:TST'
-    assert cache_key in fake_redis.store
     assert snapshot_key in fake_redis.store
 
     # Subsequent call to get_gex_data should hit cache and have _source redis-cache or redis-snapshot
@@ -150,19 +146,8 @@ async def test_dynamic_enrollment_writes_dynamic_key_without_local_poller(monkey
     assert cmd
     await cmd.callback(ctx, 'META')
 
-    # Confirm dynamic key exists in Redis
+    # Dynamic enrollment removed — no dynamic key should be written to Redis
     key = 'gexbot:symbols:dynamic'
-    assert key in fake_redis.store
-    # Validate entry contains our symbol in JSON list
-    raw = fake_redis.store.get(key)
-    try:
-        payload = json.loads(raw)
-    except Exception:
-        payload = None
-    assert isinstance(payload, list) and any((isinstance(e, dict) and e.get('symbol') == 'META') or (isinstance(e, str) and e.upper() == 'META') for e in (payload or []))
+    assert key not in fake_redis.store
     assert sent
-    # Also ensure snapshot/cache keys were written
-    cache_key = 'gex:meta:latest'
-    snapshot_key = 'gex:snapshot:META'
-    assert cache_key in fake_redis.store
-    assert snapshot_key in fake_redis.store
+    # No local poller was present, so snapshots may or may not be created by DB/API logic

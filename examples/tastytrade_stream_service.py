@@ -37,14 +37,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def _import_stream_dependencies():
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
-    from scripts.tastytrade_oauth2 import TastyTradeOAuth2 as OAuthHelper
-    from tastytrade import DXLinkStreamer, OAuthSession
+    from tastytrade import DXLinkStreamer
+    from tastytrade.session import Session
     from tastytrade.dxfeed import Quote
 
-    return OAuthHelper, OAuthSession, DXLinkStreamer, Quote
+    return Session, DXLinkStreamer, Quote
 
 
-TastyTradeOAuth2, OAuthSession, DXLinkStreamer, Quote = _import_stream_dependencies()
+Session, DXLinkStreamer, Quote = _import_stream_dependencies()
 
 # Load environment variables from .env file
 load_dotenv(PROJECT_ROOT / ".env")
@@ -87,10 +87,6 @@ class TastyTradeStreamService:
             "http://127.0.0.1:8877/uw"
         )
         self.save_interval = save_interval
-        
-        # Initialize OAuth2 manager
-        use_sandbox = os.getenv('TASTYTRADE_USE_SANDBOX', 'false').lower() == 'true'
-        self.oauth = TastyTradeOAuth2(use_sandbox=use_sandbox)
         
         # Data buffers for each symbol
         self.buffers: Dict[str, List[Dict]] = {symbol: [] for symbol in symbols}
@@ -215,7 +211,7 @@ class TastyTradeStreamService:
             
             logger.info("Creating OAuth2 session...")
             # Create OAuth2 session - it will automatically manage access tokens
-            session = OAuthSession(
+            session = Session(
                 provider_secret=client_secret,
                 refresh_token=refresh_token,
                 is_test=use_sandbox

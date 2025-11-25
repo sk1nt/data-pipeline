@@ -1,6 +1,7 @@
 import redis
 import os
-from typing import Optional
+import json
+from typing import Optional, Dict, Any
 
 class RedisManager:
     def __init__(self):
@@ -33,9 +34,26 @@ class RedisManager:
         self.connection.hset(key, mapping=data)
         self.connection.expire(key, ttl_seconds)
 
-    def get_tick_data(self, key: str) -> Optional[dict]:
-        """Retrieve tick data."""
-        data = self.connection.hgetall(key)
-        return data if data else None
+    def get_tick_data(self, key: str) -> Optional[Dict[str, Any]]:
+        """Retrieve tick data stored either as a hash (our writers) or a JSON string (GEX poller)."""
+        try:
+            data = self.connection.hgetall(key)
+            if data:
+                return data
+        except redis.ResponseError:
+            # Key exists but is not a hash; fall through to GET path
+            pass
+
+        raw = self.connection.get(key)
+        if not raw:
+            return None
+        try:
+            decoded = json.loads(raw)
+            if isinstance(decoded, dict):
+                return decoded
+        except Exception:
+            # Fallback to a simple dict with the raw payload
+            return {"value": raw}
+        return None
 
 redis_manager = RedisManager()

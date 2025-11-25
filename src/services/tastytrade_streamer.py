@@ -8,10 +8,11 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable, Dict, List, Optional, Sequence
 
 try:  # pragma: no cover - optional dependency in some environments
-    from tastytrade import DXLinkStreamer, OAuthSession
+    from tastytrade import DXLinkStreamer
+    from tastytrade.session import Session
     from tastytrade.dxfeed import Quote, Trade
 except ImportError:  # pragma: no cover
-    DXLinkStreamer = Quote = Trade = None  # type: ignore
+    DXLinkStreamer = Session = Quote = Trade = None  # type: ignore
 
 
 LOGGER = logging.getLogger(__name__)
@@ -72,7 +73,7 @@ class TastyTradeStreamer:
             self.settings.symbols,
             self.settings.depth_levels,
         )
-        session = OAuthSession(
+        session = Session(
             provider_secret=self.settings.client_secret,
             refresh_token=self.settings.refresh_token,
         )

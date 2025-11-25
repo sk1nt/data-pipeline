@@ -10,6 +10,14 @@ from tastytrade.dxfeed import Trade
 from backend.src.services.duckdb_service import store_tick_data
 from backend.src.services.redis_service import redis_manager
 
+# Keep writer aligned with reader: single template, default GEX snapshot cache
+REDIS_TICK_KEY_TEMPLATE = os.getenv("REDIS_TICK_KEY_TEMPLATE", "gex:snapshot:{symbol}")
+
+# Optional symbol aliases (upper-case) e.g., NQ -> NQ_NDX
+DEFAULT_SYMBOL_MAP = {
+    "NQ": "NQ_NDX",
+}
+
 # Load environment variables
 load_dotenv()
 
@@ -31,6 +39,7 @@ class TastyTradeIngestion:
             # Convert trade to tick format
             # Clean symbol: remove leading slash and exchange suffix
             symbol = trade.event_symbol.lstrip('/').split(':')[0]
+            symbol = DEFAULT_SYMBOL_MAP.get(symbol.upper(), symbol.upper())
             
             tick = {
                 'symbol': symbol,
@@ -46,8 +55,12 @@ class TastyTradeIngestion:
             # Add to buffer for batch saving
             self.tick_buffer.append(tick)
 
-            # Cache in Redis for real-time access
-            redis_manager.set_tick_data(f"tick:{tick['symbol']}", tick)
+            # Cache in Redis for real-time access using unified key template
+            sym = tick['symbol'].upper()
+            sym = DEFAULT_SYMBOL_MAP.get(sym, sym)
+            redis_key = REDIS_TICK_KEY_TEMPLATE.format(symbol=sym)
+            tick['symbol'] = sym
+            redis_manager.set_tick_data(redis_key, tick)
 
         except Exception as e:
             print(f"Error processing trade: {e}")

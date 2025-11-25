@@ -118,16 +118,9 @@ redis/dump.rdb
 redis/*.log
 data/
 
-# ML outputs
-ml/models/
-ml/output/
-ml/data/
-ml/experiments/
-ml/mlruns/
-ml/mlflow.db
+# Legacy ML artifacts (now live in dedicated repo)
+# Keep ignoring stray experiment/model folders at root to avoid accidental commits.
 experiments/
 output/
 models/
 mlruns/
-ml/mlflow.db
-ml/

@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import json
 import logging
+import secrets
 import sys
 import threading
 import time
@@ -45,7 +46,7 @@ from src.config import settings  # noqa: E402
 from src.import_gex_history import process_historical_imports  # noqa: E402
 from src.lib.gex_history_queue import gex_history_queue  # noqa: E402
 from src.lib.redis_client import RedisClient  # noqa: E402
-from src.services.gexbot_poller import GEXBotPoller, GEXBotPollerSettings  # noqa: E402
+from src.services.gexbot_poller import GEXBotPoller, GEXBotPollerSettings, SNAPSHOT_KEY_PREFIX  # noqa: E402
 from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreamer  # noqa: E402
 from src.services.redis_timeseries import RedisTimeSeriesClient  # noqa: E402
 from src.services.redis_flush_worker import FlushWorkerSettings, RedisFlushWorker  # noqa: E402
@@ -311,12 +312,15 @@ class ServiceManager:
             self.gex_poller = GEXBotPoller(
                 GEXBotPollerSettings(
                     api_key=settings.gexbot_api_key,
-                    symbols=settings.gex_symbol_list,
+                    symbols=[],
                     interval_seconds=settings.gex_poll_interval_seconds,
                     aggregation_period=settings.gex_poll_aggregation,
-                    rth_interval_seconds=settings.gex_poll_rth_interval_seconds,
+                    # Main poller should poll at 5s during RTH regardless of .env
+                    rth_interval_seconds=5.0,
                     off_hours_interval_seconds=settings.gex_poll_off_hours_interval_seconds,
                     dynamic_schedule=settings.gex_poll_dynamic_schedule,
+                    # Exclude the NQ poller symbols from the main poller
+                    exclude_symbols=settings.gex_nq_poll_symbol_list,
                 ),
                 redis_client=self.redis_client,
                 ts_client=self.rts,
@@ -339,6 +343,7 @@ class ServiceManager:
                     rth_interval_seconds=settings.gex_nq_poll_rth_interval_seconds,
                     off_hours_interval_seconds=settings.gex_nq_poll_off_hours_interval_seconds,
                     dynamic_schedule=settings.gex_nq_poll_dynamic_schedule,
+                    sierra_chart_output_path=settings.sierra_chart_output_path,
                 ),
                 redis_client=self.redis_client,
                 ts_client=self.rts,
@@ -752,18 +757,18 @@ CONTROL_SERVICES = {"tastytrade", "schwab", "gex_poller", "gex_nq_poller", "redi
 
 @app.post("/control/{service}/{action}")
 async def control_service(service: str, action: str, request: Request):
-    """Start/stop/restart managed services after verifying the shared token."""
-    if not settings.service_control_token:
-        raise HTTPException(status_code=403, detail="Service control disabled")
-    token = request.headers.get("X-Service-Token") or request.query_params.get("token")
-    if token != settings.service_control_token:
-        raise HTTPException(status_code=403, detail="Invalid control token")
+    """Start/stop/restart managed services (tokenless for fast ops)."""
     service = service.lower()
     if service not in CONTROL_SERVICES:
         raise HTTPException(status_code=400, detail="Unknown service")
     action = action.lower()
     if action not in CONTROL_ACTIONS:
         raise HTTPException(status_code=400, detail="Unsupported action")
+    token = settings.service_control_token
+    if token:
+        provided = request.headers.get("X-Service-Token") or ""
+        if not secrets.compare_digest(provided, token):
+            raise HTTPException(status_code=403, detail="Forbidden")
     if action == "start":
         service_manager.start_service(service)
     elif action == "stop":
@@ -793,7 +798,6 @@ STATUS_PAGE = """
   <h1>Data Pipeline Status</h1>
   <p class=\"warning\">Dashboard auto-refreshes every 3 seconds.</p>
   <div class=\"controls\">
-    <input type=\"password\" id=\"control-token\" placeholder=\"Control token\" />
     <button onclick=\"controlService('discord_bot','restart')\">Restart Discord Bot</button>
     <button onclick=\"controlService('tastytrade','restart')\">Restart TastyTrade</button>
     <button onclick=\"controlService('gex_poller','restart')\">Restart GEX Poller</button>
@@ -813,25 +817,14 @@ STATUS_PAGE = """
       }
     }
     async function controlService(service, action) {
-      const token = document.getElementById('control-token').value.trim();
-      if (!token) {
-        alert('Enter control token first');
-        return;
-      }
       try {
-        const res = await fetch(`/control/${service}/${action}`, {
-          method: 'POST',
-          headers: { 'X-Service-Token': token }
-        });
-        const data = await res.json();
+        const res = await fetch(`/control/${service}/${action}`, { method: 'POST' });
         if (!res.ok) {
-          alert(data.detail || 'Request failed');
-        } else {
-          alert(`Action ${action} queued for ${service}`);
-          refresh();
+          console.warn('Control request failed', await res.text());
         }
+        refresh();
       } catch (err) {
-        alert('Control error: ' + err);
+        console.warn('Control error', err);
       }
     }
     refresh();
@@ -1062,6 +1055,30 @@ async def lookup_depth_diff(symbol: str) -> Dict[str, Any]:
     return summary
 
 
+@app.get("/lookup/gex_snapshot")
+async def lookup_gex_snapshot(symbol: str) -> Dict[str, Any]:
+    """Return the latest cached GEX snapshot for a symbol from Redis."""
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol is required")
+    redis_conn = _get_redis_client()
+    key = f"{SNAPSHOT_KEY_PREFIX}{symbol.upper()}"
+    raw = redis_conn.get(key)
+    if not raw:
+        raise HTTPException(status_code=404, detail="Snapshot not available for symbol")
+    try:
+        snapshot = json.loads(raw)
+    except Exception:
+        try:
+            snapshot = json.loads(raw.decode("utf-8"))
+        except Exception:
+            snapshot = {"raw": raw.decode("utf-8", errors="replace")}
+    return {
+        "symbol": symbol.upper(),
+        "sum_gex_vol": snapshot.get("sum_gex_vol") if isinstance(snapshot, dict) else None,
+        "snapshot": snapshot,
+    }
+
+
 async def _trigger_queue_processing() -> None:
     """Kick processing of any queued historical imports on a worker thread."""
     try:
@@ -1187,7 +1204,7 @@ def _timestamp_ms(value: Optional[str]) -> int:
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments for running the uvicorn server."""
     parser = argparse.ArgumentParser(description="Run data pipeline server")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8877)
     parser.add_argument("--log-level", default="info")
     return parser.parse_args()

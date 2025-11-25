@@ -4,29 +4,56 @@ import os
 from backend.src.models.tick_data import TickData
 from backend.src.services.redis_service import redis_manager
 
+# Single key template for tick snapshots (default GEX snapshot cache).
+REDIS_TICK_KEY_TEMPLATE = os.getenv("REDIS_TICK_KEY_TEMPLATE", "gex:snapshot:{symbol}")
+
+# Optional symbol aliases (e.g., map NQ -> NQ_NDX for GEX). Uppercased keys/values.
+DEFAULT_SYMBOL_MAP = {
+    "NQ": "NQ_NDX",
+}
+
 class TickService:
     def __init__(self):
         self.db_path = os.path.join(os.path.dirname(__file__), '../../../data/tick_data.db')
+
+    def _key_for(self, symbol: str) -> str:
+        sym = symbol.upper()
+        sym = DEFAULT_SYMBOL_MAP.get(sym, sym)
+        return REDIS_TICK_KEY_TEMPLATE.format(symbol=sym)
 
     def get_realtime_ticks(self, symbols: List[str], limit: int = 100) -> List[TickData]:
         """Get real-time tick data from Redis cache."""
         ticks = []
         for symbol in symbols:
-            # Try Redis first
-            redis_key = f"tick:{symbol}:latest"
+            redis_key = self._key_for(symbol)
             cached_data = redis_manager.get_tick_data(redis_key)
-            if cached_data:
-                # Convert to TickData
-                tick = TickData(**cached_data)
-                ticks.append(tick)
-                if len(ticks) >= limit:
-                    break
+            if not cached_data:
+                continue
+            normalized = dict(cached_data)
+            # Normalize symbol to uppercase and apply alias map for downstream consumers
+            sym = normalized.get("symbol") or normalized.get("ticker") or symbol
+            sym = sym.upper()
+            sym = DEFAULT_SYMBOL_MAP.get(sym, sym)
+            normalized["symbol"] = sym
+
+            # Map GEX snapshot fields to TickData schema when missing
+            normalized.setdefault("price", normalized.get("spot"))
+            normalized.setdefault("tick_type", "gex")
+            normalized.setdefault("source", "gexbot")
+            try:
+                tick = TickData(**normalized)
+            except Exception:
+                # Skip malformed payloads
+                continue
+            ticks.append(tick)
+            if len(ticks) >= limit:
+                break
 
         return ticks[:limit]
 
     def store_tick(self, tick: TickData, ttl_seconds: int = 3600):
         """Store tick in Redis with TTL."""
-        redis_key = f"tick:{tick.symbol}:latest"
+        redis_key = self._key_for(tick.symbol)
         data = tick.model_dump()
         redis_manager.set_tick_data(redis_key, data, ttl_seconds)
 

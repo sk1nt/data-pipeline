@@ -1,6 +1,0 @@
-{
-  "lstm": "Epoch 2/5 val_acc=0.9062\nEpoch 3/5 val_acc=0.9062\nEpoch 4/5 val_acc=0.9062\nEpoch 5/5 val_acc=0.9062\nSaved LSTM model to models/lstm_compare_20251119T004816.pt",
-  "cnn": "Epoch 2 val_acc=0.1160\nEpoch 3 val_acc=0.1160\nEpoch 4 val_acc=0.8840\nEpoch 5 val_acc=0.8840\nSaved CNN model to models/cnn_compare_20251119T004816.pt",
-  "lightgbm": "AUC: 0.7718404198553945 ACC: 0.9061421670117322\nSaved model to models/lightgbm_compare_20251119T004816.pkl",
-  "xgboost": "AUC: 0.6513575879622405 ACC: 0.87275\nSaved xgb model to models/xgboost_compare_20251119T004816.pkl"
-}

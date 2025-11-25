@@ -41,12 +41,17 @@ class BotConfig:
     gex_feed_enabled: bool = False
     gex_feed_channel_ids: Optional[Tuple[int, ...]] = None
     gex_feed_symbol: str = 'NQ_NDX'
-    gex_feed_update_seconds: float = 1.0
+    # Faster default cadence; can be overridden via env
+    gex_feed_update_seconds: float = 0.5
     gex_feed_refresh_minutes: int = 5
     gex_feed_window_seconds: int = 60
+    gex_feed_aggregation_seconds: float = 0.25
     gex_feed_metrics_enabled: bool = False
     gex_feed_metrics_key: str = 'metrics:gex_feed'
     gex_feed_force_window: bool = False
+    # Keep Discord rate-limit backoff small to avoid stretching cadence
+    gex_feed_backoff_base_seconds: float = 0.25
+    gex_feed_backoff_max_seconds: float = 1.0
 
 def _parse_channel_ids(value: Optional[str]) -> Optional[List[int]]:
     if not value:
@@ -121,12 +126,15 @@ def create_config_from_env() -> BotConfig:
 
     gex_feed_enabled = os.getenv('GEX_FEED_ENABLED', 'false').lower() == 'true'
     gex_feed_symbol = os.getenv('GEX_FEED_SYMBOL', 'NQ_NDX')
-    gex_feed_update_seconds = float(os.getenv('GEX_FEED_UPDATE_SECONDS', '1.0'))
+    gex_feed_update_seconds = float(os.getenv('GEX_FEED_UPDATE_SECONDS', '0.8'))
     gex_feed_refresh_minutes = int(os.getenv('GEX_FEED_REFRESH_MINUTES', '5'))
     gex_feed_window_seconds = int(os.getenv('GEX_FEED_WINDOW_SECONDS', '60'))
+    gex_feed_aggregation_seconds = float(os.getenv('GEX_FEED_AGGREGATION_SECONDS', '0.2'))
     gex_feed_metrics_enabled = os.getenv('GEX_FEED_METRICS_ENABLED', 'false').lower() == 'true'
     gex_feed_metrics_key = os.getenv('GEX_FEED_METRICS_KEY', 'metrics:gex_feed')
     gex_feed_force_window = os.getenv('GEX_FEED_FORCE_WINDOW', 'false').lower() == 'true'
+    gex_feed_backoff_base_seconds = float(os.getenv('GEX_FEED_BACKOFF_BASE_SECONDS', str(gex_feed_update_seconds)))
+    gex_feed_backoff_max_seconds = float(os.getenv('GEX_FEED_BACKOFF_MAX_SECONDS', '5'))
 
     return BotConfig(
         discord_token=discord_token,
@@ -144,7 +152,10 @@ def create_config_from_env() -> BotConfig:
         gex_feed_update_seconds=gex_feed_update_seconds,
         gex_feed_refresh_minutes=gex_feed_refresh_minutes,
         gex_feed_window_seconds=gex_feed_window_seconds,
+        gex_feed_aggregation_seconds=gex_feed_aggregation_seconds,
         gex_feed_metrics_enabled=gex_feed_metrics_enabled,
         gex_feed_metrics_key=gex_feed_metrics_key,
         gex_feed_force_window=gex_feed_force_window,
+        gex_feed_backoff_base_seconds=gex_feed_backoff_base_seconds,
+        gex_feed_backoff_max_seconds=gex_feed_backoff_max_seconds,
     )

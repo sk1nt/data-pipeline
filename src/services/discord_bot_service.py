@@ -20,6 +20,9 @@ class DiscordBotService:
         self.last_exit_code: Optional[int] = None
         self.last_start: Optional[str] = None
         self.last_stop: Optional[str] = None
+        self.restart_count: int = 0
+        self.last_restart: Optional[str] = None
+        self._log_handle: Optional[Any] = None
 
     def start(self) -> None:
         if self.process and self.process.poll() is None:
@@ -27,12 +30,14 @@ class DiscordBotService:
             return
         env = os.environ.copy()
         LOGGER.info("Starting Discord bot via %s", self.script_path)
+        log_path = self.script_path.parent / "bot.log"
+        self._log_handle = open(log_path, "a", buffering=1)
         self.process = subprocess.Popen(
             [sys.executable, str(self.script_path)],
             cwd=str(self.script_path.parent),
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=self._log_handle,
+            stderr=self._log_handle,
         )
         self.last_start = datetime.utcnow().isoformat()
 
@@ -51,18 +56,36 @@ class DiscordBotService:
         self.last_exit_code = self.process.returncode
         self.process = None
         self.last_stop = datetime.utcnow().isoformat()
+        if self._log_handle:
+            try:
+                self._log_handle.close()
+            except Exception:
+                pass
+            self._log_handle = None
 
     async def restart(self) -> None:
         await self.stop()
+        self.restart_count += 1
+        self.last_restart = datetime.utcnow().isoformat()
         self.start()
 
     def status(self) -> Dict[str, Any]:
         running = self.process is not None and self.process.poll() is None
         pid = self.process.pid if running else None
+        uptime = None
+        if running and self.last_start:
+            try:
+                start_time = datetime.fromisoformat(self.last_start)
+                uptime = (datetime.utcnow() - start_time).total_seconds()
+            except Exception:
+                pass
         return {
             "running": running,
             "pid": pid,
             "last_exit_code": self.last_exit_code,
             "last_start": self.last_start,
             "last_stop": self.last_stop,
+            "restart_count": self.restart_count,
+            "last_restart": self.last_restart,
+            "uptime_seconds": uptime,
         }

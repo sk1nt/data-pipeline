@@ -22,6 +22,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "httpx>=0.25.2",
     "websocket-client>=1.6.4",
+    "requests>=2.0.0",
+    "schwab-py>=1.0.0",
 ]
 
 [project.optional-dependencies]

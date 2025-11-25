@@ -1,17 +1,38 @@
 import asyncio
 import logging
+import os
+from pathlib import Path
 
 from bot.config import create_config_from_env
 from bot.trade_bot import TradeBot
 from env_loader import load_env_file
 
 async def main():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    logging.getLogger('discord.client').setLevel(logging.WARNING)
-    logging.getLogger('discord.gateway').setLevel(logging.WARNING)
-    logging.getLogger('discord.http').setLevel(logging.WARNING)
-
+    # Load env before configuring logging so level/env overrides work
     load_env_file()
+
+    log_level_name = os.getenv('DISCORD_BOT_LOG_LEVEL', 'INFO').upper()
+    lib_log_level_name = os.getenv('DISCORD_LIB_LOG_LEVEL', 'WARNING').upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
+    lib_log_level = getattr(logging, lib_log_level_name, logging.WARNING)
+
+    log_path = Path(__file__).resolve().parent / 'bot.log'
+    handlers = [
+        logging.StreamHandler(),
+        logging.FileHandler(log_path, encoding='utf-8'),
+    ]
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=handlers,
+        force=True,
+    )
+
+    # Discord library loggers
+    logging.getLogger('discord').setLevel(lib_log_level)
+    logging.getLogger('discord.client').setLevel(lib_log_level)
+    logging.getLogger('discord.gateway').setLevel(lib_log_level)
+    logging.getLogger('discord.http').setLevel(lib_log_level)
     config = create_config_from_env()
     bot = TradeBot(config)
 
