@@ -5,6 +5,9 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Optional
+import logging
+import hashlib
+import time
 from tastytrade.order import NewOrder, Leg, OrderType, OrderTimeInForce, OrderAction, InstrumentType
 from tastytrade.instruments import Future, FutureProduct
 
@@ -26,6 +29,9 @@ class AccountSummary:
     buying_power: float
     net_liq: float
     cash_balance: float
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class TastyTradeClient:
@@ -51,6 +57,11 @@ class TastyTradeClient:
         self._accounts: Dict[str, Account] = {}
         self._active_account = default_account
         self._symbol_cache: Dict[str, Dict[str, any]] = {}
+        self._needs_reauth: bool = False
+        self._reauth_backoff_seconds: int = 60
+        self._reauth_thread: Optional[threading.Thread] = None
+        # Start reauth worker thread
+        self._start_reauth_worker()
 
 
     @property
@@ -80,12 +91,13 @@ class TastyTradeClient:
                 account = self._ensure_active_account(session)
             except Exception as exc:
                 msg = str(exc)
-                print(f"TastyTrade session/account init failed: {msg}")
+                LOGGER.warning("TastyTrade session/account init failed: %s", msg)
                 if 'invalid_grant' in msg or 'Grant revoked' in msg or 'invalid_token' in msg:
+                    self._mark_needs_reauth()
                     raise RuntimeError(
                         "TastyTrade authentication failed (refresh token invalid or revoked). "
-                        "Run `python scripts/get_tastytrade_refresh_token.py --sandbox` to retrieve a new token, "
-                        "update your .env with TASTYTRADE_REFRESH_TOKEN, and restart the bot."
+                        "Use `set_refresh_token(...)` or run `python scripts/get_tastytrade_refresh_token.py --sandbox` "
+                        "to obtain a new token and then call `set_refresh_token` or restart the bot."
                     )
                 raise
             balances = account.get_balances(session)
@@ -137,7 +149,12 @@ class TastyTradeClient:
         with self._lock:
             session = self._ensure_session()
             account = self._ensure_active_account(session)
-            orders = account.get_orders(session)
+            # Try SDK helper for today's orders; fall back to raw endpoint
+            try:
+                orders = account.get_live_orders(session)
+            except Exception:
+                raw = session._get(f'/accounts/{account.account_number}/orders')
+                orders = raw.get('data', {}).get('items', [])
             return [order.__dict__ for order in orders]
 
     def get_futures_list(self) -> list:
@@ -170,16 +187,12 @@ class TastyTradeClient:
             except Exception as exc:  # pragma: no cover - handle invalid grant
                 msg = str(exc).lower()
                 if 'invalid_grant' in msg or 'grant revoked' in msg or 'invalid_token' in msg:
-                    # Attempt to recreate session once with existing refresh_token
-                    try:
-                        self._session = Session(
-                            provider_secret=self._client_secret,
-                            refresh_token=self._refresh_token,
-                            is_test=self._use_sandbox,
-                        )
-                        return self._session
-                    except Exception:
-                        raise
+                    self._mark_needs_reauth()
+                    raise RuntimeError(
+                        "TastyTrade authentication failed (refresh token invalid or revoked). "
+                        "Use `set_refresh_token(...)` or run `python scripts/get_tastytrade_refresh_token.py --sandbox` "
+                        "to obtain a new token and then call `set_refresh_token` or restart the bot."
+                    )
                 raise
         return self._session
 
@@ -193,10 +206,39 @@ class TastyTradeClient:
         self._session = Session(provider_secret=self._client_secret, refresh_token=self._refresh_token, is_test=self._use_sandbox)
         # clear cached symbols to avoid possible stale mappings
         self._symbol_cache.clear()
+        self._needs_reauth = False
+        # Attempt to create a new session immediately
+        try:
+            self._session = Session(provider_secret=self._client_secret, refresh_token=self._refresh_token, is_test=self._use_sandbox)
+        except Exception:
+            # If immediate creation fails, mark for reauth attempts
+            self._needs_reauth = True
 
     def set_dry_run(self, flag: bool) -> None:
         """Turn on/off dry-run (prevent actual order execution)."""
         self._dry_run = bool(flag)
+
+    def set_use_sandbox(self, flag: bool) -> None:
+        """Switch the client runtime environment between sandbox and live.
+
+        Toggles the `is_test` flag used during session initialization, and
+        attempts to reinitialize the session. If initialization fails, the
+        client will mark itself as needing reauth and clear the session.
+        """
+        self._use_sandbox = bool(flag)
+        # Clear session so the next call reinitializes using the updated flag
+        self._session = None
+        try:
+            self._session = Session(provider_secret=self._client_secret, refresh_token=self._refresh_token, is_test=self._use_sandbox)
+            self._needs_reauth = False
+        except Exception:
+            self._session = None
+            self._needs_reauth = True
+
+    def _mark_needs_reauth(self) -> None:
+        """Mark that the session needs reauthorization and clear current session."""
+        self._needs_reauth = True
+        self._session = None
 
     def get_auth_status(self) -> Dict[str, any]:
         """Return authentication/session/account status. """
@@ -218,7 +260,43 @@ class TastyTradeClient:
             status['session_expiration'] = getattr(session, 'session_expiration', None)
         except Exception as exc:
             status['error'] = str(exc)
+            # If it's an auth issue, mark for reauth
+            msg = str(exc).lower()
+            if 'invalid_grant' in msg or 'grant revoked' in msg or 'invalid_token' in msg:
+                self._mark_needs_reauth()
+        status['needs_reauth'] = getattr(self, '_needs_reauth', False)
+        status['refresh_token_hash'] = self._hash_token(getattr(self, '_refresh_token', ''))
         return status
+
+    def _hash_token(self, token: str) -> str:
+        if not token:
+            return ''
+        # Return short SHA256 fingerprint to display safely
+        h = hashlib.sha256(token.encode('utf-8')).hexdigest()
+        return h[:12]
+
+    def _start_reauth_worker(self) -> None:
+        if self._reauth_thread and self._reauth_thread.is_alive():
+            return
+        self._reauth_thread = threading.Thread(target=self._reauth_worker, daemon=True)
+        self._reauth_thread.start()
+
+    def _reauth_worker(self) -> None:
+        # Background thread that tries to reinitialize session when needed
+        while True:
+            try:
+                if self._needs_reauth:
+                    try:
+                        self._session = Session(provider_secret=self._client_secret, refresh_token=self._refresh_token, is_test=self._use_sandbox)
+                        self._needs_reauth = False
+                        # keep symbol cache fresh
+                        self._symbol_cache.clear()
+                        LOGGER.info('TastyTrade session reinitialized by reauth worker')
+                    except Exception:
+                        LOGGER.debug('TastyTrade reauth attempt failed; will retry')
+                time.sleep(self._reauth_backoff_seconds)
+            except Exception:
+                time.sleep(self._reauth_backoff_seconds)
 
     def _resolve_front_month_symbol(self, product_code: str) -> Optional[str]:
         """Return front-month TW symbol (like /NQZ5) for a product code like 'NQ'. Caches to avoid repeated API calls."""
@@ -274,6 +352,66 @@ class TastyTradeClient:
             self._active_account = next(iter(self._accounts))
         return self._accounts[self._active_account]
 
+    def cancel_order(self, order_id: str) -> dict:
+        """Cancel an open order by ID. Returns raw response dict."""
+        with self._lock:
+            session = self._ensure_session()
+            account = self._ensure_active_account(session)
+            try:
+                # No SDK helper; call delete endpoint directly
+                resp = session._delete(f"/accounts/{account.account_number}/orders/{order_id}")
+                return resp
+            except Exception as exc:
+                msg = str(exc)
+                LOGGER.warning("Failed to cancel order %s: %s", order_id, msg)
+                if 'invalid_grant' in msg or 'Grant revoked' in msg or 'invalid_token' in msg:
+                    self._mark_needs_reauth()
+                    raise RuntimeError(
+                        "TastyTrade authentication failed (refresh token invalid or revoked). "
+                        "Use `set_refresh_token(...)` or run `python scripts/get_tastytrade_refresh_token.py --sandbox` "
+                        "to obtain a new token and then call `set_refresh_token` or restart the bot."
+                    )
+                raise
+
+    def get_order(self, order_id: str) -> dict:
+        """Return the placed order payload for given ID."""
+        with self._lock:
+            session = self._ensure_session()
+            account = self._ensure_active_account(session)
+            try:
+                orders = account.get_orders(session)
+                for o in orders:
+                    if str(getattr(o, 'id', '')) == str(order_id) or getattr(o, 'id', '') == order_id:
+                        return o.__dict__
+                # Not found; try fetching directly
+                resp = session._get(f"/accounts/{account.account_number}/orders/{order_id}")
+                return resp
+            except Exception as exc:
+                msg = str(exc)
+                LOGGER.warning("Failed to fetch order %s: %s", order_id, msg)
+                raise
+
+    def replace_order(self, order_id: str, *, price: Optional[float] = None, time_in_force: Optional[OrderTimeInForce] = None) -> dict:
+        """Replace an existing order (adjust price or TIF)."""
+        from tastytrade.order import NewOrder
+        with self._lock:
+            session = self._ensure_session()
+            account = self._ensure_active_account(session)
+            try:
+                # Build new order with provided fields; no legs required for replace
+                new_order = NewOrder(
+                    time_in_force=time_in_force or OrderTimeInForce.DAY,
+                    order_type=OrderType.LIMIT if price is not None else OrderType.MARKET,
+                    price=price or None,
+                    legs=[],
+                )
+                placed = account.replace_order(session, int(order_id), new_order)
+                return getattr(placed, '__dict__', placed)
+            except Exception as exc:
+                msg = str(exc)
+                LOGGER.warning('Failed to replace order %s: %s', order_id, msg)
+                raise
+
     @staticmethod
     def _to_float(value: Optional[float]) -> float:
         if value is None:
@@ -301,6 +439,7 @@ class TastyTradeClient:
         tp_ticks: float,
         tick_size: float = 0.25,
         dry_run: Optional[bool] = None,
+        market_price: Optional[float] = None,
     ) -> str:
         """Place a market order and a TP limit order."""
         with self._lock:
@@ -313,8 +452,11 @@ class TastyTradeClient:
             # Determine instrument type enum
             inst_type = InstrumentType.FUTURE if symbol.startswith('/') else InstrumentType.EQUITY
 
-            # Get current price (approximate from quote)
-            current_price = self._get_current_price(session, symbol)
+            # Get current price (approximate from quote) or use provided market_price
+            if market_price is not None:
+                current_price = float(market_price)
+            else:
+                current_price = self._get_current_price(session, symbol)
 
             # Calculate TP price
             if action.upper() == 'BUY':
@@ -323,10 +465,25 @@ class TastyTradeClient:
                 tp_price = current_price - (tp_ticks * tick_size)
 
             # Build Leg and NewOrder using SDK models
-            leg_action = OrderAction.BUY if action.upper() == 'BUY' else OrderAction.SELL
-            leg = Leg(instrument_type=inst_type, symbol=symbol, action=leg_action, quantity=quantity)
+            # For futures, use buy-to-open / sell-to-open to indicate open positions
+            if inst_type == InstrumentType.FUTURE:
+                leg_action = OrderAction.BUY_TO_OPEN if action.upper() == 'BUY' else OrderAction.SELL_TO_OPEN
+            else:
+                leg_action = OrderAction.BUY if action.upper() == 'BUY' else OrderAction.SELL
+            # SDK prefers plain contract symbol for futures (like 'NQH26'), not leading '/'
+            leg_symbol = symbol.lstrip('/') if isinstance(symbol, str) else symbol
+            if isinstance(leg_symbol, str) and ':' in leg_symbol:
+                leg_symbol = leg_symbol.split(':', 1)[0]
+            leg = Leg(instrument_type=inst_type, symbol=leg_symbol, action=leg_action, quantity=quantity)
             market_order = NewOrder(time_in_force=OrderTimeInForce.DAY, order_type=OrderType.MARKET, legs=[leg])
-            print(f"Sending market NewOrder (dry-run={self._use_sandbox}): {market_order}")
+            eff_dry = self._dry_run if dry_run is None else bool(dry_run)
+            # Show the actual JSON that'll be sent to TastyTrade (for debugging)
+            LOGGER.info("Sending market NewOrder (dry-run=%s): %s", eff_dry, market_order)
+            try:
+                order_json = market_order.model_dump_json(exclude_none=True, by_alias=True)
+                LOGGER.debug("Market order JSON: %s", order_json)
+            except Exception:
+                LOGGER.debug("Market order JSON: <unserializable>")
             # Use account.place_order to post the typed model (dry-run in sandbox)
             try:
                 eff_dry = self._dry_run if dry_run is None else bool(dry_run)
@@ -334,31 +491,42 @@ class TastyTradeClient:
                 market_order_id = getattr(placed_market, 'id', None)
             except Exception as exc:
                 msg = str(exc)
-                print(f"Market order failed: {msg}")
+                LOGGER.warning("Market order failed: %s", msg)
                 if 'invalid_grant' in msg or 'Grant revoked' in msg or 'invalid_token' in msg:
+                    self._mark_needs_reauth()
                     raise RuntimeError(
                         "TastyTrade authentication failed (refresh token invalid or revoked). "
-                        "Run `python scripts/get_tastytrade_refresh_token.py --sandbox` to retrieve a new token, "
-                        "update your .env with TASTYTRADE_REFRESH_TOKEN, and restart the bot."
+                        "Use `set_refresh_token(...)` or run `python scripts/get_tastytrade_refresh_token.py --sandbox` "
+                        "to obtain a new token and then call `set_refresh_token` or restart the bot."
                     )
                 raise
 
             # Place TP limit order
-            tp_action = OrderAction.BUY if action.upper() == 'SELL' else OrderAction.SELL
+            # TP action is the opposite close action for futures
+            if inst_type == InstrumentType.FUTURE:
+                tp_action = OrderAction.BUY_TO_CLOSE if action.upper() == 'SELL' else OrderAction.SELL_TO_CLOSE
+            else:
+                tp_action = OrderAction.BUY if action.upper() == 'SELL' else OrderAction.SELL
             tp_leg = Leg(instrument_type=inst_type, symbol=symbol, action=tp_action, quantity=quantity)
             tp_order = NewOrder(time_in_force=OrderTimeInForce.GTC, order_type=OrderType.LIMIT, price=tp_price, legs=[tp_leg])
-            print(f"Sending TP NewOrder (dry-run={self._use_sandbox}): {tp_order}")
+            LOGGER.info("Sending TP NewOrder (dry-run=%s): %s", eff_dry, tp_order)
+            try:
+                tp_json = tp_order.model_dump_json(exclude_none=True, by_alias=True)
+                LOGGER.debug("TP order JSON: %s", tp_json)
+            except Exception:
+                LOGGER.debug("TP order JSON: <unserializable>")
             try:
                 placed_tp = account.place_order(session, tp_order, dry_run=eff_dry)
                 tp_order_id = getattr(placed_tp, 'id', None)
             except Exception as exc:
                 msg = str(exc)
-                print(f"TP order failed: {msg}")
+                LOGGER.warning("TP order failed: %s", msg)
                 if 'invalid_grant' in msg or 'Grant revoked' in msg or 'invalid_token' in msg:
+                    self._mark_needs_reauth()
                     raise RuntimeError(
                         "TastyTrade authentication failed (refresh token invalid or revoked). "
-                        "Run `python scripts/get_tastytrade_refresh_token.py --sandbox` to retrieve a new token, "
-                        "update your .env with TASTYTRADE_REFRESH_TOKEN, and restart the bot."
+                        "Use `set_refresh_token(...)` or run `python scripts/get_tastytrade_refresh_token.py --sandbox` "
+                        "to obtain a new token and then call `set_refresh_token` or restart the bot."
                     )
                 raise
             # No additional outer error handling past TP order except
@@ -383,8 +551,31 @@ class TastyTradeClient:
     def _get_current_price(self, session, symbol: str) -> float:
         # Get quote
         if symbol.startswith('/'):
-            # Future
-            quote_data = session._get(f'/quotes/futures?symbol={symbol}')['data']['items']
+            # Future: API sometimes expects symbol without exchange suffix or leading '/'.
+            # Try several common variants to avoid 404 responses.
+            variants = []
+            raw = symbol.lstrip('/')
+            variants.append('/' + raw)
+            variants.append(raw)
+            # If symbol contains exchange suffix (like :XCME), strip it
+            if ':' in raw:
+                base = raw.split(':', 1)[0]
+                variants.append('/' + base)
+                variants.append(base)
+            quote_data = None
+            last_exc = None
+            for v in variants:
+                try:
+                    resp = session._get(f'/quotes/futures?symbol={v}')
+                    quote_data = resp['data']['items']
+                    LOGGER.debug('Quote fetch succeeded for variant: %s', v)
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    LOGGER.debug('Quote fetch failed for variant %s: %s', v, exc)
+            if quote_data is None and last_exc is not None:
+                # Re-raise last exception to bubble up
+                raise last_exc
         else:
             # Equity
             quote_data = session._get(f'/quotes/equities?symbol={symbol}')['data']['items']

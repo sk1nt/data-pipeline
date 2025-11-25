@@ -105,6 +105,9 @@ class TradeBot(commands.Bot):
                 poller = getattr(self, 'gex_poller', None)
 
                 if poller:
+                    # If client is configured for sandbox, inform user that 'live' will still be a sandbox submission
+                    if dry_run is False and getattr(self.tastytrade_client, '_use_sandbox', False):
+                        await self._send_dm_or_warn(ctx, 'Bot is configured for sandbox environment; live requests will be submitted to the sandbox and not to production. To route real orders, configure the bot with production credentials and disable sandbox mode.')
                     try:
                         # No dynamic enrollment; just fetch snapshot from poller if available
                         if hasattr(poller, 'fetch_symbol_now'):
@@ -205,6 +208,18 @@ class TradeBot(commands.Bot):
                     await self._send_dm_or_warn(ctx, dm_msg)
                     return
                 if subcommand == 'help':
+                    # Contextual help support: `!tt help cancel` gives targeted info
+                    if len(args) >= 2:
+                        topic = args[1].lower()
+                        if topic == 'order' or topic == 'orders':
+                            await self._send_dm_or_warn(ctx, '`!tt orders` - list open orders; `!tt order <order_id>` - show details; `!tt cancel <order_id>` - cancel the order; `!tt replace <order_id> <price>` - replace order price')
+                            return
+                        if topic == 'trade' or topic in ('buy', 'sell'):
+                            await self._send_dm_or_warn(ctx, 'Trading: `!tt buy <symbol> <tp_ticks> [qty] [live]` - market+TP; `!tt sell ...`')
+                            return
+                        if topic == 'auth':
+                            await self._send_dm_or_warn(ctx, 'Auth: `!tt auth status|refresh <token>|dryrun <true|false>|sandbox <true|false>|default set <account_id>`')
+                            return
                     help_msg = (
                         "**TastyTrade Bot Commands (!tt):**\n\n"
                         "**Account Management:**\n"
@@ -214,6 +229,7 @@ class TradeBot(commands.Bot):
                         "• `!tt auth status` - Show TastyTrade auth/session status\n"
                         "• `!tt auth refresh <token>` - Update refresh token and reinitialize session\n"
                         "• `!tt auth dryrun <true|false>` - Toggle dry-run mode for orders\n"
+                        "• `!tt auth sandbox <true|false>` - Toggle sandbox (test) environment\n"
                         "• `!tt auth default set <account_id>` - Set default TastyTrade account\n"
                         "• `!tt auth get-refresh` - Instructions to fetch a refresh token\n"
                         "• `!tt accounts` - List all accounts\n"
@@ -232,6 +248,11 @@ class TradeBot(commands.Bot):
                         "• `!tt account 123456789` - Switch to account 123456789\n"
                         "• `!tt buy AAPL 4` - Buy 1 share of AAPL, TP 1 point above\n"
                         "• `!tt sell /NQ:XCME 20 5` - Sell 5 NQ contracts, TP 5 points below\n\n"
+                        "**Order Management:**\n"
+                        "• `!tt cancel <order_id>` - Cancel an order by ID\n"
+                        "• `!tt replace <order_id> <price>` - Replace existing order price (limit)\n"
+                        "• `!tt order <order_id>` - Show order details\n"
+                        "• `!tt close <symbol> [quantity]` - Close existing position with market order\n\n"
                         "**Notes:**\n"
                         "• All commands require privileged access\n"
                         "• Trading commands place both market and limit TP orders\n"
@@ -262,15 +283,94 @@ class TradeBot(commands.Bot):
                             dry_run = False
                         elif args[4].lower() in ('dry', 'dryrun', 'test'):
                             dry_run = True
+                    market_price = None
+                    if symbol.startswith('/') or symbol.upper() in self.ticker_aliases:
+                            # Normalize to feed symbol and fetch snapshot
+                            feed_symbol = self.ticker_aliases.get(symbol.upper(), symbol.upper())
+                            try:
+                                snap = await self.get_gex_snapshot(feed_symbol)
+                                if snap and isinstance(snap.get('spot_price'), (int, float)):
+                                    market_price = float(snap.get('spot_price'))
+                            except Exception:
+                                market_price = None
                     try:
+                        # Pass dry_run as keyword to avoid being treated as tick_size
                         result = await asyncio.to_thread(
                             self.tastytrade_client.place_market_order_with_tp,
-                            symbol, action, quantity, tp_ticks
-                            , dry_run
+                            symbol, action, quantity, tp_ticks,
+                            dry_run=dry_run,
+                                market_price=market_price,
                         )
                         await self._send_dm_or_warn(ctx, result)
                     except Exception as e:
                         await self._send_dm_or_warn(ctx, f'Order failed: {e}')
+                    return
+                if subcommand == 'cancel' and len(args) >= 2:
+                    if not await self._ensure_privileged(ctx):
+                        return
+                    order_id = args[1]
+                    try:
+                        resp = await asyncio.to_thread(self.tastytrade_client.cancel_order, order_id)
+                        await self._send_dm_or_warn(ctx, f'Cancel successful: {resp}')
+                    except Exception as exc:
+                        await self._send_dm_or_warn(ctx, f'Failed to cancel: {exc}')
+                    return
+                if subcommand == 'replace' and len(args) >= 3:
+                    if not await self._ensure_privileged(ctx):
+                        return
+                    order_id = args[1]
+                    try:
+                        price = float(args[2])
+                    except Exception:
+                        await self._send_dm_or_warn(ctx, 'Invalid price for replace')
+                        return
+                    try:
+                        result = await asyncio.to_thread(self.tastytrade_client.replace_order, order_id, price=price)
+                        await self._send_dm_or_warn(ctx, f'Replaced order: {result}')
+                    except Exception as exc:
+                        await self._send_dm_or_warn(ctx, f'Failed to replace order: {exc}')
+                    return
+                if subcommand == 'order' and len(args) >= 2:
+                    order_id = args[1]
+                    try:
+                        data = await asyncio.to_thread(self.tastytrade_client.get_order, order_id)
+                        await self._send_dm_or_warn(ctx, f'Order {order_id}: {data}')
+                    except Exception as exc:
+                        await self._send_dm_or_warn(ctx, f'Failed to fetch order: {exc}')
+                    return
+                if subcommand == 'close' and len(args) >= 2:
+                    # close a position: close <symbol> [quantity]
+                    if not await self._ensure_privileged(ctx):
+                        return
+                    symbol = args[1]
+                    qty = 1
+                    if len(args) >= 3:
+                        try:
+                            qty = int(args[2])
+                        except Exception:
+                            await self._send_dm_or_warn(ctx, 'Invalid quantity')
+                            return
+                    # Build an order opposite to current pos to close
+                    # For simplicity, submit a market order in reverse direction
+                    try:
+                        # Determine direction based on current positions
+                        positions = await asyncio.to_thread(self.tastytrade_client.get_positions)
+                        pos_map = {p.get('symbol'): p for p in positions}
+                        sym = symbol.upper()
+                        pos = pos_map.get(sym) or pos_map.get(sym.lstrip('/'))
+                        if not pos:
+                            await self._send_dm_or_warn(ctx, f'No position found for {symbol}')
+                            return
+                        current_qty = int(pos.get('quantity') or 0)
+                        if current_qty == 0:
+                            await self._send_dm_or_warn(ctx, f'No position to close for {symbol}')
+                            return
+                        # Determine action to close: if position is positive (long), sell to close
+                        action = 'SELL' if current_qty > 0 else 'BUY'
+                        result = await asyncio.to_thread(self.tastytrade_client.place_market_order_with_tp, symbol, action, qty, 0, dry_run=dry_run)
+                        await self._send_dm_or_warn(ctx, result)
+                    except Exception as exc:
+                        await self._send_dm_or_warn(ctx, f'Failed to close position: {exc}')
                     return
                 if subcommand == 'accounts':
                     accounts = await asyncio.to_thread(self.tastytrade_client.get_accounts)
@@ -296,71 +396,82 @@ class TradeBot(commands.Bot):
                         msg = "No futures found."
                     await self._send_dm_or_warn(ctx, msg)
                     return
+                if subcommand == 'auth' and len(args) >= 2:
+                    # auth subcommands: refresh, status, dryrun, default
+                    act = args[1].lower()
+                    if act == 'refresh' and len(args) >= 3:
+                        if not await self._ensure_privileged(ctx):
+                            return
+                        new_token = args[2]
+                        try:
+                            await asyncio.to_thread(self.tastytrade_client.set_refresh_token, new_token)
+                            await self._send_dm_or_warn(ctx, 'TastyTrade refresh token updated; session reinitialized.')
+                        except Exception as exc:
+                            await self._send_dm_or_warn(ctx, f'Failed to update refresh token: {exc}')
+                        return
+                    if act == 'status':
+                        if not await self._ensure_privileged(ctx):
+                            return
+                        status = await asyncio.to_thread(self.tastytrade_client.get_auth_status)
+                        if not isinstance(status, dict):
+                            await self._send_dm_or_warn(ctx, 'Unable to fetch auth status')
+                            return
+                        msg = (
+                            f"TastyTrade Auth Status:\n"
+                            f"Session Valid: {status.get('session_valid')}\n"
+                            f"Active Account: {status.get('active_account')}\n"
+                            f"Accounts: {', '.join(status.get('accounts') or [])}\n"
+                            f"Use Sandbox: {status.get('use_sandbox')}\n"
+                            f"Dry Run: {status.get('dry_run')}\n"
+                        )
+                        err = status.get('error')
+                        if err:
+                            msg += f"Error: {err}\n"
+                        await self._send_dm_or_warn(ctx, msg)
+                        return
+                    if act == 'dryrun' and len(args) >= 3:
+                        if not await self._ensure_privileged(ctx):
+                            return
+                        val = args[2].lower()
+                        flag = val in ('true', '1', 'yes', 'on', 'enable', 'enabled')
+                        await asyncio.to_thread(self.tastytrade_client.set_dry_run, flag)
+                        await self._send_dm_or_warn(ctx, f"Set TastyTrade dry_run = {flag}")
+                        return
+                    if act == 'default' and len(args) >= 4 and args[2].lower() == 'set':
+                        if not await self._ensure_privileged(ctx):
+                            return
+                        target = args[3]
+                        success = await asyncio.to_thread(self.tastytrade_client.set_active_account, target)
+                        msg = f"Active account set to {target}" if success else f"Failed to set active account to {target}"
+                        await self._send_dm_or_warn(ctx, msg)
+                        return
+                    if act == 'get-refresh':
+                        if not await self._ensure_privileged(ctx):
+                            return
+                        await self._send_dm_or_warn(ctx, 'To retrieve a refresh token, run `python scripts/get_tastytrade_refresh_token.py --sandbox` locally and update your .env or paste token here using `!tt auth refresh <token>`.')
+                        return
+                    # !tt auth refresh <token>
+                    if not await self._ensure_privileged(ctx):
+                        return
+                    new_token = args[2]
+                    try:
+                        await asyncio.to_thread(self.tastytrade_client.set_refresh_token, new_token)
+                        await self._send_dm_or_warn(ctx, 'TastyTrade refresh token updated; session reinitialized.')
+                    except Exception as exc:
+                        await self._send_dm_or_warn(ctx, f'Failed to update refresh token: {exc}')
+                    return
+                    if act == 'sandbox' and len(args) >= 3:
+                        if not await self._ensure_privileged(ctx):
+                            return
+                        val = args[2].lower()
+                        flag = val in ('true', '1', 'yes', 'on', 'enable', 'enabled')
+                        try:
+                            await asyncio.to_thread(self.tastytrade_client.set_use_sandbox, flag)
+                            await self._send_dm_or_warn(ctx, f"Set TastyTrade sandbox mode = {flag}")
+                        except Exception as exc:
+                            await self._send_dm_or_warn(ctx, f"Failed to set sandbox mode: {exc}")
+                        return
                 if subcommand == 'orders':
-                                    if subcommand == 'auth' and len(args) >= 2:
-                                        # auth subcommands: refresh, status, dryrun, default
-                                        act = args[1].lower()
-                                        if act == 'refresh' and len(args) >= 3:
-                                            if not await self._ensure_privileged(ctx):
-                                                return
-                                            new_token = args[2]
-                                            try:
-                                                await asyncio.to_thread(self.tastytrade_client.set_refresh_token, new_token)
-                                                await self._send_dm_or_warn(ctx, 'TastyTrade refresh token updated; session reinitialized.')
-                                            except Exception as exc:
-                                                await self._send_dm_or_warn(ctx, f'Failed to update refresh token: {exc}')
-                                            return
-                                        if act == 'status':
-                                            if not await self._ensure_privileged(ctx):
-                                                return
-                                            status = await asyncio.to_thread(self.tastytrade_client.get_auth_status)
-                                            if not isinstance(status, dict):
-                                                await self._send_dm_or_warn(ctx, 'Unable to fetch auth status')
-                                                return
-                                            msg = (
-                                                f"TastyTrade Auth Status:\n"
-                                                f"Session Valid: {status.get('session_valid')}\n"
-                                                f"Active Account: {status.get('active_account')}\n"
-                                                f"Accounts: {', '.join(status.get('accounts') or [])}\n"
-                                                f"Use Sandbox: {status.get('use_sandbox')}\n"
-                                                f"Dry Run: {status.get('dry_run')}\n"
-                                            )
-                                            err = status.get('error')
-                                            if err:
-                                                msg += f"Error: {err}\n"
-                                            await self._send_dm_or_warn(ctx, msg)
-                                            return
-                                        if act == 'dryrun' and len(args) >= 3:
-                                            if not await self._ensure_privileged(ctx):
-                                                return
-                                            val = args[2].lower()
-                                            flag = val in ('true', '1', 'yes', 'on', 'enable', 'enabled')
-                                            await asyncio.to_thread(self.tastytrade_client.set_dry_run, flag)
-                                            await self._send_dm_or_warn(ctx, f"Set TastyTrade dry_run = {flag}")
-                                            return
-                                        if act == 'default' and len(args) >= 4 and args[2].lower() == 'set':
-                                            if not await self._ensure_privileged(ctx):
-                                                return
-                                            target = args[3]
-                                            success = await asyncio.to_thread(self.tastytrade_client.set_active_account, target)
-                                            msg = f"Active account set to {target}" if success else f"Failed to set active account to {target}"
-                                            await self._send_dm_or_warn(ctx, msg)
-                                            return
-                                        if act == 'get-refresh':
-                                            if not await self._ensure_privileged(ctx):
-                                                return
-                                            await self._send_dm_or_warn(ctx, 'To retrieve a refresh token, run `python scripts/get_tastytrade_refresh_token.py --sandbox` locally and update your .env or paste token here using `!tt auth refresh <token>`.')
-                                            return
-                                        # !tt auth refresh <token>
-                                        if not await self._ensure_privileged(ctx):
-                                            return
-                                        new_token = args[2]
-                                        try:
-                                            await asyncio.to_thread(self.tastytrade_client.set_refresh_token, new_token)
-                                            await self._send_dm_or_warn(ctx, 'TastyTrade refresh token updated; session reinitialized.')
-                                        except Exception as exc:
-                                            await self._send_dm_or_warn(ctx, f'Failed to update refresh token: {exc}')
-                                        return
                     orders = await asyncio.to_thread(self.tastytrade_client.get_orders)
                     if orders:
                         msg = "**Orders:**\n" + "\n".join([f"• {ord.get('id', 'N/A')}: {ord.get('action', 'N/A')} {ord.get('quantity', 0)} {ord.get('symbol', 'N/A')} @ {ord.get('price', 'N/A')}" for ord in orders])

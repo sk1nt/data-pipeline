@@ -39,31 +39,6 @@ def test_status_page(monkeypatch):
     assert "Data Pipeline Status" in response.text
 
 
-def test_control_requires_token(monkeypatch):
-    monkeypatch.setattr(module.settings, "service_control_token", "secret")
-    with make_client(monkeypatch) as client:
-        response = client.post("/control/tastytrade/restart")
-    assert response.status_code == 403
-
-
-def test_control_restart(monkeypatch):
-    monkeypatch.setattr(module.settings, "service_control_token", "secret")
-
-    async def fake_restart(name):
-        fake_restart.called = name
-
-    fake_restart.called = None
-    monkeypatch.setattr(module.service_manager, "restart_service", fake_restart)
-
-    with make_client(monkeypatch) as client:
-        response = client.post(
-            "/control/tastytrade/restart",
-            headers={"X-Service-Token": "secret"},
-        )
-    assert response.status_code == 200
-    assert fake_restart.called == "tastytrade"
-
-
 def test_ml_trade_endpoint_persists_and_publishes(monkeypatch):
     fake_redis = _FakeRedis()
     monkeypatch.setattr(module, "_get_redis_client", lambda: fake_redis)
@@ -95,6 +70,28 @@ def test_ml_trade_endpoint_persists_and_publishes(monkeypatch):
     assert channel == module.ML_TRADE_STREAM_CHANNEL
     decoded = json.loads(message)
     assert decoded["action"] == "entry"
+
+
+def test_control_endpoints(monkeypatch):
+    # Provide no-op start/stop/restart so handlers don't touch OS processes
+    monkeypatch.setattr(module.service_manager, "start_service", lambda name: None)
+    async def _noop_restart(name):
+        return None
+    monkeypatch.setattr(module.service_manager, "restart_service", _noop_restart)
+    monkeypatch.setattr(module.service_manager, "stop_service", lambda name: None)
+    # Expose a fake discord bot status on the manager for /control/{service}/status
+    class _FakeSvc:
+        def status(self):
+            return {"running": False}
+    monkeypatch.setattr(module.service_manager, "discord_bot", _FakeSvc())
+    with make_client(monkeypatch) as client:
+        resp = client.get('/control/discord_bot/status')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get('running', None) is False
+        resp = client.post('/control/discord_bot/restart')
+        assert resp.status_code == 200
+        assert resp.json().get('status') == 'restarted'
 
 
 class _FakePipeline:

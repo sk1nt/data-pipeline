@@ -21,7 +21,6 @@ import argparse
 import asyncio
 import json
 import logging
-import secrets
 import sys
 import threading
 import time
@@ -266,7 +265,6 @@ class ServiceManager:
                 "ready": bool(self.lookup_service),
                 "recent_depth_diffs": list(self.last_depth_comparison.values())[:3],
             },
-            "control_enabled": bool(settings.service_control_token),
             "market_data_metrics": self.metrics_snapshot(),
         }
 
@@ -726,6 +724,50 @@ async def status() -> Dict[str, Any]:
     return service_manager.status()
 
 
+@app.post("/control/{service_name}/start")
+async def control_start(service_name: str) -> Dict[str, Any]:
+    """Start one of the managed services by name (no auth)."""
+    try:
+        service_manager.start_service(service_name)
+        return {"status": "started", "service": service_name}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/control/{service_name}/stop")
+async def control_stop(service_name: str) -> Dict[str, Any]:
+    """Stop one of the managed services by name (no auth)."""
+    try:
+        await service_manager.stop_service(service_name)
+        return {"status": "stopped", "service": service_name}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/control/{service_name}/restart")
+async def control_restart(service_name: str) -> Dict[str, Any]:
+    """Restart a managed service (no auth)."""
+    try:
+        await service_manager.restart_service(service_name)
+        return {"status": "restarted", "service": service_name}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/control/{service_name}/status")
+async def control_status(service_name: str) -> Dict[str, Any]:
+    """Return a service-specific status snapshot (no auth)."""
+    try:
+        svc = getattr(service_manager, service_name, None)
+        if svc and hasattr(svc, 'status'):
+            return getattr(svc, 'status')()
+        raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/metrics/market_data")
 async def market_data_metrics() -> Dict[str, Any]:
     """Expose trade + level2 counters for quick Schwab/TastyTrade comparisons."""
@@ -751,33 +793,6 @@ async def ingest_ml_trade(trade: MLTradePayload) -> Dict[str, Any]:
     }
 
 
-CONTROL_ACTIONS = {"start", "stop", "restart"}
-CONTROL_SERVICES = {"tastytrade", "schwab", "gex_poller", "gex_nq_poller", "redis_flush", "discord_bot"}
-
-
-@app.post("/control/{service}/{action}")
-async def control_service(service: str, action: str, request: Request):
-    """Start/stop/restart managed services (tokenless for fast ops)."""
-    service = service.lower()
-    if service not in CONTROL_SERVICES:
-        raise HTTPException(status_code=400, detail="Unknown service")
-    action = action.lower()
-    if action not in CONTROL_ACTIONS:
-        raise HTTPException(status_code=400, detail="Unsupported action")
-    token = settings.service_control_token
-    if token:
-        provided = request.headers.get("X-Service-Token") or ""
-        if not secrets.compare_digest(provided, token):
-            raise HTTPException(status_code=403, detail="Forbidden")
-    if action == "start":
-        service_manager.start_service(service)
-    elif action == "stop":
-        await service_manager.stop_service(service)
-    elif action == "restart":
-        await service_manager.restart_service(service)
-    return {"status": "ok", "service": service, "action": action, "state": service_manager.status()}
-
-
 STATUS_PAGE = """
 <!DOCTYPE html>
 <html lang=\"en\">
@@ -788,23 +803,11 @@ STATUS_PAGE = """
     body { font-family: Arial, sans-serif; background: #0f1115; color: #f1f1f1; margin: 0; padding: 2rem; }
     pre { background: #1e232b; padding: 1rem; border-radius: 8px; min-height: 200px; }
     .warning { color: #ffcc00; }
-    .controls { margin: 1rem 0; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
-    button { background: #2563eb; color: #fff; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; }
-    button:hover { background: #1d4ed8; }
-    input { padding: 0.5rem; border-radius: 4px; border: 1px solid #333; background: #111; color: #fff; }
   </style>
 </head>
 <body>
   <h1>Data Pipeline Status</h1>
   <p class=\"warning\">Dashboard auto-refreshes every 3 seconds.</p>
-  <div class=\"controls\">
-    <button onclick=\"controlService('discord_bot','restart')\">Restart Discord Bot</button>
-    <button onclick=\"controlService('tastytrade','restart')\">Restart TastyTrade</button>
-    <button onclick=\"controlService('gex_poller','restart')\">Restart GEX Poller</button>
-    <button onclick=\"controlService('gex_nq_poller','restart')\">Restart NQ Poller</button>
-    <button onclick="controlService('schwab','restart')">Restart Schwab Streamer</button>
-    <button onclick=\"controlService('redis_flush','restart')\">Restart Flush Worker</button>
-  </div>
   <pre id=\"status\">Loading...</pre>
   <script>
     async function refresh() {
@@ -814,17 +817,6 @@ STATUS_PAGE = """
         document.getElementById('status').textContent = JSON.stringify(data, null, 2);
       } catch (err) {
         document.getElementById('status').textContent = 'Error: ' + err;
-      }
-    }
-    async function controlService(service, action) {
-      try {
-        const res = await fetch(`/control/${service}/${action}`, { method: 'POST' });
-        if (!res.ok) {
-          console.warn('Control request failed', await res.text());
-        }
-        refresh();
-      } catch (err) {
-        console.warn('Control error', err);
       }
     }
     refresh();
