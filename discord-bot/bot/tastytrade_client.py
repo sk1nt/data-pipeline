@@ -194,6 +194,32 @@ class TastyTradeClient:
         # clear cached symbols to avoid possible stale mappings
         self._symbol_cache.clear()
 
+    def set_dry_run(self, flag: bool) -> None:
+        """Turn on/off dry-run (prevent actual order execution)."""
+        self._dry_run = bool(flag)
+
+    def get_auth_status(self) -> Dict[str, any]:
+        """Return authentication/session/account status. """
+        status: Dict[str, any] = {
+            'session_valid': False,
+            'active_account': self._active_account,
+            'accounts': [],
+            'use_sandbox': self._use_sandbox,
+            'dry_run': getattr(self, '_dry_run', True),
+            'error': None,
+        }
+        try:
+            session = self._ensure_session()
+            # Refresh accounts
+            self._refresh_accounts(session)
+            status['accounts'] = list(self._accounts.keys())
+            status['active_account'] = self._active_account
+            status['session_valid'] = True
+            status['session_expiration'] = getattr(session, 'session_expiration', None)
+        except Exception as exc:
+            status['error'] = str(exc)
+        return status
+
     def _resolve_front_month_symbol(self, product_code: str) -> Optional[str]:
         """Return front-month TW symbol (like /NQZ5) for a product code like 'NQ'. Caches to avoid repeated API calls."""
         product_code = product_code.upper().replace('/', '') if product_code else ''

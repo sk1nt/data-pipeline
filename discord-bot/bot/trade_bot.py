@@ -211,6 +211,11 @@ class TradeBot(commands.Bot):
                         "• `!tt` - Display account summary (balances and basic info)\n"
                         "• `!tt status` - Show trading status (options level, frozen, margin call, etc.)\n"
                         "• `!tt account <account_id>` - Switch to a different account\n"
+                        "• `!tt auth status` - Show TastyTrade auth/session status\n"
+                        "• `!tt auth refresh <token>` - Update refresh token and reinitialize session\n"
+                        "• `!tt auth dryrun <true|false>` - Toggle dry-run mode for orders\n"
+                        "• `!tt auth default set <account_id>` - Set default TastyTrade account\n"
+                        "• `!tt auth get-refresh` - Instructions to fetch a refresh token\n"
                         "• `!tt accounts` - List all accounts\n"
                         "• `!tt pos` - Show current positions\n"
                         "• `!tt future` / `!tt futures` - List available futures\n"
@@ -292,7 +297,60 @@ class TradeBot(commands.Bot):
                     await self._send_dm_or_warn(ctx, msg)
                     return
                 if subcommand == 'orders':
-                                    if subcommand == 'auth' and len(args) >= 3 and args[1].lower() == 'refresh':
+                                    if subcommand == 'auth' and len(args) >= 2:
+                                        # auth subcommands: refresh, status, dryrun, default
+                                        act = args[1].lower()
+                                        if act == 'refresh' and len(args) >= 3:
+                                            if not await self._ensure_privileged(ctx):
+                                                return
+                                            new_token = args[2]
+                                            try:
+                                                await asyncio.to_thread(self.tastytrade_client.set_refresh_token, new_token)
+                                                await self._send_dm_or_warn(ctx, 'TastyTrade refresh token updated; session reinitialized.')
+                                            except Exception as exc:
+                                                await self._send_dm_or_warn(ctx, f'Failed to update refresh token: {exc}')
+                                            return
+                                        if act == 'status':
+                                            if not await self._ensure_privileged(ctx):
+                                                return
+                                            status = await asyncio.to_thread(self.tastytrade_client.get_auth_status)
+                                            if not isinstance(status, dict):
+                                                await self._send_dm_or_warn(ctx, 'Unable to fetch auth status')
+                                                return
+                                            msg = (
+                                                f"TastyTrade Auth Status:\n"
+                                                f"Session Valid: {status.get('session_valid')}\n"
+                                                f"Active Account: {status.get('active_account')}\n"
+                                                f"Accounts: {', '.join(status.get('accounts') or [])}\n"
+                                                f"Use Sandbox: {status.get('use_sandbox')}\n"
+                                                f"Dry Run: {status.get('dry_run')}\n"
+                                            )
+                                            err = status.get('error')
+                                            if err:
+                                                msg += f"Error: {err}\n"
+                                            await self._send_dm_or_warn(ctx, msg)
+                                            return
+                                        if act == 'dryrun' and len(args) >= 3:
+                                            if not await self._ensure_privileged(ctx):
+                                                return
+                                            val = args[2].lower()
+                                            flag = val in ('true', '1', 'yes', 'on', 'enable', 'enabled')
+                                            await asyncio.to_thread(self.tastytrade_client.set_dry_run, flag)
+                                            await self._send_dm_or_warn(ctx, f"Set TastyTrade dry_run = {flag}")
+                                            return
+                                        if act == 'default' and len(args) >= 4 and args[2].lower() == 'set':
+                                            if not await self._ensure_privileged(ctx):
+                                                return
+                                            target = args[3]
+                                            success = await asyncio.to_thread(self.tastytrade_client.set_active_account, target)
+                                            msg = f"Active account set to {target}" if success else f"Failed to set active account to {target}"
+                                            await self._send_dm_or_warn(ctx, msg)
+                                            return
+                                        if act == 'get-refresh':
+                                            if not await self._ensure_privileged(ctx):
+                                                return
+                                            await self._send_dm_or_warn(ctx, 'To retrieve a refresh token, run `python scripts/get_tastytrade_refresh_token.py --sandbox` locally and update your .env or paste token here using `!tt auth refresh <token>`.')
+                                            return
                                         # !tt auth refresh <token>
                                         if not await self._ensure_privileged(ctx):
                                             return
