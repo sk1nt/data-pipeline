@@ -158,15 +158,45 @@ class TastyTradeClient:
             return [order.__dict__ for order in orders]
 
     def get_futures_list(self) -> list:
-        # Return a list of common futures symbols with descriptions
-        return [
-            {'symbol': '/NQ:XCME', 'description': 'E-mini Nasdaq-100 Futures'},
-            {'symbol': '/ES:XCME', 'description': 'E-mini S&P 500 Futures'},
-            {'symbol': '/MNQ:XCME', 'description': 'Micro E-mini Nasdaq-100 Futures'},
-            {'symbol': '/MES:XCME', 'description': 'Micro E-mini S&P 500 Futures'},
-            {'symbol': '/RTY:XCME', 'description': 'E-mini Russell 2000 Futures'},
-            {'symbol': '/YM:XCME', 'description': 'E-mini Dow Futures'},
-        ]
+        # Try to return a dynamic list via SDK; fallback to reasonable static list
+        try:
+            return self.list_futures()
+        except Exception:
+            return [
+                {'symbol': '/NQ:XCME', 'description': 'E-mini Nasdaq-100 Futures'},
+                {'symbol': '/ES:XCME', 'description': 'E-mini S&P 500 Futures'},
+                {'symbol': '/MNQ:XCME', 'description': 'Micro E-mini Nasdaq-100 Futures'},
+                {'symbol': '/MES:XCME', 'description': 'Micro E-mini S&P 500 Futures'},
+                {'symbol': '/RTY:XCME', 'description': 'E-mini Russell 2000 Futures'},
+                {'symbol': '/YM:XCME', 'description': 'E-mini Dow Futures'},
+            ]
+
+    def list_futures(self, product_codes: Optional[list] = None) -> list:
+        """Return a list of futures contracts for given product codes (e.g., ['NQ','ES']).
+
+        Each returned item is a dict with keys: `symbol`, `streamer_symbol`, `expiration_date`, `is_tradeable`.
+        """
+        with self._lock:
+            session = self._ensure_session()
+            # Use SDK to fetch futures; product_codes is optional
+            try:
+                futures = Future.get(session, symbols=None, product_codes=product_codes)
+            except Exception:
+                raise
+            results = []
+            for f in futures:
+                try:
+                    results.append({
+                        'symbol': getattr(f, 'symbol', None),
+                        'streamer_symbol': getattr(f, 'streamer_symbol', None),
+                        'expiration_date': getattr(f, 'expiration_date', None),
+                        'is_tradeable': getattr(f, 'is_tradeable', None),
+                        'product_code': getattr(f, 'product_code', None),
+                        'description': getattr(f, 'description', None),
+                    })
+                except Exception:
+                    continue
+            return results
 
     # ------------------------------------------------------------------
     # internal helpers
@@ -338,6 +368,129 @@ class TastyTradeClient:
             return None
         return None
 
+    def _resolve_future_contract_symbol(self, session: Session, symbol: str) -> Optional[str]:
+        """Resolve a user-provided future symbol to the TastyTrade contract symbol (e.g., '/NQZ5').
+
+        Attempts several common normalizations and uses the SDK to find a matching
+        Future object, preferring the SDK-provided `symbol` value which the API
+        expects when placing orders.
+        """
+        if not symbol or not isinstance(symbol, str):
+            return None
+        raw = symbol.strip().upper()
+        # If already present in cache, return it quickly
+        if raw in self._symbol_cache:
+            return self._symbol_cache[raw].get('resolved')
+        # Build candidate forms to match against SDK Future.symbol or streamer_symbol
+        cand = raw.lstrip('/')
+        candidates = set()
+        candidates.add(cand)
+        candidates.add('/' + cand)
+        if ':' in cand:
+            base = cand.split(':', 1)[0]
+            candidates.add(base)
+            candidates.add('/' + base)
+        # If year supplied as 2-digits (e.g., NQZ25), add single-digit variant (NQZ5)
+        import re
+        m = re.match(r'^(?P<prod>[A-Z]{1,4})(?P<month>[A-Z])(?P<year>\d{2})$', cand)
+        if m:
+            prod = m.group('prod')
+            month = m.group('month')
+            year = m.group('year')
+            short = f"{prod}{month}{year[-1]}"
+            candidates.add(short)
+            candidates.add('/' + short)
+        # If no explicit month/year provided, try resolving front month for the product
+        product_code = None
+        pm = re.match(r'^(?P<prod>NQ|MNQ|ES|MES|RTY|YM)$', cand)
+        if pm:
+            product_code = pm.group('prod')
+        # Fetch SDK futures for the product, if available
+        try:
+            # If we have a product code, query futures for that product; otherwise
+            # query all futures by product_codes inferred from input
+            futures = None
+            if product_code:
+                futures = Future.get(session, symbols=None, product_codes=[product_code])
+            else:
+                # Try to guess product code from the first alpha characters
+                maybe_prod = re.match(r'^(?P<prod>[A-Z]+)', cand)
+                if maybe_prod:
+                    try:
+                        futures = Future.get(session, symbols=None, product_codes=[maybe_prod.group('prod')])
+                    except Exception:
+                        futures = Future.get(session, symbols=None)
+                else:
+                    futures = Future.get(session, symbols=None)
+            if not futures:
+                raise Exception('no futures returned')
+            # search among futures for a match
+            matches = []
+            for f in futures:
+                f_sym = getattr(f, 'symbol', None)
+                f_stream = getattr(f, 'streamer_symbol', None)
+                try:
+                    # Compare by symbol (e.g., '/NQZ5')
+                    if f_sym and any(f_sym.upper() == c.upper() for c in candidates):
+                        matches.append(f_sym)
+                        continue
+                    # Compare streamer symbol base (e.g., '/NQZ25:XCME' -> '/NQZ25')
+                    if f_stream:
+                        f_stream_base = f_stream.split(':', 1)[0]
+                        if any(f_stream_base.upper() == c.upper() for c in candidates):
+                            matches.append(getattr(f, 'symbol', f_stream_base))
+                            continue
+                except Exception:
+                    continue
+            resolved = None
+            if matches:
+                # Prefer single-digit year format if both are present (e.g., '/NQZ5')
+                import re as _re
+                single_digit = [m for m in matches if _re.match(r'^/[A-Z]{1,4}[A-Z]\d$', m)]
+                if single_digit:
+                    resolved = single_digit[0]
+                else:
+                    resolved = matches[0]
+                # If we chose a two-digit year symbol, prefer a single-digit
+                # version if the futures list has one for the same product/month.
+                if resolved and _re.match(r'^/[A-Z]{1,4}[A-Z]\d{2}$', resolved):
+                    prod = resolved[1:3]
+                    month = resolved[3]
+                    # create one-digit variant
+                    alt = f"/{prod}{month}{resolved[-1]}"
+                    for f in futures:
+                        if getattr(f, 'symbol', None) == alt:
+                            resolved = alt
+                            break
+            if resolved:
+                # Ensure leading slash
+                if not resolved.startswith('/'):
+                    resolved = '/' + resolved
+                # Cache
+                self._symbol_cache[raw] = {'resolved': resolved, 'ts': datetime.now(timezone.utc)}
+                return resolved
+        except Exception:
+            # ignore and fallback to heuristic below
+            pass
+        # Heuristic fallback: convert 2-digit year to single-digit and ensure leading '/'
+        short = None
+        if ':' in raw:
+            raw_no_ex = raw.split(':', 1)[0]
+        else:
+            raw_no_ex = raw
+        # Normalize by removing leading slash so regex checks work consistently
+        raw_no_ex = raw_no_ex.lstrip('/')
+        m2 = re.match(r'^(?P<prod>[A-Z]{1,4})(?P<month>[A-Z])(?P<year>\d{2})$', raw_no_ex)
+        if m2:
+            prod = m2.group('prod')
+            month = m2.group('month')
+            year = m2.group('year')
+            short = f"/{prod}{month}{year[-1]}"
+        else:
+            short = '/' + raw_no_ex.lstrip('/')
+        self._symbol_cache[raw] = {'resolved': short, 'ts': datetime.now(timezone.utc)}
+        return short
+
     def _refresh_accounts(self, session: Session) -> None:
         accounts = Account.get(session)
         self._accounts = {acct.account_number: acct for acct in accounts}
@@ -416,6 +569,11 @@ class TastyTradeClient:
     def _to_float(value: Optional[float]) -> float:
         if value is None:
             return 0.0
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
         try:
             return float(value)
         except (TypeError, ValueError):
@@ -430,6 +588,35 @@ class TastyTradeClient:
             balances.day_trading_buying_power or
             0.0
         )
+
+    def _extract_order_id(self, placed) -> Optional[str]:
+        """Return an order ID string/int from either SDK objects or raw dict responses.
+
+        Common SDK returns:
+          - PlacedOrder object with attribute `id` (int or str)
+          - Raw dict from REST with 'data' -> 'id' or top-level 'id'
+        """
+        if placed is None:
+            return None
+        # If object with attribute 'id'
+        try:
+            oid = getattr(placed, 'id', None)
+            if oid is not None:
+                return str(oid)
+        except Exception:
+            pass
+        # If dict-like response
+        try:
+            if isinstance(placed, dict):
+                # common shapes: {'data': {'id': 123}} or {'id': 123}
+                data = placed.get('data') if placed.get('data') is not None else placed
+                if isinstance(data, dict) and 'id' in data:
+                    return str(data['id'])
+                if 'id' in placed:
+                    return str(placed['id'])
+        except Exception:
+            pass
+        return None
 
     def place_market_order_with_tp(
         self,
@@ -452,6 +639,16 @@ class TastyTradeClient:
             # Determine instrument type enum
             inst_type = InstrumentType.FUTURE if symbol.startswith('/') else InstrumentType.EQUITY
 
+            # For futures, try to resolve the exact contract symbol the API expects
+            if inst_type == InstrumentType.FUTURE:
+                try:
+                    resolved = self._resolve_future_contract_symbol(session, symbol)
+                    if resolved:
+                        symbol = resolved
+                except Exception:
+                    # if resolve fails, proceed with the normalized symbol
+                    pass
+
             # Get current price (approximate from quote) or use provided market_price
             if market_price is not None:
                 current_price = float(market_price)
@@ -464,16 +661,71 @@ class TastyTradeClient:
             else:
                 tp_price = current_price - (tp_ticks * tick_size)
 
+            # Determine tick_size from instrument metadata if possible (falls back to provided)
+            try:
+                if inst_type == InstrumentType.FUTURE and isinstance(symbol, str) and symbol.startswith('/'):
+                    # Try to query the SDK for contract-specific tick size
+                    # strip leading slash for symbols passed to the SDK
+                    sym_lookup = symbol.lstrip('/')
+                    futs = Future.get(session, symbols=[sym_lookup])
+                    if futs:
+                        f = futs[0]
+                        tick_meta = getattr(f, 'tick_size', None) or getattr(f, 'min_tick', None)
+                        if isinstance(tick_meta, (int, float)) and tick_meta > 0:
+                            tick_size = float(tick_meta)
+            except Exception:
+                # If we cannot resolve tick from SDK, continue with given tick_size
+                pass
+
+            # Round TP price to the instrument's tick size and ensure it is on the
+            # correct side of the market so it is not rejected as a credit.
+            import math
+            def _round_to_tick(price: float, tick: float, direction: str) -> float:
+                if tick <= 0 or math.isnan(price):
+                    return price
+                n = price / tick
+                if direction == 'down':
+                    n2 = math.floor(n - 1e-9)
+                elif direction == 'up':
+                    n2 = math.ceil(n + 1e-9)
+                else:
+                    n2 = round(n)
+                return n2 * tick
+
+            if action.upper() == 'BUY':
+                tp_price = _round_to_tick(tp_price, tick_size, 'up')
+                # If rounding made TP <= current_price, nudge one tick up
+                if tp_price <= current_price:
+                    tp_price = _round_to_tick(current_price + tick_size, tick_size, 'up')
+            else:
+                tp_price = _round_to_tick(tp_price, tick_size, 'down')
+                # If rounding made TP >= current_price, nudge one tick down
+                if tp_price >= current_price:
+                    tp_price = _round_to_tick(current_price - tick_size, tick_size, 'down')
+
             # Build Leg and NewOrder using SDK models
             # For futures, use buy-to-open / sell-to-open to indicate open positions
             if inst_type == InstrumentType.FUTURE:
                 leg_action = OrderAction.BUY_TO_OPEN if action.upper() == 'BUY' else OrderAction.SELL_TO_OPEN
             else:
                 leg_action = OrderAction.BUY if action.upper() == 'BUY' else OrderAction.SELL
-            # SDK prefers plain contract symbol for futures (like 'NQH26'), not leading '/'
-            leg_symbol = symbol.lstrip('/') if isinstance(symbol, str) else symbol
+            # For futures, prefer SDK `symbol` which includes leading '/NQZ5' that the
+            # API expects (do not strip leading slash in this case)
+            leg_symbol = symbol if inst_type == InstrumentType.FUTURE else (symbol.lstrip('/') if isinstance(symbol, str) else symbol)
             if isinstance(leg_symbol, str) and ':' in leg_symbol:
                 leg_symbol = leg_symbol.split(':', 1)[0]
+            # Additionally, if the symbol is a product like 'NQ' with no month code,
+            # keep it as-is (will be resolved elsewhere). If it's a full contract like 'NQZ25',
+            # ensure we use plain contract code like 'NQZ25'.
+            # Map two-digit year format like '25' -> '5' for TastyTrade leg symbol (NQZ25 -> NQZ5)
+            import re
+            m = re.match(r'^(?P<prod>NQ|MNQ|ES|MES|RTY|YM)(?P<month>[A-Z])(?P<year>\d{2})$', leg_symbol)
+            if m:
+                prod = m.group('prod')
+                month = m.group('month')
+                year = m.group('year')
+                # TastyTrade leg format uses single-digit year, so keep last digit
+                leg_symbol = f"{prod}{month}{year[-1]}"
             leg = Leg(instrument_type=inst_type, symbol=leg_symbol, action=leg_action, quantity=quantity)
             market_order = NewOrder(time_in_force=OrderTimeInForce.DAY, order_type=OrderType.MARKET, legs=[leg])
             eff_dry = self._dry_run if dry_run is None else bool(dry_run)
@@ -488,7 +740,9 @@ class TastyTradeClient:
             try:
                 eff_dry = self._dry_run if dry_run is None else bool(dry_run)
                 placed_market = account.place_order(session, market_order, dry_run=eff_dry)
-                market_order_id = getattr(placed_market, 'id', None)
+                market_order_id = self._extract_order_id(placed_market)
+                if market_order_id is None:
+                    LOGGER.warning('Market order returned no ID (dry_run=%s): %s', eff_dry, repr(placed_market))
             except Exception as exc:
                 msg = str(exc)
                 LOGGER.warning("Market order failed: %s", msg)
@@ -517,7 +771,9 @@ class TastyTradeClient:
                 LOGGER.debug("TP order JSON: <unserializable>")
             try:
                 placed_tp = account.place_order(session, tp_order, dry_run=eff_dry)
-                tp_order_id = getattr(placed_tp, 'id', None)
+                tp_order_id = self._extract_order_id(placed_tp)
+                if tp_order_id is None:
+                    LOGGER.warning('TP order returned no ID (dry_run=%s): %s', eff_dry, repr(placed_tp))
             except Exception as exc:
                 msg = str(exc)
                 LOGGER.warning("TP order failed: %s", msg)
@@ -539,18 +795,38 @@ class TastyTradeClient:
         # if already a futures contract like /NQZ5 or NQZ5, ensure leading '/'
         if symbol.startswith('/'):
             return symbol
-        # check product codes
+        # check product codes (e.g., 'NQ' -> resolve front-month)
         if symbol in futures:
             resolved = self._resolve_front_month_symbol(symbol)
             if resolved:
                 return resolved
             # fallback: return a reasonable default with X CME code
             return f"/{symbol}Z9"
+        # check for explicit contract codes like NQZ25 or NQH26 (with optional exchange suffix)
+        # Accept patterns like 'NQZ25', 'NQZ25:XCME', '/NQZ25', '/NQZ25:XCME'
+        import re
+        m = re.match(r'^/?(?P<prod>NQ|MNQ|ES|MES|RTY|YM)(?P<month>[A-Z])(?P<year>\d{1,2})(?::(?P<exch>\w+))?$', symbol)
+        if m:
+            prod = m.group('prod')
+            month = m.group('month')
+            year = m.group('year')
+            # Preserve short year (e.g., '25') to construct contract symbol
+            return f"/{prod}{month}{year}"
         return symbol
 
     def _get_current_price(self, session, symbol: str) -> float:
         # Get quote
-        if symbol.startswith('/'):
+        # Consider both forms: leading '/' or numeric-month contract like 'NQZ25'
+        is_future = False
+        if isinstance(symbol, str) and symbol.startswith('/'):
+            is_future = True
+        else:
+            # detect explicit future contract like NQZ25
+            import re
+            if isinstance(symbol, str) and re.match(r'^(NQ|MNQ|ES|MES|RTY|YM)[A-Z]\d{1,2}(:\w+)?$', symbol.upper()):
+                is_future = True
+
+        if is_future:
             # Future: API sometimes expects symbol without exchange suffix or leading '/'.
             # Try several common variants to avoid 404 responses.
             variants = []

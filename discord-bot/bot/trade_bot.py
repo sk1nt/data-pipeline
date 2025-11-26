@@ -235,7 +235,7 @@ class TradeBot(commands.Bot):
                         "• `!tt accounts` - List all accounts\n"
                         "• `!tt pos` - Show current positions\n"
                         "• `!tt future` / `!tt futures` - List available futures\n"
-                        "• `!tt orders` - Show open orders\n\n"
+                        "• `!tt orders` / `!tt list-orders` - Show open orders\n\n"
                         "**Trading Commands:**\n"
                         "• `!tt b/buy <symbol> <tp_ticks> [quantity=1]` - Place market buy order with take profit\n"
                         "• `!tt s/sell <symbol> <tp_ticks> [quantity=1]` - Place market sell order with take profit\n"
@@ -284,15 +284,32 @@ class TradeBot(commands.Bot):
                         elif args[4].lower() in ('dry', 'dryrun', 'test'):
                             dry_run = True
                     market_price = None
-                    if symbol.startswith('/') or symbol.upper() in self.ticker_aliases:
-                            # Normalize to feed symbol and fetch snapshot
-                            feed_symbol = self.ticker_aliases.get(symbol.upper(), symbol.upper())
-                            try:
-                                snap = await self.get_gex_snapshot(feed_symbol)
-                                if snap and isinstance(snap.get('spot_price'), (int, float)):
-                                    market_price = float(snap.get('spot_price'))
-                            except Exception:
-                                market_price = None
+                    # Determine whether to try and fetch a market snapshot for futures
+                    # Accept leading slash (/NQZ5), product code (NQ), or explicit contract (NQZ25)
+                    try:
+                        import re
+                        lookup_feed = None
+                        s_up = symbol.upper() if symbol else ''
+                        # Explicit product mapping
+                        if s_up in self.ticker_aliases:
+                            lookup_feed = self.ticker_aliases.get(s_up)
+                        # Leading slash symbol like '/NQZ5' or '/NQZ25:XCME'
+                        elif s_up.startswith('/'):
+                            prod_match = re.match(r'^/((?P<prod>NQ|MNQ|ES|MES|RTY|YM))', s_up)
+                            if prod_match:
+                                lookup_feed = self.ticker_aliases.get(prod_match.group('prod'))
+                        # Explicit contract 'NQZ25' or 'NQZ25:XCME'
+                        else:
+                            prod_match = re.match(r'^(?P<prod>NQ|MNQ|ES|MES|RTY|YM)', s_up)
+                            if prod_match:
+                                lookup_feed = self.ticker_aliases.get(prod_match.group('prod'))
+
+                        if lookup_feed:
+                            snap = await self.get_gex_snapshot(lookup_feed)
+                            if snap and isinstance(snap.get('spot_price'), (int, float)):
+                                market_price = float(snap.get('spot_price'))
+                    except Exception:
+                        market_price = None
                     try:
                         # Pass dry_run as keyword to avoid being treated as tick_size
                         result = await asyncio.to_thread(
@@ -389,11 +406,45 @@ class TradeBot(commands.Bot):
                     await self._send_dm_or_warn(ctx, msg)
                     return
                 if subcommand == 'future' or subcommand == 'futures':
-                    futures = await asyncio.to_thread(self.tastytrade_client.get_futures_list)
-                    if futures:
-                        msg = "**Futures:**\n" + "\n".join([f"• {fut.get('symbol', 'N/A')}: {fut.get('description', 'N/A')}" for fut in futures])
-                    else:
-                        msg = "No futures found."
+                    # Allow optional product codes after the subcommand, e.g., `!tt futures NQ ES`
+                    product_codes = []
+                    if len(args) >= 2:
+                        for token in args[1:]:
+                            if isinstance(token, str) and token.strip():
+                                t = token.strip().upper()
+                                # Accept product code tokens like 'NQ' or 'ES'
+                                if t in ('NQ', 'MNQ', 'ES', 'MES', 'RTY', 'YM'):
+                                    product_codes.append(t)
+                    try:
+                        if product_codes:
+                            futures = await asyncio.to_thread(self.tastytrade_client.list_futures, product_codes)
+                        else:
+                            futures = await asyncio.to_thread(self.tastytrade_client.get_futures_list)
+                        if not futures:
+                            msg = 'No futures found.'
+                        else:
+                            # Format each contract with symbol, streamer_symbol, exp date and tradeable flag
+                            lines = []
+                            for fut in futures:
+                                sym = fut.get('symbol') or fut.get('streamer_symbol') or 'N/A'
+                                sstream = fut.get('streamer_symbol') or ''
+                                exp = fut.get('expiration_date') or ''
+                                tradeable = fut.get('is_tradeable')
+                                trade_txt = 'tradeable' if tradeable else 'not tradeable' if tradeable is not None else ''
+                                desc = fut.get('description') or fut.get('product_code') or ''
+                                parts = [f"{sym}"]
+                                if sstream:
+                                    parts.append(f"({sstream})")
+                                if exp:
+                                    parts.append(f"exp={exp}")
+                                if trade_txt:
+                                    parts.append(trade_txt)
+                                if desc:
+                                    parts.append(f"- {desc}")
+                                lines.append(' '.join(parts))
+                            msg = "**Futures:**\n" + "\n".join([f"• {l}" for l in lines])
+                    except Exception as exc:
+                        msg = f"Failed to fetch futures list: {exc}"
                     await self._send_dm_or_warn(ctx, msg)
                     return
                 if subcommand == 'auth' and len(args) >= 2:
@@ -471,7 +522,7 @@ class TradeBot(commands.Bot):
                         except Exception as exc:
                             await self._send_dm_or_warn(ctx, f"Failed to set sandbox mode: {exc}")
                         return
-                if subcommand == 'orders':
+                if subcommand in ('orders', 'list-orders', 'list_orders', 'list'):
                     orders = await asyncio.to_thread(self.tastytrade_client.get_orders)
                     if orders:
                         msg = "**Orders:**\n" + "\n".join([f"• {ord.get('id', 'N/A')}: {ord.get('action', 'N/A')} {ord.get('quantity', 0)} {ord.get('symbol', 'N/A')} @ {ord.get('price', 'N/A')}" for ord in orders])

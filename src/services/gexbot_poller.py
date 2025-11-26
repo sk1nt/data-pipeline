@@ -42,6 +42,7 @@ class GEXBotPollerSettings:
     dynamic_schedule: bool = True
     exclude_symbols: List[str] = field(default_factory=list)
     sierra_chart_output_path: Optional[str] = None
+    auto_refresh_symbols: bool = True
 
 
 class GEXBotPoller:
@@ -72,6 +73,7 @@ class GEXBotPoller:
         self.snapshot_count = 0
         self.last_snapshot_ts: Optional[str] = None
         self._last_interval_setting: Optional[str] = None
+        self._auto_refresh_symbols = getattr(self.settings, "auto_refresh_symbols", True)
 
     def start(self) -> None:
         if self._task and not self._task.done():
@@ -98,11 +100,12 @@ class GEXBotPoller:
         timeout = aiohttp.ClientTimeout(total=12)
         connector = aiohttp.TCPConnector(limit=8, force_close=True)
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            await self._refresh_supported_symbols(session)
+            if self._auto_refresh_symbols:
+                await self._refresh_supported_symbols(session)
             while not self._stop_event.is_set():
                 loop_start = asyncio.get_event_loop().time()
                 interval_seconds = self._current_interval_seconds()
-                if self._needs_supported_refresh():
+                if self._auto_refresh_symbols and self._needs_supported_refresh():
                     await self._refresh_supported_symbols(session)
                 # Always poll the canonical supported symbols (downloaded list); dynamic adds removed
                 symbols = sorted(self._supported_symbols or self._base_symbols)
@@ -448,6 +451,13 @@ class GEXBotPoller:
         return self._last_supported_refresh != today
 
     async def _refresh_supported_symbols(self, session: aiohttp.ClientSession) -> None:
+        if not self._auto_refresh_symbols:
+            # Respect explicitly configured symbols without reaching the global tickers endpoint
+            self._supported_symbols = set(self._base_symbols)
+            self._dynamic_symbols = {}
+            self._last_supported_refresh = datetime.utcnow().date()
+            LOGGER.info("Auto-refresh disabled; using configured symbols: %s", sorted(self._supported_symbols))
+            return
         symbols = await self._fetch_supported_symbol_list(session)
         if symbols:
             self._supported_symbols = {s.upper() for s in symbols}
@@ -500,11 +510,6 @@ class GEXBotPoller:
             "snapshot_count": self.snapshot_count,
             "last_snapshot_ts": self.last_snapshot_ts,
             "base_symbols": sorted(self._base_symbols),
-            "dynamic_symbols": sorted(self._dynamic_symbols.keys()),
-            "dynamic_expirations": {
-                symbol: expiry.astimezone(timezone.utc).isoformat()
-                for symbol, expiry in self._dynamic_symbols.items()
-            },
         }
 
 

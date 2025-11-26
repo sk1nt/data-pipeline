@@ -342,6 +342,7 @@ class ServiceManager:
                     off_hours_interval_seconds=settings.gex_nq_poll_off_hours_interval_seconds,
                     dynamic_schedule=settings.gex_nq_poll_dynamic_schedule,
                     sierra_chart_output_path=settings.sierra_chart_output_path,
+                    auto_refresh_symbols=False,
                 ),
                 redis_client=self.redis_client,
                 ts_client=self.rts,
@@ -807,7 +808,7 @@ STATUS_PAGE = """
 </head>
 <body>
   <h1>Data Pipeline Status</h1>
-  <p class=\"warning\">Dashboard auto-refreshes every 3 seconds.</p>
+  <p class=\"warning\">Dashboard auto-refreshes every 0.3 seconds.</p>
   <pre id=\"status\">Loading...</pre>
   <script>
     async function refresh() {
@@ -820,7 +821,7 @@ STATUS_PAGE = """
       }
     }
     refresh();
-    setInterval(refresh, 3000);
+    setInterval(refresh, 300);
   </script>
 </body>
 </html>

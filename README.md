@@ -61,7 +61,7 @@ pip install -e .
 # Start Redis (local instance)
 redis-server redis/redis.conf &
 
-# Start the unified pipeline (services + control API)
+# Start the unified pipeline (services + monitoring UI)
 python data-pipeline.py --host 0.0.0.0 --port 8877
 
 # Monitor services / restart feeds
