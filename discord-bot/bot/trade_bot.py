@@ -747,6 +747,15 @@ class TradeBot(commands.Bot):
                         await asyncio.to_thread(
                             self.tastytrade_client.set_refresh_token, new_token
                         )
+                        try:
+                            # Keep backend services client in sync with updated token
+                            from services.tastytrade_client import (
+                                tastytrade_client as svc_tastytrade_client,
+                            )
+
+                            svc_tastytrade_client.set_refresh_token(new_token)
+                        except Exception as sync_exc:
+                            print(f"Warning: failed to sync service tastytrade_client token: {sync_exc}")
                         await self._send_dm_or_warn(
                             ctx,
                             "TastyTrade refresh token updated; session reinitialized.",
@@ -848,19 +857,23 @@ class TradeBot(commands.Bot):
         # Import here to avoid circular imports
         from services.automated_options_service import AutomatedOptionsService
 
-        result = await AutomatedOptionsService().process_alert(
-            message.content, str(message.channel.id), str(message.author.id)
-        )
-        if result:
-            print(f"Alert processed successfully: {result}")
-            # If result indicates an auth error, surface the specific message
-            if isinstance(result, str) and 'authentication invalid' in result.lower():
-                await message.channel.send(result)
-            else:
-                await message.channel.send(f"Automated order placed: {result}")
-        else:
+        try:
+            result = await AutomatedOptionsService(self.tastytrade_client).process_alert(
+                message.content, str(message.channel.id), str(message.author.id)
+            )
+        except TastytradeAuthError as exc:
+            msg = str(exc)
+            print(msg)
+            await message.channel.send(msg)
+            return
+
+        if not result:
             print("Alert processing returned None")
             await message.channel.send("Alert processing failed or no action taken.")
+            return
+
+        print(f"Alert processed successfully: {result}")
+        await message.channel.send(f"Automated order placed: {result}")
 
     async def get_context(self, origin, *, cls=commands.Context):
         ctx = await super().get_context(origin, cls=cls)

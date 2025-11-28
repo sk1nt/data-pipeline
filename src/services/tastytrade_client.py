@@ -14,6 +14,20 @@ class TastyTradeClient:
         self._session: Optional[Session] = None
         self._session_expiration: Optional[datetime] = None
 
+    def set_refresh_token(self, refresh_token: str) -> None:
+        """Update the refresh token used for new sessions and clear any cached session."""
+        token = (refresh_token or "").strip()
+        if not token:
+            raise ValueError("refresh_token must be provided")
+        # Persist onto config so future calls use the updated token
+        if config.tastytrade_use_sandbox:
+            config.tastytrade_refresh_token = token
+        else:
+            config.tastytrade_prod_refresh_token = token
+        # Clear cached session so the next call reinitializes with the new token
+        self._session = None
+        self._session_expiration = None
+
     def _ensure_session(self) -> Session:
         """Ensure we have a valid session, refresh if needed."""
         if self._session is None or (

@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from ..services.automated_options_service import AutomatedOptionsService
+from ..services.tastytrade_client import TastytradeAuthError
 
 router = APIRouter()
 
@@ -32,5 +33,7 @@ async def process_options_alert(request: OptionsOrderRequest):
             )
         else:
             return OptionsOrderResponse(message="No valid alert found", order_id=None)
+    except TastytradeAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Alert processing failed: {e}")

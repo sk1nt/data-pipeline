@@ -281,6 +281,11 @@ class TastyTradeClient:
         """Turn on/off dry-run (prevent actual order execution)."""
         self._dry_run = bool(flag)
 
+    def get_session(self) -> Session:
+        """Return an authorized Session, refreshing if needed."""
+        with self._lock:
+            return self._ensure_session()
+
     def set_use_sandbox(self, flag: bool) -> None:
         """Switch the client runtime environment between sandbox and live.
 
