@@ -4,6 +4,7 @@ Exposes metrics that track imports, durations, failures, and last-run timestamps
 Run this alongside the application (or as a separate container) and configure
 Prometheus to scrape `/metrics` on port 8000.
 """
+
 from __future__ import annotations
 
 import time
@@ -13,11 +14,21 @@ from prometheus_client import start_http_server, Counter, Gauge, Histogram
 LOG = logging.getLogger("metrics_exporter")
 
 # Metrics
-IMPORT_RECORDS = Counter("gex_import_records_total", "Total number of records imported", ["ticker"])
-IMPORT_FAILURES = Counter("gex_import_failures_total", "Total number of import failures")
-LAST_IMPORT_DURATION = Histogram("gex_import_duration_seconds", "Duration of last import in seconds")
-LAST_IMPORT_TIME = Gauge("gex_last_import_timestamp", "Unix timestamp of last successful import")
-IMPORT_IN_PROGRESS = Gauge("gex_import_in_progress", "1 if an import is running, 0 otherwise")
+IMPORT_RECORDS = Counter(
+    "gex_import_records_total", "Total number of records imported", ["ticker"]
+)
+IMPORT_FAILURES = Counter(
+    "gex_import_failures_total", "Total number of import failures"
+)
+LAST_IMPORT_DURATION = Histogram(
+    "gex_import_duration_seconds", "Duration of last import in seconds"
+)
+LAST_IMPORT_TIME = Gauge(
+    "gex_last_import_timestamp", "Unix timestamp of last successful import"
+)
+IMPORT_IN_PROGRESS = Gauge(
+    "gex_import_in_progress", "1 if an import is running, 0 otherwise"
+)
 
 
 def record_import(ticker: str, records: int, duration: float) -> None:

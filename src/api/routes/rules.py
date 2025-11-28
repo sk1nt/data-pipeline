@@ -32,8 +32,7 @@ async def get_priority_rules():
     except Exception as e:
         logger.error(f"Failed to retrieve priority rules: {e}")
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve priority rules: {str(e)}"
+            status_code=500, detail=f"Failed to retrieve priority rules: {str(e)}"
         )
 
 
@@ -58,15 +57,17 @@ async def evaluate_rules_sample():
             metadata={
                 "volume": 75000,
                 "open_interest": 150000,
-                "data_timestamp": (datetime.utcnow() - timedelta(minutes=2)).isoformat()
-            }
+                "data_timestamp": (
+                    datetime.utcnow() - timedelta(minutes=2)
+                ).isoformat(),
+            },
         )
 
         # Create sample data source
         sample_source = DataSource(
             name="Sample Source",
             endpoint_url="https://api.example.com",
-            api_key="sample_key"
+            api_key="sample_key",
         )
         # Simulate some history
         sample_source.record_request(True, timedelta(seconds=0.5))
@@ -86,17 +87,17 @@ async def evaluate_rules_sample():
             "sample_request": {
                 "data_type": sample_request.data_type.value,
                 "market_symbol": sample_request.market_symbol,
-                "metadata": sample_request.metadata
+                "metadata": sample_request.metadata,
             },
             "sample_source": {
                 "name": sample_source.name,
                 "reliability_score": sample_source.reliability_score,
-                "total_requests": sample_source.total_requests
+                "total_requests": sample_source.total_requests,
             },
             "evaluation_context": context,
             "calculated_score": score,
             "matched_rules": matched_rules,
-            "assigned_priority": rule_engine.get_priority_level_from_score(score).value
+            "assigned_priority": rule_engine.get_priority_level_from_score(score).value,
         }
 
         logger.info("Generated sample rule evaluation")
@@ -105,6 +106,5 @@ async def evaluate_rules_sample():
     except Exception as e:
         logger.error(f"Failed to generate sample evaluation: {e}")
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to generate sample evaluation: {str(e)}"
+            status_code=500, detail=f"Failed to generate sample evaluation: {str(e)}"
         )

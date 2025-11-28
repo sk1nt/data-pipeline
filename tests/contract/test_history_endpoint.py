@@ -33,13 +33,20 @@ class TestGEXHistoryEndpointContract:
         return {
             "url": "https://hist.gex.bot/2025-11-14_SPX_classic.json",
             "gex_type": "gex_zero",
-            "ticker": "SPX"
+            "ticker": "SPX",
         }
 
-    def test_history_endpoint_accepts_valid_payload(self, client, valid_history_payload):
+    def test_history_endpoint_accepts_valid_payload(
+        self, client, valid_history_payload
+    ):
         """Test that /gex_history_url endpoint accepts valid payload."""
-        with patch('src.lib.gex_history_queue.gex_history_queue.enqueue_request', return_value=55) as mock_enqueue, \
-             patch('src.data_pipeline._trigger_queue_processing', new=AsyncMock()):
+        with (
+            patch(
+                "src.lib.gex_history_queue.gex_history_queue.enqueue_request",
+                return_value=55,
+            ) as mock_enqueue,
+            patch("src.data_pipeline._trigger_queue_processing", new=AsyncMock()),
+        ):
             response = client.post("/gex_history_url", json=valid_history_payload)
 
         assert response.status_code == 200
@@ -53,7 +60,7 @@ class TestGEXHistoryEndpointContract:
         response = client.post(
             "/gex_history_url",
             data="invalid json",
-            headers={"Content-Type": "application/json"}
+            headers={"Content-Type": "application/json"},
         )
 
         # JSON decode failure returns 400
@@ -79,9 +86,17 @@ class TestGEXHistoryEndpointContract:
 
     def test_history_endpoint_rate_limiting(self, client, valid_history_payload):
         """Test that /gex_history_url endpoint is rate limited."""
-        with patch('src.lib.gex_history_queue.gex_history_queue.enqueue_request', return_value=1), \
-             patch('src.data_pipeline._trigger_queue_processing', new=AsyncMock()):
-            responses = [client.post("/gex_history_url", json=valid_history_payload).status_code for _ in range(5)]
+        with (
+            patch(
+                "src.lib.gex_history_queue.gex_history_queue.enqueue_request",
+                return_value=1,
+            ),
+            patch("src.data_pipeline._trigger_queue_processing", new=AsyncMock()),
+        ):
+            responses = [
+                client.post("/gex_history_url", json=valid_history_payload).status_code
+                for _ in range(5)
+            ]
 
         assert all(code in [200, 429] for code in responses)
 

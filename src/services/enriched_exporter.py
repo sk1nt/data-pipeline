@@ -63,7 +63,13 @@ class EnrichedExporter:
         session_start_utc, session_end_utc = self._session_bounds_utc(trade_date)
         snap_window_start_utc = session_start_utc - dt.timedelta(hours=18)
 
-        logger.info("Exporting %s (%s to %s UTC) -> %s", trade_date, session_start_utc, session_end_utc, output_file)
+        logger.info(
+            "Exporting %s (%s to %s UTC) -> %s",
+            trade_date,
+            session_start_utc,
+            session_end_utc,
+            output_file,
+        )
 
         con = duckdb.connect()
         try:
@@ -81,12 +87,19 @@ class EnrichedExporter:
             con.close()
 
     # ---------- DuckDB staging helpers ----------
-    def _session_bounds_utc(self, trade_date: dt.date) -> tuple[dt.datetime, dt.datetime]:
+    def _session_bounds_utc(
+        self, trade_date: dt.date
+    ) -> tuple[dt.datetime, dt.datetime]:
         start_local = dt.datetime.combine(trade_date, self.config.session_start, NY_TZ)
         end_local = dt.datetime.combine(trade_date, self.config.session_end, NY_TZ)
         return start_local.astimezone(UTC), end_local.astimezone(UTC)
 
-    def _create_seconds_table(self, con: duckdb.DuckDBPyConnection, start_utc: dt.datetime, end_utc: dt.datetime) -> None:
+    def _create_seconds_table(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        start_utc: dt.datetime,
+        end_utc: dt.datetime,
+    ) -> None:
         con.execute(
             """
             CREATE OR REPLACE TEMP TABLE seconds AS
@@ -96,7 +109,13 @@ class EnrichedExporter:
             [start_utc, end_utc],
         )
 
-    def _load_ticks(self, con: duckdb.DuckDBPyConnection, tick_file: Path, start_utc: dt.datetime, end_utc: dt.datetime) -> None:
+    def _load_ticks(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        tick_file: Path,
+        start_utc: dt.datetime,
+        end_utc: dt.datetime,
+    ) -> None:
         # Build dense OHLCV with gap flag; fill missing seconds with prior close.
         if tick_file.exists():
             con.execute(
@@ -108,7 +127,9 @@ class EnrichedExporter:
                 """,
                 [tick_file.as_posix(), start_utc, end_utc],
             )
-        elif con.execute("SELECT 1 FROM information_schema.schemata WHERE catalog_name='tickdb'").fetchone():
+        elif con.execute(
+            "SELECT 1 FROM information_schema.schemata WHERE catalog_name='tickdb'"
+        ).fetchone():
             con.execute(
                 """
                 CREATE OR REPLACE TEMP TABLE ticks AS
@@ -120,7 +141,9 @@ class EnrichedExporter:
                 [self.config.symbol, start_utc, end_utc],
             )
         else:
-            raise FileNotFoundError(f"No tick parquet {tick_file} and tick_db unavailable")
+            raise FileNotFoundError(
+                f"No tick parquet {tick_file} and tick_db unavailable"
+            )
 
         con.execute(
             """
@@ -178,7 +201,12 @@ class EnrichedExporter:
             [],
         )
 
-    def _load_snapshots(self, con: duckdb.DuckDBPyConnection, start_utc: dt.datetime, end_utc: dt.datetime) -> None:
+    def _load_snapshots(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        start_utc: dt.datetime,
+        end_utc: dt.datetime,
+    ) -> None:
         cfg = self.config
         start_ms = int(start_utc.timestamp() * 1000)
         end_ms = int(end_utc.timestamp() * 1000)
@@ -210,7 +238,12 @@ class EnrichedExporter:
             [cfg.gex_ticker, start_ms, end_ms],
         )
 
-    def _load_strikes(self, con: duckdb.DuckDBPyConnection, start_utc: dt.datetime, end_utc: dt.datetime) -> None:
+    def _load_strikes(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        start_utc: dt.datetime,
+        end_utc: dt.datetime,
+    ) -> None:
         cfg = self.config
         start_ms = int(start_utc.timestamp() * 1000)
         end_ms = int(end_utc.timestamp() * 1000)
@@ -273,7 +306,9 @@ class EnrichedExporter:
             [],
         )
 
-    def _join_and_write(self, con: duckdb.DuckDBPyConnection, output_file: Path) -> None:
+    def _join_and_write(
+        self, con: duckdb.DuckDBPyConnection, output_file: Path
+    ) -> None:
         # Combine snapshots with strike candidates and forward fill across seconds.
         con.execute(
             """
@@ -469,20 +504,48 @@ class EnrichedExporter:
             [output_file.as_posix()],
         )
 
-        gap_count = con.execute("SELECT count(*) FROM final WHERE gap_filled").fetchone()[0]
+        gap_count = con.execute(
+            "SELECT count(*) FROM final WHERE gap_filled"
+        ).fetchone()[0]
         row_count = con.execute("SELECT count(*) FROM final").fetchone()[0]
-        logger.info("Wrote %s rows to %s (gaps flagged: %s)", row_count, output_file, gap_count)
+        logger.info(
+            "Wrote %s rows to %s (gaps flagged: %s)", row_count, output_file, gap_count
+        )
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export MNQ 1s OHLCV + GEX enriched Parquet.")
-    parser.add_argument("--start-date", required=True, help="Start trade date (YYYY-MM-DD)")
-    parser.add_argument("--end-date", help="End trade date (YYYY-MM-DD); defaults to start-date")
-    parser.add_argument("--symbol", default="MNQ", help="Symbol for tick data folder (default: MNQ)")
-    parser.add_argument("--gex-ticker", default="NQ_NDX", help="Ticker in gex_snapshots/strikes (default: NQ_NDX)")
-    parser.add_argument("--tick-root", default="data/parquet/tick", help="Root folder for tick parquet files")
-    parser.add_argument("--gex-db", default="data/gex_data.db", help="Path to DuckDB containing gex_snapshots/strikes")
-    parser.add_argument("--output-root", default="data/enriched", help="Root folder for enriched parquet output")
+    parser = argparse.ArgumentParser(
+        description="Export MNQ 1s OHLCV + GEX enriched Parquet."
+    )
+    parser.add_argument(
+        "--start-date", required=True, help="Start trade date (YYYY-MM-DD)"
+    )
+    parser.add_argument(
+        "--end-date", help="End trade date (YYYY-MM-DD); defaults to start-date"
+    )
+    parser.add_argument(
+        "--symbol", default="MNQ", help="Symbol for tick data folder (default: MNQ)"
+    )
+    parser.add_argument(
+        "--gex-ticker",
+        default="NQ_NDX",
+        help="Ticker in gex_snapshots/strikes (default: NQ_NDX)",
+    )
+    parser.add_argument(
+        "--tick-root",
+        default="data/parquet/tick",
+        help="Root folder for tick parquet files",
+    )
+    parser.add_argument(
+        "--gex-db",
+        default="data/gex_data.db",
+        help="Path to DuckDB containing gex_snapshots/strikes",
+    )
+    parser.add_argument(
+        "--output-root",
+        default="data/enriched",
+        help="Root folder for enriched parquet output",
+    )
     return parser.parse_args()
 
 
@@ -497,7 +560,9 @@ def main():
         gex_db=Path(args.gex_db),
         output_root=Path(args.output_root),
     )
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     exporter = EnrichedExporter(config)
     exporter.export_range(start_date, end_date)
 

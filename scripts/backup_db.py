@@ -37,12 +37,16 @@ def restore(backup: Path, target: Path) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Snapshot or restore DuckDB DB files before imports")
+    p = argparse.ArgumentParser(
+        description="Snapshot or restore DuckDB DB files before imports"
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     snap = sub.add_parser("snapshot")
     snap.add_argument("db_files", nargs="+", help="paths to DB files to snapshot")
-    snap.add_argument("--out-dir", default="data/backups", help="backup output directory")
+    snap.add_argument(
+        "--out-dir", default="data/backups", help="backup output directory"
+    )
 
     rst = sub.add_parser("restore")
     rst.add_argument("backup_file", help="backup file to restore from")

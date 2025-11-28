@@ -27,9 +27,7 @@ class PriorityService:
         self.rule_engine = RuleEngine()
 
     async def submit_priority_request(
-        self,
-        request: PriorityRequest,
-        data_source: DataSource
+        self, request: PriorityRequest, data_source: DataSource
     ) -> PriorityRequest:
         """
         Submit a new priority request for processing.
@@ -48,22 +46,28 @@ class PriorityService:
         try:
             # Validate data source reliability
             if not data_source.is_reliable():
-                logger.warning(f"Data source {data_source.source_id} has low reliability score: {data_source.reliability_score}")
+                logger.warning(
+                    f"Data source {data_source.source_id} has low reliability score: {data_source.reliability_score}"
+                )
                 # Still allow but log warning
 
             # Get active priority rules (use defaults for now)
             active_rules = self.rule_engine.create_default_rules()
 
             # Use rule engine for automatic priority assignment
-            calculated_score, matched_rules = self.rule_engine.evaluate_priority_request(
-                request, data_source, active_rules
+            calculated_score, matched_rules = (
+                self.rule_engine.evaluate_priority_request(
+                    request, data_source, active_rules
+                )
             )
 
             # Override the manual priority level with rule-based score
             request.priority_score = calculated_score
 
             # Update priority level based on calculated score
-            request.priority_level = self.rule_engine.get_priority_level_from_score(calculated_score)
+            request.priority_level = self.rule_engine.get_priority_level_from_score(
+                calculated_score
+            )
 
             # Set status and timestamp
             request.status = JobStatus.PENDING
@@ -71,9 +75,13 @@ class PriorityService:
 
             # Log rule matches for audit
             if matched_rules:
-                logger.info(f"AUDIT: Request {request.request_id} auto-assigned priority {request.priority_level.value} ({calculated_score:.3f}) based on rules: {', '.join(matched_rules)}")
+                logger.info(
+                    f"AUDIT: Request {request.request_id} auto-assigned priority {request.priority_level.value} ({calculated_score:.3f}) based on rules: {', '.join(matched_rules)}"
+                )
             else:
-                logger.info(f"AUDIT: Request {request.request_id} auto-assigned default priority {request.priority_level.value} ({calculated_score:.3f}) - no rules matched")
+                logger.info(
+                    f"AUDIT: Request {request.request_id} auto-assigned default priority {request.priority_level.value} ({calculated_score:.3f}) - no rules matched"
+                )
 
             # Save to database
             request_dict = request.dict_for_db()
@@ -87,13 +95,17 @@ class PriorityService:
                 request_id=str(request_id),
                 priority_score=request.priority_score,
                 data={
-                    'source_id': str(data_source.source_id),
-                    'data_type': request.data_type.value,
-                    'deadline': request.deadline.isoformat() if request.deadline else None
-                }
+                    "source_id": str(data_source.source_id),
+                    "data_type": request.data_type.value,
+                    "deadline": request.deadline.isoformat()
+                    if request.deadline
+                    else None,
+                },
             )
 
-            logger.info(f"Submitted priority request {request_id} with score {request.priority_score}")
+            logger.info(
+                f"Submitted priority request {request_id} with score {request.priority_score}"
+            )
             return request
 
         except Exception as e:
@@ -136,10 +148,7 @@ class PriorityService:
             raise DatabaseError(f"Failed to get next request: {str(e)}") from e
 
     async def update_request_status(
-        self,
-        request_id: UUID,
-        status: JobStatus,
-        error_message: Optional[str] = None
+        self, request_id: UUID, status: JobStatus, error_message: Optional[str] = None
     ) -> None:
         """
         Update the status of a priority request.
@@ -151,14 +160,14 @@ class PriorityService:
         """
         try:
             update_data = {
-                'status': status.value,
-                'updated_at': datetime.utcnow().isoformat()
+                "status": status.value,
+                "updated_at": datetime.utcnow().isoformat(),
             }
 
             if status == JobStatus.COMPLETED:
-                update_data['completed_at'] = datetime.utcnow().isoformat()
+                update_data["completed_at"] = datetime.utcnow().isoformat()
             elif status == JobStatus.FAILED and error_message:
-                update_data['error_message'] = error_message
+                update_data["error_message"] = error_message
 
             await self.db.update_priority_request(request_id, update_data)
 
@@ -231,10 +240,7 @@ class PriorityService:
             raise DatabaseError(f"Failed to get data source: {str(e)}") from e
 
     async def update_data_source_metrics(
-        self,
-        source_id: UUID,
-        success: bool,
-        response_time: Optional[timedelta] = None
+        self, source_id: UUID, success: bool, response_time: Optional[timedelta] = None
     ) -> None:
         """
         Update data source metrics after a request.
@@ -260,7 +266,9 @@ class PriorityService:
 
         except Exception as e:
             logger.error(f"Failed to update data source metrics: {e}")
-            raise DatabaseError(f"Failed to update data source metrics: {str(e)}") from e
+            raise DatabaseError(
+                f"Failed to update data source metrics: {str(e)}"
+            ) from e
 
     async def register_data_source(self, source: DataSource) -> DataSource:
         """

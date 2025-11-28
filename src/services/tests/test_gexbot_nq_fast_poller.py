@@ -1,10 +1,9 @@
-import asyncio
 import os
 import sys
 from datetime import datetime, timezone
 import pytest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
 from src.services.gexbot_poller import GEXBotPoller, GEXBotPollerSettings
 
@@ -30,7 +29,9 @@ class FakeRedisClient:
 
 @pytest.mark.asyncio
 async def test_nq_fast_poller_symbol_selection():
-    settings = GEXBotPollerSettings(api_key='apikey', symbols=['NQ_NDX', 'SPX', 'ES_SPX'])
+    settings = GEXBotPollerSettings(
+        api_key="apikey", symbols=["NQ_NDX", "SPX", "ES_SPX"]
+    )
     fake_redis = FakeRedisClient()
     poller = GEXBotPoller(settings, redis_client=fake_redis, ts_client=None)
 
@@ -42,18 +43,18 @@ async def test_nq_fast_poller_symbol_selection():
         if len(fetched) >= 2:
             poller._stop_event.set()
         return {
-            'symbol': symbol.upper(),
-            'timestamp': datetime.utcnow().replace(tzinfo=timezone.utc).isoformat(),
-            'spot': 100.0,
-            'zero_gamma': 0.1,
-            'net_gex': 50,
-            'major_pos_vol': 10,
-            'major_neg_vol': -5,
-            'major_pos_oi': 1,
-            'major_neg_oi': -1,
-            'sum_gex_oi': 100,
-            'max_priors': [],
-            'strikes': [],
+            "symbol": symbol.upper(),
+            "timestamp": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat(),
+            "spot": 100.0,
+            "zero_gamma": 0.1,
+            "net_gex": 50,
+            "major_pos_vol": 10,
+            "major_neg_vol": -5,
+            "major_pos_oi": 1,
+            "major_neg_oi": -1,
+            "sum_gex_oi": 100,
+            "max_priors": [],
+            "strikes": [],
         }
 
     poller._fetch_symbol = fake_fetch_symbol
@@ -61,4 +62,4 @@ async def test_nq_fast_poller_symbol_selection():
     poller._is_rth_now = lambda: True
     # Run the poller (will stop after two fetches)
     await poller._run()
-    assert fetched == ['SPX', 'NQ_NDX']
+    assert fetched == ["SPX", "NQ_NDX"]

@@ -21,14 +21,15 @@ DEFAULT_SYMBOL_MAP = {
 # Load environment variables
 load_dotenv()
 
-TASTYTRADE_CLIENT_ID = os.getenv('TASTYTRADE_CLIENT_ID')
-TASTYTRADE_CLIENT_SECRET = os.getenv('TASTYTRADE_CLIENT_SECRET')
-TASTYTRADE_REFRESH_TOKEN = os.getenv('TASTYTRADE_REFRESH_TOKEN')
+TASTYTRADE_CLIENT_ID = os.getenv("TASTYTRADE_CLIENT_ID")
+TASTYTRADE_CLIENT_SECRET = os.getenv("TASTYTRADE_CLIENT_SECRET")
+TASTYTRADE_REFRESH_TOKEN = os.getenv("TASTYTRADE_REFRESH_TOKEN")
+
 
 class TastyTradeIngestion:
     def __init__(self):
         self.client = None
-        self.symbols = ['MES', 'MNQ', 'NQ', 'SPY', 'QQQ', 'VIX']
+        self.symbols = ["MES", "MNQ", "NQ", "SPY", "QQQ", "VIX"]
         self.last_save = time.time()
         self.save_interval = 60  # Save every 60 seconds
         self.tick_buffer = []  # Buffer for batch saving
@@ -38,16 +39,16 @@ class TastyTradeIngestion:
         try:
             # Convert trade to tick format
             # Clean symbol: remove leading slash and exchange suffix
-            symbol = trade.event_symbol.lstrip('/').split(':')[0]
+            symbol = trade.event_symbol.lstrip("/").split(":")[0]
             symbol = DEFAULT_SYMBOL_MAP.get(symbol.upper(), symbol.upper())
-            
+
             tick = {
-                'symbol': symbol,
-                'timestamp': datetime.fromtimestamp(trade.time / 1000).isoformat(),
-                'price': float(trade.price),
-                'volume': int(trade.size),
-                'tick_type': 'trade',
-                'source': 'tastyttrade'
+                "symbol": symbol,
+                "timestamp": datetime.fromtimestamp(trade.time / 1000).isoformat(),
+                "price": float(trade.price),
+                "volume": int(trade.size),
+                "tick_type": "trade",
+                "source": "tastyttrade",
             }
 
             print(f"Received tick: {tick}")
@@ -56,10 +57,10 @@ class TastyTradeIngestion:
             self.tick_buffer.append(tick)
 
             # Cache in Redis for real-time access using unified key template
-            sym = tick['symbol'].upper()
+            sym = tick["symbol"].upper()
             sym = DEFAULT_SYMBOL_MAP.get(sym, sym)
             redis_key = REDIS_TICK_KEY_TEMPLATE.format(symbol=sym)
-            tick['symbol'] = sym
+            tick["symbol"] = sym
             redis_manager.set_tick_data(redis_key, tick)
 
         except Exception as e:
@@ -82,15 +83,15 @@ class TastyTradeIngestion:
             # Create OAuth2 session - it will automatically manage access tokens
             session = OAuthSession(
                 provider_secret=TASTYTRADE_CLIENT_SECRET,
-                refresh_token=TASTYTRADE_REFRESH_TOKEN
+                refresh_token=TASTYTRADE_REFRESH_TOKEN,
             )
-            
+
             print("✅ Authenticated with TastyTrade OAuth2")
-            
+
             # Format symbols - futures get /symbol:XCME, equities stay as-is
-            futures_symbols = ['MES', 'MNQ', 'NQ']  # Common futures
+            futures_symbols = ["MES", "MNQ", "NQ"]  # Common futures
             formatted_symbols = []
-            
+
             for sym in self.symbols:
                 if sym in futures_symbols:
                     # Futures: add slash and exchange
@@ -98,36 +99,35 @@ class TastyTradeIngestion:
                 else:
                     # Equities/ETFs: use as-is with leading slash
                     formatted_symbols.append(f"/{sym}")
-            
+
             print(f"Formatted symbols: {formatted_symbols}")
-            
+
             # Start streaming with async context manager
             async with DXLinkStreamer(session) as streamer:
                 print("Subscribing to trades...")
                 await streamer.subscribe(Trade, formatted_symbols)
                 print("✅ Streaming started successfully")
-                
+
                 # Event loop with periodic saves
                 try:
                     while True:
                         # Get next trade event (with timeout)
                         try:
                             trade = await asyncio.wait_for(
-                                streamer.get_event(Trade),
-                                timeout=1.0
+                                streamer.get_event(Trade), timeout=1.0
                             )
                             self.process_quote(trade)
                         except asyncio.TimeoutError:
                             # No trade in timeout period, check if should save
                             pass
-                        
+
                         # Check if we should save
                         if time.time() - self.last_save >= self.save_interval:
                             self.save_buffers()
-                            
+
                 except KeyboardInterrupt:
                     print("Received shutdown signal")
-                    
+
         except Exception as e:
             print(f"Streaming error: {e}", exc_info=True)
         finally:
@@ -135,6 +135,7 @@ class TastyTradeIngestion:
             print("Saving final buffers...")
             self.save_buffers()
             print("Stream service stopped")
+
 
 if __name__ == "__main__":
     ingestion = TastyTradeIngestion()

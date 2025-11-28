@@ -1,4 +1,5 @@
 """Background worker that flushes RedisTimeSeries data to DuckDB/Parquet."""
+
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +15,7 @@ import duckdb
 import pandas as pd
 import redis
 
-from ..config import settings
+from ..config import settings as config_settings
 from ..lib.redis_client import RedisClient
 from .redis_timeseries import RedisTimeSeriesClient
 
@@ -23,19 +24,20 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class FlushWorkerSettings:
-    interval_seconds: int = settings.flush_interval_seconds
-    schedule_mode: str = settings.flush_schedule_mode
-    daily_time: str = settings.flush_daily_time
+    # Use reasonable compile-time defaults; runtime overrides use config_settings
+    interval_seconds: int = 600
+    schedule_mode: str = "interval"
+    daily_time: str = "00:30"
     key_pattern: str = "ts:*"
     last_hash: str = "ts_meta:last_flushed"
-    db_path: Path = Path(settings.timeseries_db_path)
-    parquet_dir: Path = Path(settings.timeseries_parquet_dir)
-    gex_snapshot_db: Path = settings.data_path / "gex_data.db"
+    db_path: Path = Path(config_settings.timeseries_db_path)
+    parquet_dir: Path = Path(config_settings.timeseries_parquet_dir)
+    gex_snapshot_db: Path = config_settings.data_path / "gex_data.db"
     gex_snapshot_prefix: str = "gex:snapshot:"
-    tick_db_path: Path = Path(settings.tick_db_path)
-    depth_db_path: Path = Path(settings.depth_db_path)
-    tick_parquet_dir: Path = Path(settings.tick_parquet_dir)
-    depth_parquet_dir: Path = Path(settings.depth_parquet_dir)
+    tick_db_path: Path = Path(config_settings.tick_db_path)
+    depth_db_path: Path = Path(config_settings.depth_db_path)
+    tick_parquet_dir: Path = Path(config_settings.tick_parquet_dir)
+    depth_parquet_dir: Path = Path(config_settings.depth_parquet_dir)
 
 
 class RedisFlushWorker:
@@ -48,6 +50,23 @@ class RedisFlushWorker:
         self.redis_client = redis_client
         self.ts_client = ts_client
         self.settings = settings
+        # Ensure runtime settings are sourced from config where appropriate
+        try:
+            self.settings.interval_seconds = int(
+                getattr(
+                    config_settings,
+                    "flush_interval_seconds",
+                    self.settings.interval_seconds,
+                )
+            )
+        except Exception:
+            pass
+        self.settings.schedule_mode = getattr(
+            config_settings, "flush_schedule_mode", self.settings.schedule_mode
+        )
+        self.settings.daily_time = getattr(
+            config_settings, "flush_daily_time", self.settings.daily_time
+        )
         self._task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
         self._last_summary: Dict[str, Any] = {}
@@ -57,8 +76,10 @@ class RedisFlushWorker:
         """Migrate legacy metadata key to new location."""
         legacy_key = "ts:last_flushed"
         new_key = self.settings.last_hash
-        
-        if self.redis_client.client.exists(legacy_key) and not self.redis_client.client.exists(new_key):
+
+        if self.redis_client.client.exists(
+            legacy_key
+        ) and not self.redis_client.client.exists(new_key):
             LOGGER.info("Migrating legacy metadata from %s to %s", legacy_key, new_key)
             legacy_data = self.redis_client.client.hgetall(legacy_key)
             if legacy_data:
@@ -89,7 +110,10 @@ class RedisFlushWorker:
             )
             await self._run_daily()
         else:
-            LOGGER.info("Redis flush worker started (interval=%ss)", self.settings.interval_seconds)
+            LOGGER.info(
+                "Redis flush worker started (interval=%ss)",
+                self.settings.interval_seconds,
+            )
             await self._run_interval()
         LOGGER.info("Redis flush worker stopped")
 
@@ -97,7 +121,9 @@ class RedisFlushWorker:
         while not self._stop_event.is_set():
             await self._flush_once()
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=self.settings.interval_seconds)
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=self.settings.interval_seconds
+                )
             except asyncio.TimeoutError:
                 continue
 
@@ -233,7 +259,9 @@ class RedisFlushWorker:
             """
         )
         conn.register("flush_df", df)
-        conn.execute("INSERT INTO redis_timeseries SELECT key, ts, value, day FROM flush_df")
+        conn.execute(
+            "INSERT INTO redis_timeseries SELECT key, ts, value, day FROM flush_df"
+        )
         conn.close()
 
     def _write_parquet(self, df: pd.DataFrame) -> None:
@@ -266,20 +294,25 @@ class RedisFlushWorker:
         ).reset_index()
         if pivot.empty:
             return
-        pivot.columns = [col if isinstance(col, str) else col[0] for col in pivot.columns]
+        pivot.columns = [
+            col if isinstance(col, str) else col[0] for col in pivot.columns
+        ]
         if "price" not in pivot.columns:
             return
         before_drop = len(pivot)
         pivot = pivot.dropna(subset=["price"])
         if pivot.empty:
-            LOGGER.debug("Skip tick flush slice due to missing price column values (before=%s)", before_drop)
+            LOGGER.debug(
+                "Skip tick flush slice due to missing price column values (before=%s)",
+                before_drop,
+            )
             return
         pivot["size"] = pivot.get("size", 0.0).fillna(0.0)
         pivot["timestamp"] = pd.to_datetime(pivot["ts"], unit="ms", utc=True)
         pivot["day"] = pivot["timestamp"].dt.strftime("%Y%m%d")
-        parquet_df = pivot[["symbol", "source", "timestamp", "ts", "price", "size", "day"]].rename(
-            columns={"ts": "timestamp_ms"}
-        )
+        parquet_df = pivot[
+            ["symbol", "source", "timestamp", "ts", "price", "size", "day"]
+        ].rename(columns={"ts": "timestamp_ms"})
         self._append_tick_parquet(parquet_df)
         self._insert_tick_rows(parquet_df)
 
@@ -308,22 +341,26 @@ class RedisFlushWorker:
         ).reset_index()
         if pivot.empty:
             return
-        pivot.columns = [col if isinstance(col, str) else col[0] for col in pivot.columns]
+        pivot.columns = [
+            col if isinstance(col, str) else col[0] for col in pivot.columns
+        ]
         pivot["price"] = pivot.get("price", pd.NA)
         pivot["size"] = pivot.get("size", pd.NA)
         pivot["timestamp"] = pd.to_datetime(pivot["ts"], unit="ms", utc=True)
         pivot["day"] = pivot["timestamp"].dt.strftime("%Y%m%d")
-        parquet_df = pivot[[
-            "symbol",
-            "source",
-            "side",
-            "level",
-            "timestamp",
-            "ts",
-            "price",
-            "size",
-            "day",
-        ]].rename(columns={"ts": "timestamp_ms"})
+        parquet_df = pivot[
+            [
+                "symbol",
+                "source",
+                "side",
+                "level",
+                "timestamp",
+                "ts",
+                "price",
+                "size",
+                "day",
+            ]
+        ].rename(columns={"ts": "timestamp_ms"})
         self._append_depth_parquet(parquet_df)
 
     def _append_tick_parquet(self, parquet_df: pd.DataFrame) -> None:
@@ -361,7 +398,9 @@ class RedisFlushWorker:
             safe_symbol = self._sanitize_symbol_dir(symbol)
             dest = parquet_dir / safe_symbol / f"{day}.parquet"
             dest.parent.mkdir(parents=True, exist_ok=True)
-            subset = group.drop(columns=["day"]).sort_values(["timestamp", "side", "level"])
+            subset = group.drop(columns=["day"]).sort_values(
+                ["timestamp", "side", "level"]
+            )
             subset.to_parquet(dest, index=False)
             manifests.append(
                 (
@@ -394,14 +433,19 @@ class RedisFlushWorker:
         try:
             conn.execute("DESCRIBE tick_data")
         except duckdb.CatalogException:
-            LOGGER.warning("tick_data table missing in %s; skipping tick inserts", self.settings.tick_db_path)
+            LOGGER.warning(
+                "tick_data table missing in %s; skipping tick inserts",
+                self.settings.tick_db_path,
+            )
             conn.close()
             return
         conn.register(
             "tick_flush_df",
             rows[["symbol", "timestamp", "price", "volume", "tick_type", "source"]],
         )
-        next_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM tick_data").fetchone()[0]
+        next_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM tick_data").fetchone()[
+            0
+        ]
         conn.execute(
             """
             INSERT INTO tick_data
@@ -522,7 +566,9 @@ class RedisFlushWorker:
                 if not snapshot_row:
                     continue
                 snapshot_rows.append(snapshot_row)
-                strike_rows.extend(self._build_strike_rows(snapshot, snapshot_row["timestamp"]))
+                strike_rows.extend(
+                    self._build_strike_rows(snapshot, snapshot_row["timestamp"])
+                )
             if not snapshot_rows:
                 return {"gex_snapshots": 0, "gex_strikes": 0}
             self._write_gex_tables(snapshot_rows, strike_rows)
@@ -535,7 +581,11 @@ class RedisFlushWorker:
             return {"gex_snapshots": 0, "gex_strikes": 0}
 
     def _collect_gex_symbols(self) -> Set[str]:
-        symbols = {s.strip().upper() for s in settings.gex_symbol_list if s.strip()}
+        symbols = {
+            s.strip().upper()
+            for s in getattr(config_settings, "gex_symbol_list", [])
+            if s.strip()
+        }
         # Dynamic symbol enrollment no longer used — only use configured symbol list
         return symbols
 
@@ -561,7 +611,9 @@ class RedisFlushWorker:
         if not payload:
             return None
         try:
-            decoded = payload.decode() if isinstance(payload, (bytes, bytearray)) else payload
+            decoded = (
+                payload.decode() if isinstance(payload, (bytes, bytearray)) else payload
+            )
             data = json.loads(decoded)
             return data
         except json.JSONDecodeError:
@@ -617,7 +669,9 @@ class RedisFlushWorker:
             "max_priors": max_priors_str,
         }
 
-    def _build_strike_rows(self, snapshot: Dict[str, Any], epoch_ms: int) -> List[Dict[str, Any]]:
+    def _build_strike_rows(
+        self, snapshot: Dict[str, Any], epoch_ms: int
+    ) -> List[Dict[str, Any]]:
         ticker = (snapshot.get("symbol") or snapshot.get("ticker") or "").upper()
         strikes = snapshot.get("strikes") or []
         rows: List[Dict[str, Any]] = []
@@ -662,7 +716,9 @@ class RedisFlushWorker:
         except (TypeError, ValueError):
             return None
 
-    def _write_gex_tables(self, snapshots: List[Dict[str, Any]], strikes: List[Dict[str, Any]]) -> None:
+    def _write_gex_tables(
+        self, snapshots: List[Dict[str, Any]], strikes: List[Dict[str, Any]]
+    ) -> None:
         df_snapshots = pd.DataFrame(snapshots)
         df_strikes = pd.DataFrame(strikes) if strikes else None
         conn = duckdb.connect(str(self.settings.gex_snapshot_db))

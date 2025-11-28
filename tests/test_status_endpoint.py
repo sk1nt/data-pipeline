@@ -75,23 +75,27 @@ def test_ml_trade_endpoint_persists_and_publishes(monkeypatch):
 def test_control_endpoints(monkeypatch):
     # Provide no-op start/stop/restart so handlers don't touch OS processes
     monkeypatch.setattr(module.service_manager, "start_service", lambda name: None)
+
     async def _noop_restart(name):
         return None
+
     monkeypatch.setattr(module.service_manager, "restart_service", _noop_restart)
     monkeypatch.setattr(module.service_manager, "stop_service", lambda name: None)
+
     # Expose a fake discord bot status on the manager for /control/{service}/status
     class _FakeSvc:
         def status(self):
             return {"running": False}
+
     monkeypatch.setattr(module.service_manager, "discord_bot", _FakeSvc())
     with make_client(monkeypatch) as client:
-        resp = client.get('/control/discord_bot/status')
+        resp = client.get("/control/discord_bot/status")
         assert resp.status_code == 200
         data = resp.json()
-        assert data.get('running', None) is False
-        resp = client.post('/control/discord_bot/restart')
+        assert data.get("running", None) is False
+        resp = client.post("/control/discord_bot/restart")
         assert resp.status_code == 200
-        assert resp.json().get('status') == 'restarted'
+        assert resp.json().get("status") == "restarted"
 
 
 class _FakePipeline:

@@ -4,6 +4,7 @@ Providing this wrapper keeps FastAPI tests and tooling from importing the
 hyphenated filename directly while still sharing the exact same app object
 and helper functions.
 """
+
 from __future__ import annotations
 
 import importlib.util

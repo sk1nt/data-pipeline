@@ -136,7 +136,9 @@ def fetch_from_duckdb(db_path: Path, ticker: str, limit: int) -> List[SnapshotRe
     return _normalize_rows(rows, source="duckdb")
 
 
-def fetch_from_parquet(parquet_path: Path, ticker: str, limit: int) -> List[SnapshotRecord]:
+def fetch_from_parquet(
+    parquet_path: Path, ticker: str, limit: int
+) -> List[SnapshotRecord]:
     query = f"""
         SELECT
             epoch_ms,
@@ -167,7 +169,9 @@ def fetch_from_parquet(parquet_path: Path, ticker: str, limit: int) -> List[Snap
     return _normalize_rows(rows, source="parquet")
 
 
-def write_jsonl(records: Iterable[SnapshotRecord], out_path: Path, ascending: bool) -> None:
+def write_jsonl(
+    records: Iterable[SnapshotRecord], out_path: Path, ascending: bool
+) -> None:
     ordered = list(records)
     if ascending:
         ordered = list(reversed(ordered))
@@ -247,8 +251,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Extract recent GEX snapshots for simulating the Discord GEX feed."
     )
-    parser.add_argument("--ticker", default="NQ_NDX", help="Canonical ticker to query (default: %(default)s)")
-    parser.add_argument("--limit", type=int, default=300, help="Number of rows to pull (default: %(default)s)")
+    parser.add_argument(
+        "--ticker",
+        default="NQ_NDX",
+        help="Canonical ticker to query (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=300,
+        help="Number of rows to pull (default: %(default)s)",
+    )
     parser.add_argument(
         "--source",
         choices=("auto", "duckdb", "parquet"),
@@ -294,7 +307,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Write each snapshot to Redis (gex feed cache) as it replays",
     )
     parser.add_argument("--redis-host", default=os.getenv("REDIS_HOST", "localhost"))
-    parser.add_argument("--redis-port", type=int, default=int(os.getenv("REDIS_PORT", "6379")))
+    parser.add_argument(
+        "--redis-port", type=int, default=int(os.getenv("REDIS_PORT", "6379"))
+    )
     parser.add_argument("--redis-db", type=int, default=int(os.getenv("REDIS_DB", "0")))
     parser.add_argument("--redis-password", default=os.getenv("REDIS_PASSWORD"))
     parser.add_argument(

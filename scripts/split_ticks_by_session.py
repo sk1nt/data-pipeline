@@ -14,8 +14,12 @@ import pytz
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Split tick Parquet into session days.")
-    parser.add_argument("--input", required=True, help="Source Parquet file (aggregated).")
+    parser = argparse.ArgumentParser(
+        description="Split tick Parquet into session days."
+    )
+    parser.add_argument(
+        "--input", required=True, help="Source Parquet file (aggregated)."
+    )
     parser.add_argument("--symbol", required=True, help="Symbol label (e.g., MNQ).")
     parser.add_argument(
         "--output-month",
@@ -61,10 +65,7 @@ def split_sessions(df: pl.DataFrame, symbol: str, out_root: Path) -> None:
         out_dir = out_root / symbol
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{day_str}-{symbol}.parquet"
-        (
-            group.drop("session_date")
-            .write_parquet(out_path, compression="zstd")
-        )
+        (group.drop("session_date").write_parquet(out_path, compression="zstd"))
         print(f"Wrote {out_path}")
 
 

@@ -3,6 +3,7 @@ from backend.src.api.main import app
 
 client = TestClient(app)
 
+
 def test_monitoring_ui_integration():
     """Integration test for monitoring UI user journey."""
     # Test API endpoint that UI would use

@@ -102,7 +102,10 @@ class SchwabAuthClient:
                 # cause the schwab lib to raise ValueError. Attempt to rename
                 # the legacy token file and retry creation without token_path
                 # to allow a fresh login flow (this is a best-effort fix).
-                LOG.warning("Schwab easy_client failed to load token file, attempting to rotate legacy token: %s", e)
+                LOG.warning(
+                    "Schwab easy_client failed to load token file, attempting to rotate legacy token: %s",
+                    e,
+                )
                 try:
                     if self._tok_path.exists():
                         legacy = self._tok_path.with_suffix(".old")
@@ -124,7 +127,7 @@ class SchwabAuthClient:
                     token_path=str(self._tok_path),
                     interactive=interactive,
                 )
-        
+
         # If we have a refresh token, set it in the schwab client
         if self.refresh_token:
             # Load or set the token
@@ -142,10 +145,10 @@ class SchwabAuthClient:
                         # Do not persist an empty access token to avoid creating
                         # token files when none were provided.
                         self.schwab.tokens = {
-                            'access_token': os.environ.get('SCHWAB_ACCESS_TOKEN', ''),
-                            'refresh_token': self.refresh_token,
-                            'token_type': 'Bearer',
-                            'expires_in': int(os.environ.get('SCHWAB_EXPIRES_IN', '0')),
+                            "access_token": os.environ.get("SCHWAB_ACCESS_TOKEN", ""),
+                            "refresh_token": self.refresh_token,
+                            "token_type": "Bearer",
+                            "expires_in": int(os.environ.get("SCHWAB_EXPIRES_IN", "0")),
                         }
             except Exception:
                 pass
@@ -158,14 +161,23 @@ class SchwabAuthClient:
         # This avoids tests that pass a dummy client from unexpectedly writing
         # tokens during initialization.
         try:
-            tokens = getattr(self.schwab, 'tokens', None)
-            if getattr(self, '_created_schwab_client', False) and isinstance(tokens, dict) and tokens.get('refresh_token'):
+            tokens = getattr(self.schwab, "tokens", None)
+            if (
+                getattr(self, "_created_schwab_client", False)
+                and isinstance(tokens, dict)
+                and tokens.get("refresh_token")
+            ):
                 self._persist_tokens(tokens)
             # Always append refresh token into .env when requested by environment,
             # even when a dummy (in tests) or externally-provided schwab client was
             # used for initialization.
-            if isinstance(tokens, dict) and tokens.get('refresh_token') and os.environ.get('SCHWAB_PERSIST_REFRESH_TO_ENV') in ("1", "true", "yes"):
-                self._append_refresh_to_env(tokens.get('refresh_token'))
+            if (
+                isinstance(tokens, dict)
+                and tokens.get("refresh_token")
+                and os.environ.get("SCHWAB_PERSIST_REFRESH_TO_ENV")
+                in ("1", "true", "yes")
+            ):
+                self._append_refresh_to_env(tokens.get("refresh_token"))
         except Exception:
             pass
 
@@ -176,14 +188,14 @@ class SchwabAuthClient:
         `SCHWAB_REFRESH_TOKEN` (or `SCHWAB_TOKENS_JSON`) is provided in env.
         """
         # First, allow a JSON-encoded token to be supplied via env
-        json_tok = os.environ.get('SCHWAB_TOKENS_JSON')
+        json_tok = os.environ.get("SCHWAB_TOKENS_JSON")
         if json_tok:
             try:
                 parsed = json.loads(json_tok)
                 # If keys are nested under `tokens` (the exchange script format), unwrap
-                if isinstance(parsed, dict) and 'tokens' in parsed:
-                    parsed = parsed['tokens']
-                if isinstance(parsed, dict) and parsed.get('refresh_token'):
+                if isinstance(parsed, dict) and "tokens" in parsed:
+                    parsed = parsed["tokens"]
+                if isinstance(parsed, dict) and parsed.get("refresh_token"):
                     # persist for future runs
                     try:
                         self._persist_tokens(parsed)
@@ -194,14 +206,22 @@ class SchwabAuthClient:
                 LOG.debug("SCHWAB_TOKENS_JSON present but failed to parse; ignoring")
 
         # Fallback: use access/refresh tokens as separate env variables
-        rt = os.environ.get('SCHWAB_REFRESH_TOKEN') or os.environ.get('SCHWAB_RTOKEN') or None
-        at = os.environ.get('SCHWAB_ACCESS_TOKEN') or os.environ.get('SCHWAB_ATOKEN') or None
+        rt = (
+            os.environ.get("SCHWAB_REFRESH_TOKEN")
+            or os.environ.get("SCHWAB_RTOKEN")
+            or None
+        )
+        at = (
+            os.environ.get("SCHWAB_ACCESS_TOKEN")
+            or os.environ.get("SCHWAB_ATOKEN")
+            or None
+        )
         if rt or at:
             tokens = {
-                'access_token': at or '',
-                'refresh_token': rt or '',
-                'token_type': 'Bearer',
-                'expires_in': int(os.environ.get('SCHWAB_EXPIRES_IN', '0')),
+                "access_token": at or "",
+                "refresh_token": rt or "",
+                "token_type": "Bearer",
+                "expires_in": int(os.environ.get("SCHWAB_EXPIRES_IN", "0")),
             }
             try:
                 self._persist_tokens(tokens)
@@ -222,7 +242,9 @@ class SchwabAuthClient:
             LOG.info("Auto-refresh already running")
             return
         self._stop_refresh.clear()
-        self._refresh_thread = threading.Thread(target=self._auto_refresh_loop, daemon=True)
+        self._refresh_thread = threading.Thread(
+            target=self._auto_refresh_loop, daemon=True
+        )
         self._refresh_thread.start()
         LOG.info("Started Schwab token auto-refresh")
 
@@ -243,11 +265,18 @@ class SchwabAuthClient:
                 try:
                     if isinstance(tokens, dict):
                         self._persist_tokens(tokens)
-                        if os.environ.get('SCHWAB_PERSIST_REFRESH_TO_ENV') in ("1", "true", "yes"):
+                        if os.environ.get("SCHWAB_PERSIST_REFRESH_TO_ENV") in (
+                            "1",
+                            "true",
+                            "yes",
+                        ):
                             try:
-                                self._append_refresh_to_env(tokens.get('refresh_token'))
+                                self._append_refresh_to_env(tokens.get("refresh_token"))
                             except Exception:
-                                LOG.debug('Failed to append refresh token to .env during refresh', exc_info=True)
+                                LOG.debug(
+                                    "Failed to append refresh token to .env during refresh",
+                                    exc_info=True,
+                                )
                 except Exception as e:  # pragma: no cover - defensive
                     LOG.debug("Failed to persist tokens after manual refresh: %s", e)
                 return tokens
@@ -261,13 +290,13 @@ class SchwabAuthClient:
             # schwab-py handles refresh automatically when accessing access_token
             access_token = self.schwab.access_token
             tokens = self.schwab.tokens
-            expires_in = tokens.get('expires_in', 1800)
+            expires_in = tokens.get("expires_in", 1800)
             expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
-            refresh_token = tokens.get('refresh_token', self.refresh_token)
+            refresh_token = tokens.get("refresh_token", self.refresh_token)
             return SchwabToken(
                 access_token=access_token,
                 expires_at=expires_at,
-                refresh_token=refresh_token
+                refresh_token=refresh_token,
             )
 
     def _auto_refresh_loop(self) -> None:
@@ -282,27 +311,43 @@ class SchwabAuthClient:
                         try:
                             self._persist_tokens(tokens)
                         except Exception as e:  # pragma: no cover - defensive
-                            LOG.debug("Failed to persist tokens after auto refresh: %s", e)
-                        if os.environ.get('SCHWAB_PERSIST_REFRESH_TO_ENV') in ("1", "true", "yes"):
+                            LOG.debug(
+                                "Failed to persist tokens after auto refresh: %s", e
+                            )
+                        if os.environ.get("SCHWAB_PERSIST_REFRESH_TO_ENV") in (
+                            "1",
+                            "true",
+                            "yes",
+                        ):
                             try:
-                                self._append_refresh_to_env(tokens.get('refresh_token'))
+                                self._append_refresh_to_env(tokens.get("refresh_token"))
                             except Exception:
-                                LOG.debug('Failed to append refresh token to .env during auto-refresh', exc_info=True)
+                                LOG.debug(
+                                    "Failed to append refresh token to .env during auto-refresh",
+                                    exc_info=True,
+                                )
                     # Rotate refresh token on longer schedule
-                    if (now - self._last_refresh_token_rotate).total_seconds() >= self._refresh_token_rotate_interval:
+                    if (
+                        now - self._last_refresh_token_rotate
+                    ).total_seconds() >= self._refresh_token_rotate_interval:
                         LOG.info("Rotating refresh token (scheduled interval reached)")
                         tokens = self._refresh_tokens_internal()
                         if isinstance(tokens, dict):
                             try:
                                 self._persist_tokens(tokens)
                             except Exception as e:  # pragma: no cover - defensive
-                                LOG.debug("Failed to persist tokens after rotation: %s", e)
+                                LOG.debug(
+                                    "Failed to persist tokens after rotation: %s", e
+                                )
                         self._last_refresh_token_rotate = now
             except Exception as e:
                 LOG.error("Auto-refresh failed: %s", e)
             # Sleep in chunks to be responsive to stop
             slept = 0
-            while slept < self._access_refresh_interval and not self._stop_refresh.is_set():
+            while (
+                slept < self._access_refresh_interval
+                and not self._stop_refresh.is_set()
+            ):
                 chunk = min(10, self._access_refresh_interval - slept)
                 time.sleep(chunk)
                 slept += chunk
@@ -318,11 +363,16 @@ class SchwabAuthClient:
                         self._persist_tokens(tokens)
                     except Exception:  # pragma: no cover - defensive
                         pass
-                if isinstance(tokens, dict) and os.environ.get('SCHWAB_PERSIST_REFRESH_TO_ENV') in ("1", "true", "yes"):
+                if isinstance(tokens, dict) and os.environ.get(
+                    "SCHWAB_PERSIST_REFRESH_TO_ENV"
+                ) in ("1", "true", "yes"):
                     try:
-                        self._append_refresh_to_env(tokens.get('refresh_token'))
+                        self._append_refresh_to_env(tokens.get("refresh_token"))
                     except Exception:
-                        LOG.debug('Failed to append refresh token to .env during forced rotation', exc_info=True)
+                        LOG.debug(
+                            "Failed to append refresh token to .env during forced rotation",
+                            exc_info=True,
+                        )
                 self._last_refresh_token_rotate = datetime.utcnow()
                 return self.schwab.tokens
         except Exception as e:  # pragma: no cover - defensive
@@ -369,30 +419,32 @@ class SchwabAuthClient:
         in environment files for later non-interactive runs.
         """
         try:
-            env_path = Path(__file__).resolve().parents[2] / '.env'
+            env_path = Path(__file__).resolve().parents[2] / ".env"
             # Never write to `.env` to avoid overwriting developer configurations.
             # Always write to `.env.back` (or create it) so appended refresh tokens
             # do not risk leaking or overwriting .env values.
-            target_path = env_path.with_suffix('.back')
+            target_path = env_path.with_suffix(".back")
 
             # Read current raw lines so we can preserve formatting and comments
             original_lines = []
             if target_path.exists():
-                with open(target_path, 'r') as fh:
+                with open(target_path, "r") as fh:
                     original_lines = fh.readlines()
 
             # Find if the variable exists; maintain original line if present
-            key = 'SCHWAB_REFRESH_TOKEN'
+            key = "SCHWAB_REFRESH_TOKEN"
             found = False
             new_lines = []
             for ln in original_lines:
-                if ln.strip().startswith(f'{key}=') or ln.strip().startswith(f'{key} ='):
+                if ln.strip().startswith(f"{key}=") or ln.strip().startswith(
+                    f"{key} ="
+                ):
                     # preserve any comment after the value
-                    comment = ''
-                    if '#' in ln:
+                    comment = ""
+                    if "#" in ln:
                         # Keep inline comments if present
-                        parts = ln.split('#', 1)
-                        comment = '#' + parts[1].rstrip('\n')
+                        parts = ln.split("#", 1)
+                        comment = "#" + parts[1].rstrip("\n")
                     new_lines.append(f'{key}="{refresh_token}" {comment}\n')
                     found = True
                 else:
@@ -400,29 +452,36 @@ class SchwabAuthClient:
 
             if not found:
                 # If the file had a trailing newline and not empty, preserve format
-                if new_lines and not new_lines[-1].endswith('\n'):
-                    new_lines[-1] = new_lines[-1] + '\n'
+                if new_lines and not new_lines[-1].endswith("\n"):
+                    new_lines[-1] = new_lines[-1] + "\n"
                 new_lines.append(f'{key}="{refresh_token}"\n')
 
             # Make a timestamped backup of target path before replacing
             try:
                 if target_path.exists():
-                    bak = target_path.with_suffix('.bak')
-                    tmp_bak = target_path.with_suffix('.bak.tmp')
-                    with open(tmp_bak, 'w') as fh:
+                    bak = target_path.with_suffix(".bak")
+                    tmp_bak = target_path.with_suffix(".bak.tmp")
+                    with open(tmp_bak, "w") as fh:
                         fh.writelines(original_lines)
                     os.replace(tmp_bak, bak)
             except Exception:
-                LOG.debug('Failed to create .env backup; proceeding with caution', exc_info=True)
+                LOG.debug(
+                    "Failed to create .env backup; proceeding with caution",
+                    exc_info=True,
+                )
 
             # Write new content atomically
-            tmp = target_path.with_suffix('.tmp')
-            with open(tmp, 'w') as fh:
+            tmp = target_path.with_suffix(".tmp")
+            with open(tmp, "w") as fh:
                 fh.writelines(new_lines)
             os.replace(tmp, target_path)
-            LOG.info('Updated %s with SCHWAB_REFRESH_TOKEN (preserving existing content) at %s', target_path.name, target_path)
+            LOG.info(
+                "Updated %s with SCHWAB_REFRESH_TOKEN (preserving existing content) at %s",
+                target_path.name,
+                target_path,
+            )
         except Exception as e:  # pragma: no cover - defensive
-            LOG.debug('Failed to append refresh token to .env: %s', e, exc_info=True)
+            LOG.debug("Failed to append refresh token to .env: %s", e, exc_info=True)
 
     def stream(self):
         """Return a synchronous stream adapter that wraps schwab-py's StreamClient.
@@ -441,7 +500,12 @@ class _SchwabStreamAdapter:
     """Synchronous adapter over `schwab.streaming.StreamClient`.
     Implements `start(symbols, on_tick, on_level2)` and `stop()`.
     """
-    def __init__(self, stream_client: schwab_streaming.StreamClient, auth_client: Optional[SchwabAuthClient] = None):
+
+    def __init__(
+        self,
+        stream_client: schwab_streaming.StreamClient,
+        auth_client: Optional[SchwabAuthClient] = None,
+    ):
         self._sc = stream_client
         self._running = False
         self._symbols = []
@@ -472,12 +536,18 @@ class _SchwabStreamAdapter:
         # After a successful login (which may have rotated tokens), persist
         # the current tokens from the parent auth client if available
         try:
-            if self._auth_client and getattr(self._auth_client, 'schwab', None):
-                tokens = getattr(self._auth_client.schwab, 'tokens', None)
+            if self._auth_client and getattr(self._auth_client, "schwab", None):
+                tokens = getattr(self._auth_client.schwab, "tokens", None)
                 if isinstance(tokens, dict):
                     self._auth_client._persist_tokens(tokens)
-                    if os.environ.get('SCHWAB_PERSIST_REFRESH_TO_ENV') in ("1", "true", "yes"):
-                        self._auth_client._append_refresh_to_env(tokens.get('refresh_token'))
+                    if os.environ.get("SCHWAB_PERSIST_REFRESH_TO_ENV") in (
+                        "1",
+                        "true",
+                        "yes",
+                    ):
+                        self._auth_client._append_refresh_to_env(
+                            tokens.get("refresh_token")
+                        )
         except Exception:
             pass
         # Subscribe to symbol types
@@ -494,7 +564,9 @@ class _SchwabStreamAdapter:
             self._run_coro(self._sc.level_one_equity_add(equity_symbols))
         self._running = True
         LOG.debug("Starting Schwab message pump")
-        self._message_future = asyncio.run_coroutine_threadsafe(self._consume_messages(), self._loop)
+        self._message_future = asyncio.run_coroutine_threadsafe(
+            self._consume_messages(), self._loop
+        )
 
     def stop(self):
         if self._running:
@@ -528,7 +600,9 @@ class _SchwabStreamAdapter:
             LOG.debug("Subscribing futures symbols to level2 feed: %s", futures_symbols)
             self._run_coro(self._sc.nasdaq_book_add(futures_symbols))
         except AttributeError:
-            LOG.warning("Schwab client does not expose NASDAQ level2 subscription; skipping")
+            LOG.warning(
+                "Schwab client does not expose NASDAQ level2 subscription; skipping"
+            )
         except Exception as exc:
             LOG.warning("Failed to subscribe futures level2 feed: %s", exc)
 
@@ -547,7 +621,9 @@ class _SchwabStreamAdapter:
             ready.set()
             loop.run_forever()
 
-        thread = threading.Thread(target=_run_loop, name="schwab-stream-loop", daemon=True)
+        thread = threading.Thread(
+            target=_run_loop, name="schwab-stream-loop", daemon=True
+        )
         thread.start()
         ready.wait(timeout=2)
         self._loop = loop
@@ -559,11 +635,15 @@ class _SchwabStreamAdapter:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
             result = future.result(timeout=timeout)
-            LOG.debug("Coroutine %s completed", getattr(coro, '__name__', repr(coro)))
+            LOG.debug("Coroutine %s completed", getattr(coro, "__name__", repr(coro)))
             return result
         except TimeoutError:
             future.cancel()
-            LOG.error("Coroutine %s timed out after %ss", getattr(coro, '__name__', repr(coro)), timeout)
+            LOG.error(
+                "Coroutine %s timed out after %ss",
+                getattr(coro, "__name__", repr(coro)),
+                timeout,
+            )
             raise
 
     async def _consume_messages(self) -> None:
@@ -621,11 +701,17 @@ class SchwabMessageParser:
 
     def _parse_legacy_book(self, payload: dict) -> list[tuple[str, object]]:
         bids = [
-            Level2Quote(price=self._safe_float(level.get("price", 0.0)), size=self._safe_float(level.get("size", 0.0)) or 0.0)
+            Level2Quote(
+                price=self._safe_float(level.get("price", 0.0)),
+                size=self._safe_float(level.get("size", 0.0)) or 0.0,
+            )
             for level in payload.get("bids", [])
         ]
         asks = [
-            Level2Quote(price=self._safe_float(level.get("price", 0.0)), size=self._safe_float(level.get("size", 0.0)) or 0.0)
+            Level2Quote(
+                price=self._safe_float(level.get("price", 0.0)),
+                size=self._safe_float(level.get("size", 0.0)) or 0.0,
+            )
             for level in payload.get("asks", [])
         ]
         event = Level2Event(
@@ -650,13 +736,27 @@ class SchwabMessageParser:
             symbol = symbol.strip().upper()
             if not symbol:
                 continue
-            quote_ts = self._lookup_field(row, "QUOTE_TIME_MILLIS", "TRADE_TIME_MILLIS", "10", "11", timestamp)
-            bid_price = self._safe_float(self._lookup_field(row, "BID_PRICE", "BID", "1"))
-            ask_price = self._safe_float(self._lookup_field(row, "ASK_PRICE", "ASK", "2"))
-            bid_size = self._safe_float(self._lookup_field(row, "BID_SIZE", "BIDSIZE", "BID_VOLUME", "4"))
-            ask_size = self._safe_float(self._lookup_field(row, "ASK_SIZE", "ASKSIZE", "ASK_VOLUME", "5"))
-            last_price = self._safe_float(self._lookup_field(row, "LAST_PRICE", "LAST", "3"))
-            volume = self._safe_float(self._lookup_field(row, "TOTAL_VOLUME", "VOLUME", "LAST_SIZE", "8", "9"))
+            quote_ts = self._lookup_field(
+                row, "QUOTE_TIME_MILLIS", "TRADE_TIME_MILLIS", "10", "11", timestamp
+            )
+            bid_price = self._safe_float(
+                self._lookup_field(row, "BID_PRICE", "BID", "1")
+            )
+            ask_price = self._safe_float(
+                self._lookup_field(row, "ASK_PRICE", "ASK", "2")
+            )
+            bid_size = self._safe_float(
+                self._lookup_field(row, "BID_SIZE", "BIDSIZE", "BID_VOLUME", "4")
+            )
+            ask_size = self._safe_float(
+                self._lookup_field(row, "ASK_SIZE", "ASKSIZE", "ASK_VOLUME", "5")
+            )
+            last_price = self._safe_float(
+                self._lookup_field(row, "LAST_PRICE", "LAST", "3")
+            )
+            volume = self._safe_float(
+                self._lookup_field(row, "TOTAL_VOLUME", "VOLUME", "LAST_SIZE", "8", "9")
+            )
             tick = TickEvent(
                 symbol=symbol,
                 timestamp=self._coerce_ts(quote_ts),
@@ -769,7 +869,9 @@ class SchwabMessageParser:
     @staticmethod
     def _coerce_ts(value) -> datetime:
         if isinstance(value, (int, float)):
-            return datetime.utcfromtimestamp(float(value) / (1000 if value > 1e12 else 1))
+            return datetime.utcfromtimestamp(
+                float(value) / (1000 if value > 1e12 else 1)
+            )
         if isinstance(value, str):
             try:
                 return datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -816,13 +918,17 @@ class SchwabStreamClient:
     def start(self) -> None:
         """Start streaming loop (blocking)."""
         LOG.info("Starting Schwab streamer for symbols: %s", ",".join(self.symbols))
-        tick_channel = getattr(self.publisher, "tick_channel", settings.schwab_tick_channel)
-        LOG.debug("Heartbeat every %ss; Redis tick channel %s", self.heartbeat_seconds, tick_channel)
+        tick_channel = getattr(
+            self.publisher, "tick_channel", settings.schwab_tick_channel
+        )
+        LOG.debug(
+            "Heartbeat every %ss; Redis tick channel %s",
+            self.heartbeat_seconds,
+            tick_channel,
+        )
         self.auth_client.start_auto_refresh()  # Start background token refresh
         self.stream.start(
-            symbols=self.symbols,
-            on_tick=self._on_tick,
-            on_level2=self._on_level2
+            symbols=self.symbols, on_tick=self._on_tick, on_level2=self._on_level2
         )
         LOG.debug("Stream start returned control to client")
 
@@ -877,17 +983,19 @@ def build_streamer(
     level2_handler: Optional[Callable[[Level2Event], None]] = None,
     use_tastytrade_symbols: bool = False,
     interactive: bool = True,
-    ) -> SchwabStreamClient:
+) -> SchwabStreamClient:
     """Factory to wire dependencies from settings."""
     # Caller (scripts/start_schwab_streamer.py or calling code) should ensure
     # the required SCHWAB_* settings are present. We avoid enforcing them
     # here so tests can monkeypatch SchwabAuthClient.
     redis_client = redis_client or RedisClient()
-    publisher_factory = publisher_factory or (lambda rc: TradingEventPublisher(
-        redis_client=rc,
-        tick_channel=settings.schwab_tick_channel,
-        level2_channel=settings.schwab_level2_channel,
-    ))
+    publisher_factory = publisher_factory or (
+        lambda rc: TradingEventPublisher(
+            redis_client=rc,
+            tick_channel=settings.schwab_tick_channel,
+            level2_channel=settings.schwab_level2_channel,
+        )
+    )
     publisher = publisher_factory(redis_client)
     auth_client = SchwabAuthClient(
         client_id=settings.schwab_client_id,
@@ -896,7 +1004,11 @@ def build_streamer(
         rest_url=settings.schwab_rest_url,
         interactive=interactive,
     )
-    base_symbols = settings.tastytrade_symbol_list if use_tastytrade_symbols else settings.schwab_symbol_list
+    base_symbols = (
+        settings.tastytrade_symbol_list
+        if use_tastytrade_symbols
+        else settings.schwab_symbol_list
+    )
     symbols = normalize_stream_symbols(base_symbols)
     return SchwabStreamClient(
         auth_client=auth_client,

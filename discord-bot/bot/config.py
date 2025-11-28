@@ -2,10 +2,12 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import os
 
+
 @dataclass
 class BrokerAllocation:
     percentage: float
     enabled: bool
+
 
 @dataclass
 class TastyTradeCredentials:
@@ -27,6 +29,7 @@ class TastyTradeCredentials:
     sandbox_refresh_token: Optional[str] = None
     dry_run: bool = False
 
+
 @dataclass
 class BotConfig:
     discord_token: str
@@ -40,59 +43,70 @@ class BotConfig:
     uw_channel_ids: Optional[Tuple[int, ...]]
     gex_feed_enabled: bool = False
     gex_feed_channel_ids: Optional[Tuple[int, ...]] = None
-    gex_feed_symbol: str = 'NQ_NDX'
+    gex_feed_symbol: str = "NQ_NDX"
     # Faster default cadence; can be overridden via env
     gex_feed_update_seconds: float = 0.5
     gex_feed_refresh_minutes: int = 5
     gex_feed_window_seconds: int = 60
     gex_feed_aggregation_seconds: float = 0.25
     gex_feed_metrics_enabled: bool = False
-    gex_feed_metrics_key: str = 'metrics:gex_feed'
+    gex_feed_metrics_key: str = "metrics:gex_feed"
     gex_feed_force_window: bool = False
     # Keep Discord rate-limit backoff small to avoid stretching cadence
     gex_feed_backoff_base_seconds: float = 0.25
     gex_feed_backoff_max_seconds: float = 1.0
 
+
 def _parse_channel_ids(value: Optional[str]) -> Optional[List[int]]:
     if not value:
         return None
-    return [int(cid.strip()) for cid in value.split(',') if cid.strip()]
+    return [int(cid.strip()) for cid in value.split(",") if cid.strip()]
+
 
 def _parse_account_list(value: Optional[str]) -> Tuple[str, ...]:
     if not value:
         return ()
-    return tuple(acc.strip() for acc in value.split(',') if acc.strip())
+    return tuple(acc.strip() for acc in value.split(",") if acc.strip())
+
 
 def create_config_from_env() -> BotConfig:
-    discord_token = os.getenv('DISCORD_BOT_TOKEN', '')
+    discord_token = os.getenv("DISCORD_BOT_TOKEN", "")
 
-    tos_percentage = float(os.getenv('TOS_ALLOCATION_PERCENTAGE', '50.0'))
-    tos_enabled = os.getenv('TOS_ENABLED', 'false').lower() == 'true'
+    tos_percentage = float(os.getenv("TOS_ALLOCATION_PERCENTAGE", "50.0"))
+    tos_enabled = os.getenv("TOS_ENABLED", "false").lower() == "true"
 
-    tt_percentage = float(os.getenv('TASTYTRADE_ALLOCATION_PERCENTAGE', '10.0'))
-    tt_enabled = os.getenv('TASTYTRADE_ENABLED', 'true').lower() == 'true'
+    tt_percentage = float(os.getenv("TASTYTRADE_ALLOCATION_PERCENTAGE", "10.0"))
+    tt_enabled = os.getenv("TASTYTRADE_ENABLED", "true").lower() == "true"
 
     # TastyTrade credentials
-    tt_client_id = os.getenv('TASTYTRADE_CLIENT_ID', '')
-    tt_client_secret = os.getenv('TASTYTRADE_CLIENT_SECRET', '')
-    tt_scope = os.getenv('TASTYTRADE_OAUTH_SCOPE')
-    tt_api_base_url = os.getenv('TASTYTRADE_API_URL') or os.getenv('TASTYTRADE_URI')
-    tt_account_whitelist = _parse_account_list(os.getenv('TASTYTRADE_ACCOUNT_WHITELIST'))
-    tt_default_account = os.getenv('TASTYTRADE_DEFAULT_ACCOUNT') or os.getenv('TASTYTRADE_ACCOUNT')
-    tt_use_cert = os.getenv('TASTYTRADE_USE_CERT', 'false').lower() == 'true'
-    tt_use_sandbox = os.getenv('TASTYTRADE_USE_SANDBOX', 'false').lower() == 'true'
-    tt_sandbox_url = os.getenv('TASTYTRADE_SANDBOX_API_URL') or 'https://api.sandbox.tastytrade.com'
-    tt_sandbox_uri = os.getenv('TASTYTRADE_SANDBOX_URI')
-    tt_sandbox_client_id = os.getenv('TASTYTRADE_SANDBOX_CLIENT_ID')
-    tt_sandbox_client_secret = os.getenv('TASTYTRADE_SANDBOX_CLIENT_SECRET')
-    tt_sandbox_username = os.getenv('TASTYTRADE_SANDBOX_USERNAME')
-    tt_sandbox_password = os.getenv('TASTYTRADE_SANDBOX_PASSWORD')
-    tt_refresh_token = os.getenv('TASTYTRADE_REFRESH_TOKEN', '')
-    tt_sandbox_refresh_token = os.getenv('TASTYTRADE_SANDBOX_REFRESH_TOKEN')
-    tt_dry_run = os.getenv('TASTYTRADE_DRY_RUN', 'true').lower() == 'true'
+    tt_client_id = os.getenv("TASTYTRADE_CLIENT_ID", "")
+    tt_client_secret = os.getenv("TASTYTRADE_CLIENT_SECRET", "")
+    tt_scope = os.getenv("TASTYTRADE_OAUTH_SCOPE")
+    tt_api_base_url = os.getenv("TASTYTRADE_API_URL") or os.getenv("TASTYTRADE_URI")
+    tt_account_whitelist = _parse_account_list(
+        os.getenv("TASTYTRADE_ACCOUNT_WHITELIST")
+    )
+    tt_default_account = os.getenv("TASTYTRADE_DEFAULT_ACCOUNT") or os.getenv(
+        "TASTYTRADE_ACCOUNT"
+    )
+    tt_use_cert = os.getenv("TASTYTRADE_USE_CERT", "false").lower() == "true"
+    tt_use_sandbox = os.getenv("TASTYTRADE_USE_SANDBOX", "false").lower() == "true"
+    tt_sandbox_url = (
+        os.getenv("TASTYTRADE_SANDBOX_API_URL") or "https://api.sandbox.tastytrade.com"
+    )
+    tt_sandbox_uri = os.getenv("TASTYTRADE_SANDBOX_URI")
+    tt_sandbox_client_id = os.getenv("TASTYTRADE_SANDBOX_CLIENT_ID")
+    tt_sandbox_client_secret = os.getenv("TASTYTRADE_SANDBOX_CLIENT_SECRET")
+    tt_sandbox_username = os.getenv("TASTYTRADE_SANDBOX_USERNAME")
+    tt_sandbox_password = os.getenv("TASTYTRADE_SANDBOX_PASSWORD")
+    tt_refresh_token = os.getenv("TASTYTRADE_REFRESH_TOKEN", "")
+    tt_sandbox_refresh_token = os.getenv("TASTYTRADE_SANDBOX_REFRESH_TOKEN")
+    tt_dry_run = os.getenv("TASTYTRADE_DRY_RUN", "true").lower() == "true"
 
     if tt_use_cert and tt_use_sandbox:
-        raise ValueError("Cannot enable both TastyTrade certification and sandbox environments")
+        raise ValueError(
+            "Cannot enable both TastyTrade certification and sandbox environments"
+        )
 
     tt_credentials = None
     if tt_client_id and tt_client_secret and tt_refresh_token:
@@ -113,41 +127,55 @@ def create_config_from_env() -> BotConfig:
             sandbox_password=tt_sandbox_password,
             refresh_token=tt_refresh_token,
             sandbox_refresh_token=tt_sandbox_refresh_token,
-            dry_run=tt_dry_run
+            dry_run=tt_dry_run,
         )
 
     if tt_enabled and not tt_credentials:
-        raise ValueError('TastyTrade is enabled but credentials are missing')
+        raise ValueError("TastyTrade is enabled but credentials are missing")
 
-    allowed_channels = _parse_channel_ids(os.getenv('DISCORD_ALLOWED_CHANNEL_IDS'))
-    uw_channel_ids = _parse_channel_ids(os.getenv('DISCORD_UW_CHANNEL_IDS'))
-    status_channel_id = int(os.getenv('DISCORD_STATUS_CHANNEL_ID', '0')) or None
-    gex_feed_channel_ids = _parse_channel_ids(os.getenv('DISCORD_GEX_FEED_CHANNEL_IDS'))
+    allowed_channels = _parse_channel_ids(os.getenv("DISCORD_ALLOWED_CHANNEL_IDS"))
+    uw_channel_ids = _parse_channel_ids(os.getenv("DISCORD_UW_CHANNEL_IDS"))
+    status_channel_id = int(os.getenv("DISCORD_STATUS_CHANNEL_ID", "0")) or None
+    gex_feed_channel_ids = _parse_channel_ids(os.getenv("DISCORD_GEX_FEED_CHANNEL_IDS"))
 
-    gex_feed_enabled = os.getenv('GEX_FEED_ENABLED', 'false').lower() == 'true'
-    gex_feed_symbol = os.getenv('GEX_FEED_SYMBOL', 'NQ_NDX')
-    gex_feed_update_seconds = float(os.getenv('GEX_FEED_UPDATE_SECONDS', '0.8'))
-    gex_feed_refresh_minutes = int(os.getenv('GEX_FEED_REFRESH_MINUTES', '5'))
-    gex_feed_window_seconds = int(os.getenv('GEX_FEED_WINDOW_SECONDS', '60'))
-    gex_feed_aggregation_seconds = float(os.getenv('GEX_FEED_AGGREGATION_SECONDS', '0.2'))
-    gex_feed_metrics_enabled = os.getenv('GEX_FEED_METRICS_ENABLED', 'false').lower() == 'true'
-    gex_feed_metrics_key = os.getenv('GEX_FEED_METRICS_KEY', 'metrics:gex_feed')
-    gex_feed_force_window = os.getenv('GEX_FEED_FORCE_WINDOW', 'false').lower() == 'true'
-    gex_feed_backoff_base_seconds = float(os.getenv('GEX_FEED_BACKOFF_BASE_SECONDS', str(gex_feed_update_seconds)))
-    gex_feed_backoff_max_seconds = float(os.getenv('GEX_FEED_BACKOFF_MAX_SECONDS', '5'))
+    gex_feed_enabled = os.getenv("GEX_FEED_ENABLED", "false").lower() == "true"
+    gex_feed_symbol = os.getenv("GEX_FEED_SYMBOL", "NQ_NDX")
+    gex_feed_update_seconds = float(os.getenv("GEX_FEED_UPDATE_SECONDS", "0.8"))
+    gex_feed_refresh_minutes = int(os.getenv("GEX_FEED_REFRESH_MINUTES", "5"))
+    gex_feed_window_seconds = int(os.getenv("GEX_FEED_WINDOW_SECONDS", "60"))
+    gex_feed_aggregation_seconds = float(
+        os.getenv("GEX_FEED_AGGREGATION_SECONDS", "0.2")
+    )
+    gex_feed_metrics_enabled = (
+        os.getenv("GEX_FEED_METRICS_ENABLED", "false").lower() == "true"
+    )
+    gex_feed_metrics_key = os.getenv("GEX_FEED_METRICS_KEY", "metrics:gex_feed")
+    gex_feed_force_window = (
+        os.getenv("GEX_FEED_FORCE_WINDOW", "false").lower() == "true"
+    )
+    gex_feed_backoff_base_seconds = float(
+        os.getenv("GEX_FEED_BACKOFF_BASE_SECONDS", str(gex_feed_update_seconds))
+    )
+    gex_feed_backoff_max_seconds = float(os.getenv("GEX_FEED_BACKOFF_MAX_SECONDS", "5"))
 
     return BotConfig(
         discord_token=discord_token,
-        thinkorswim_allocation=BrokerAllocation(percentage=tos_percentage, enabled=tos_enabled),
-        tastytrade_allocation=BrokerAllocation(percentage=tt_percentage, enabled=tt_enabled),
+        thinkorswim_allocation=BrokerAllocation(
+            percentage=tos_percentage, enabled=tos_enabled
+        ),
+        tastytrade_allocation=BrokerAllocation(
+            percentage=tt_percentage, enabled=tt_enabled
+        ),
         tastytrade_credentials=tt_credentials,
-        status_api_secret=os.getenv('STATUS_API_SECRET'),
-        scid_data_directory=os.getenv('SCID_DATA_DIRECTORY'),
+        status_api_secret=os.getenv("STATUS_API_SECRET"),
+        scid_data_directory=os.getenv("SCID_DATA_DIRECTORY"),
         allowed_channel_ids=tuple(allowed_channels) if allowed_channels else None,
         uw_channel_ids=tuple(uw_channel_ids) if uw_channel_ids else None,
         status_channel_id=status_channel_id,
         gex_feed_enabled=gex_feed_enabled,
-        gex_feed_channel_ids=tuple(gex_feed_channel_ids) if gex_feed_channel_ids else None,
+        gex_feed_channel_ids=tuple(gex_feed_channel_ids)
+        if gex_feed_channel_ids
+        else None,
         gex_feed_symbol=gex_feed_symbol,
         gex_feed_update_seconds=gex_feed_update_seconds,
         gex_feed_refresh_minutes=gex_feed_refresh_minutes,

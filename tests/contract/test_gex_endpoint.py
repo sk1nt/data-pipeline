@@ -38,16 +38,12 @@ class TestGEXEndpointContract:
                     "strike": 15000.0,
                     "gamma_now": 1234.56,
                     "vanna": 789.12,
-                    "history": [1200.0, 1150.0, 1100.0, 1050.0, 1000.0]
+                    "history": [1200.0, 1150.0, 1100.0, 1050.0, 1000.0],
                 },
-                {
-                    "strike": 15100.0,
-                    "gamma_now": 987.65,
-                    "vanna": 654.32
-                }
+                {"strike": 15100.0, "gamma_now": 987.65, "vanna": 654.32},
             ],
             "max_change": {"1h": 0.05, "24h": 0.12},
-            "max_priors": [14800.0, 14900.0, 15000.0]
+            "max_priors": [14800.0, 14900.0, 15000.0],
         }
 
     def test_gex_endpoint_accepts_valid_payload(self, client, valid_gex_payload):
@@ -63,9 +59,7 @@ class TestGEXEndpointContract:
     def test_gex_endpoint_rejects_invalid_json(self, client):
         """Test that /gex endpoint rejects malformed JSON."""
         response = client.post(
-            "/gex",
-            data="invalid json",
-            headers={"Content-Type": "application/json"}
+            "/gex", data="invalid json", headers={"Content-Type": "application/json"}
         )
 
         # Should return 422 validation error

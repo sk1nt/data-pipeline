@@ -24,7 +24,9 @@ def _load_queue_helper():
 gex_history_queue = _load_queue_helper()
 
 
-def process_job(job_id: int, url: str, ticker: str, endpoint: str, log: logging.Logger) -> None:
+def process_job(
+    job_id: int, url: str, ticker: str, endpoint: str, log: logging.Logger
+) -> None:
     """Worker routine that runs a single job via import_gex_history.py."""
     try:
         gex_history_queue.mark_job_started(job_id)
@@ -92,9 +94,16 @@ def run_parallel_once(limit: int, workers: int, log: logging.Logger) -> None:
 
 
 def process_queue_worker(limit: int, sleep_seconds: int, workers: int):
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     log = logging.getLogger("gex_queue_worker")
-    log.info("Starting queue worker (limit=%s, sleep=%ss, workers=%s)", limit, sleep_seconds, workers)
+    log.info(
+        "Starting queue worker (limit=%s, sleep=%ss, workers=%s)",
+        limit,
+        sleep_seconds,
+        workers,
+    )
     while True:
         try:
             pending_jobs = gex_history_queue.get_pending_jobs(limit=limit)
@@ -114,20 +123,30 @@ def process_queue_worker(limit: int, sleep_seconds: int, workers: int):
 
 def main():
     parser = argparse.ArgumentParser(description="Process GEX history import queue")
-    parser.add_argument("--limit", type=int, default=10, help="Max jobs to process per cycle")
-    parser.add_argument("--sleep", type=int, default=5, help="Seconds to sleep between checks")
+    parser.add_argument(
+        "--limit", type=int, default=10, help="Max jobs to process per cycle"
+    )
+    parser.add_argument(
+        "--sleep", type=int, default=5, help="Seconds to sleep between checks"
+    )
     parser.add_argument("--once", action="store_true", help="Process once and exit")
-    parser.add_argument("--workers", type=int, default=2, help="Number of parallel workers to run")
+    parser.add_argument(
+        "--workers", type=int, default=2, help="Number of parallel workers to run"
+    )
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     log = logging.getLogger("gex_queue_worker")
     workers = max(1, args.workers)
 
     if args.once:
         run_parallel_once(limit=args.limit, workers=workers, log=log)
     else:
-        process_queue_worker(limit=args.limit, sleep_seconds=args.sleep, workers=workers)
+        process_queue_worker(
+            limit=args.limit, sleep_seconds=args.sleep, workers=workers
+        )
 
 
 if __name__ == "__main__":

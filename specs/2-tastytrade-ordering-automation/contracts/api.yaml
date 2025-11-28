@@ -1,0 +1,125 @@
+openapi: 3.0.3
+info:
+  title: Tastytrade Ordering API
+  version: 1.0.0
+  description: API for automated order placement and management
+
+paths:
+  /orders:
+    post:
+      summary: Place a new order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                symbol:
+                  type: string
+                quantity:
+                  type: number
+                order_type:
+                  type: string
+                  enum: [MARKET, LIMIT]
+                price:
+                  type: number
+                channel_id:
+                  type: string
+                user_id:
+                  type: string
+              required:
+                - symbol
+                - quantity
+                - order_type
+                - channel_id
+                - user_id
+      responses:
+        '201':
+          description: Order placed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  order_id:
+                    type: string
+                  status:
+                    type: string
+
+  /orders/{order_id}:
+    get:
+      summary: Get order status
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Order details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  status:
+                    type: string
+                  symbol:
+                    type: string
+                  quantity:
+                    type: number
+
+    put:
+      summary: Cancel order
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Order cancelled
+
+  /auth/verify:
+    post:
+      summary: Verify Discord user permissions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                discord_id:
+                  type: string
+                channel_id:
+                  type: string
+              required:
+                - discord_id
+                - channel_id
+      responses:
+        '200':
+          description: User verified
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  permissions:
+                    type: array
+                    items:
+                      type: string

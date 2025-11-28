@@ -20,7 +20,9 @@ from src.token_store import (  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Headlessly refresh Schwab tokens once.")
+    parser = argparse.ArgumentParser(
+        description="Headlessly refresh Schwab tokens once."
+    )
     parser.add_argument(
         "--tokens-dir",
         default=PROJECT_ROOT / ".tokens",
@@ -60,7 +62,9 @@ def main() -> int:
         )
     except MissingBootstrapTokenError as exc:
         print(f"[ERROR] {exc}")
-        print("Run the one-time interactive login (e.g. scripts/schwab_token_manager.py exchange-url) first.")
+        print(
+            "Run the one-time interactive login (e.g. scripts/schwab_token_manager.py exchange-url) first."
+        )
         return 3
     except TokenRefreshError as exc:
         print(f"[ERROR] Token refresh failed: {exc}")

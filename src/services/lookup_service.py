@@ -1,4 +1,5 @@
 """Lookup helpers for historical trades and depth comparison metadata."""
+
 from __future__ import annotations
 
 import json
@@ -24,7 +25,9 @@ class LookupService:
         self.redis_client = redis_client
         self.ts_client = ts_client
 
-    def trade_history(self, symbol: str, source: str, limit: int = 100) -> List[Dict[str, Any]]:
+    def trade_history(
+        self, symbol: str, source: str, limit: int = 100
+    ) -> List[Dict[str, Any]]:
         """Return the most-recent trade prices for a symbol/source."""
         key = self._trade_price_key(symbol, source)
         try:
@@ -63,7 +66,10 @@ class LookupService:
         if end_time:
             filters.append("timestamp <= ?")
             params.append(self._normalize_iso(end_time))
-        query = "SELECT symbol, timestamp, price, volume, source FROM tick_data WHERE " + " AND ".join(filters)
+        query = (
+            "SELECT symbol, timestamp, price, volume, source FROM tick_data WHERE "
+            + " AND ".join(filters)
+        )
         query += " ORDER BY timestamp DESC LIMIT ?"
         params.append(limit)
 

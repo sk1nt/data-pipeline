@@ -1,4 +1,5 @@
 """Async TastyTrade DXLink streamer service used by data-pipeline."""
+
 from __future__ import annotations
 
 import asyncio
@@ -80,26 +81,37 @@ class TastyTradeStreamer:
         )
         try:
             async with DXLinkStreamer(session) as streamer:
-                formatted_symbols = [self._format_symbol(sym) for sym in self.settings.symbols]
+                formatted_symbols = [
+                    self._format_symbol(sym) for sym in self.settings.symbols
+                ]
                 await streamer.subscribe(Trade, formatted_symbols)
-                if getattr(self.settings, 'enable_depth', False):
+                if getattr(self.settings, "enable_depth", False):
                     await streamer.subscribe(Quote, formatted_symbols)
-                    LOGGER.info("Subscribed to DXLink trades + quotes for %s", formatted_symbols)
+                    LOGGER.info(
+                        "Subscribed to DXLink trades + quotes for %s", formatted_symbols
+                    )
                 else:
-                    LOGGER.info("Subscribed to DXLink trades for %s (quotes disabled)", formatted_symbols)
+                    LOGGER.info(
+                        "Subscribed to DXLink trades for %s (quotes disabled)",
+                        formatted_symbols,
+                    )
 
                 while not self._stop_event.is_set():
                     try:
-                        trade = await asyncio.wait_for(streamer.get_event(Trade), timeout=1.0)
+                        trade = await asyncio.wait_for(
+                            streamer.get_event(Trade), timeout=1.0
+                        )
                         await self._handle_trade(trade)
                     except asyncio.TimeoutError:
                         pass
                     except Exception:  # pragma: no cover - defensive logging
                         LOGGER.exception("Error processing trade event")
 
-                    if getattr(self.settings, 'enable_depth', False):
+                    if getattr(self.settings, "enable_depth", False):
                         try:
-                            quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=0.1)
+                            quote = await asyncio.wait_for(
+                                streamer.get_event(Quote), timeout=0.1
+                            )
                             await self._handle_quote(quote)
                         except asyncio.TimeoutError:
                             continue
@@ -128,8 +140,14 @@ class TastyTradeStreamer:
     async def _handle_quote(self, quote) -> None:
         if not quote:
             return
-        bids = self._extract_levels(getattr(quote, "bid_prices", []) or [], getattr(quote, "bid_sizes", []) or [])
-        asks = self._extract_levels(getattr(quote, "ask_prices", []) or [], getattr(quote, "ask_sizes", []) or [])
+        bids = self._extract_levels(
+            getattr(quote, "bid_prices", []) or [],
+            getattr(quote, "bid_sizes", []) or [],
+        )
+        asks = self._extract_levels(
+            getattr(quote, "ask_prices", []) or [],
+            getattr(quote, "ask_sizes", []) or [],
+        )
         depth_payload = {
             "symbol": self._normalize_symbol(getattr(quote, "event_symbol", "")),
             "timestamp": self._ts_from_ms(getattr(quote, "time", 0)),

@@ -4,9 +4,11 @@ from backend.src.api.main import app
 
 client = TestClient(app)
 
+
 @pytest.fixture
 def api_key():
     return "test-api-key"
+
 
 def test_backtesting_query_integration(api_key):
     """Integration test for backtesting query user journey."""
@@ -15,7 +17,7 @@ def test_backtesting_query_integration(api_key):
     # Query historical data
     response = client.get(
         "/api/v1/ticks/historical?symbols=AAPL&start_time=2025-11-06T00:00:00Z&end_time=2025-11-07T00:00:00Z&interval=1h",
-        headers=headers
+        headers=headers,
     )
 
     if response.status_code == 200:

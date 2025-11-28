@@ -27,7 +27,7 @@ class RuleEngine:
         self,
         request: PriorityRequest,
         data_source: DataSource,
-        active_rules: List[PriorityRule]
+        active_rules: List[PriorityRule],
     ) -> Tuple[float, List[str]]:
         """
         Evaluate a priority request against all active rules.
@@ -52,25 +52,31 @@ class RuleEngine:
                 if rule.evaluate(context):
                     matched_rules.append(rule.name)
                     max_score = max(max_score, rule.priority_score)
-                    logger.debug(f"Rule '{rule.name}' matched for request {request.request_id}")
+                    logger.debug(
+                        f"Rule '{rule.name}' matched for request {request.request_id}"
+                    )
 
             # If no rules matched, use default low priority
             if not matched_rules:
-                logger.info(f"AUDIT: No rules matched for request {request.request_id}, using default low priority (0.1)")
+                logger.info(
+                    f"AUDIT: No rules matched for request {request.request_id}, using default low priority (0.1)"
+                )
                 return 0.1, []  # Low priority score
 
             assigned_level = self.get_priority_level_from_score(max_score)
-            logger.info(f"AUDIT: Request {request.request_id} matched {len(matched_rules)} rules {matched_rules}, final score: {max_score:.3f}, level: {assigned_level.value}")
+            logger.info(
+                f"AUDIT: Request {request.request_id} matched {len(matched_rules)} rules {matched_rules}, final score: {max_score:.3f}, level: {assigned_level.value}"
+            )
             return max_score, matched_rules
 
         except Exception as e:
-            logger.error(f"Failed to evaluate priority request {request.request_id}: {e}")
+            logger.error(
+                f"Failed to evaluate priority request {request.request_id}: {e}"
+            )
             raise GEXPriorityError(f"Rule evaluation failed: {str(e)}") from e
 
     def _build_evaluation_context(
-        self,
-        request: PriorityRequest,
-        data_source: DataSource
+        self, request: PriorityRequest, data_source: DataSource
     ) -> Dict[str, Any]:
         """
         Build the evaluation context for rule conditions.
@@ -87,9 +93,11 @@ class RuleEngine:
 
         # Calculate data age if available
         data_age_seconds = None
-        if request.metadata and 'data_timestamp' in request.metadata:
+        if request.metadata and "data_timestamp" in request.metadata:
             try:
-                data_timestamp = datetime.fromisoformat(request.metadata['data_timestamp'])
+                data_timestamp = datetime.fromisoformat(
+                    request.metadata["data_timestamp"]
+                )
                 data_age_seconds = (now - data_timestamp).total_seconds()
             except (ValueError, TypeError):
                 pass
@@ -101,40 +109,38 @@ class RuleEngine:
 
         context = {
             # Request attributes
-            'data_type': request.data_type.value,
-            'priority_level': request.priority_level.value,
-            'market_symbol': getattr(request, 'market_symbol', None) or 'UNKNOWN',
-
+            "data_type": request.data_type.value,
+            "priority_level": request.priority_level.value,
+            "market_symbol": getattr(request, "market_symbol", None) or "UNKNOWN",
             # Data source attributes
-            'source_reliability': data_source.reliability_score,
-            'total_requests': data_source.total_requests,
-            'successful_requests': data_source.successful_requests,
-            'average_response_time': data_source.average_response_time.total_seconds() if data_source.average_response_time else None,
-
+            "source_reliability": data_source.reliability_score,
+            "total_requests": data_source.total_requests,
+            "successful_requests": data_source.successful_requests,
+            "average_response_time": data_source.average_response_time.total_seconds()
+            if data_source.average_response_time
+            else None,
             # Time-based attributes
-            'current_hour': now.hour,
-            'current_day_of_week': now.weekday(),  # 0=Monday, 6=Sunday
-            'is_market_hours': self._is_market_hours(now),
-            'data_age_seconds': data_age_seconds,
-            'data_age_minutes': data_age_seconds / 60 if data_age_seconds else None,
-            'data_age_hours': data_age_seconds / 3600 if data_age_seconds else None,
-
+            "current_hour": now.hour,
+            "current_day_of_week": now.weekday(),  # 0=Monday, 6=Sunday
+            "is_market_hours": self._is_market_hours(now),
+            "data_age_seconds": data_age_seconds,
+            "data_age_minutes": data_age_seconds / 60 if data_age_seconds else None,
+            "data_age_hours": data_age_seconds / 3600 if data_age_seconds else None,
             # Derived evaluation scores
-            'market_impact_score': market_impact_score,
-            'freshness_score': freshness_score,
-            'volatility_score': volatility_score,
-
+            "market_impact_score": market_impact_score,
+            "freshness_score": freshness_score,
+            "volatility_score": volatility_score,
             # Metadata attributes (if available)
-            'has_metadata': bool(request.metadata),
-            'metadata_keys': list(request.metadata.keys()) if request.metadata else [],
+            "has_metadata": bool(request.metadata),
+            "metadata_keys": list(request.metadata.keys()) if request.metadata else [],
         }
 
         # Add metadata values to context
         if request.metadata:
             for key, value in request.metadata.items():
                 # Convert key to valid Python identifier
-                safe_key = key.replace('-', '_').replace(' ', '_')
-                context[f'metadata_{safe_key}'] = value
+                safe_key = key.replace("-", "_").replace(" ", "_")
+                context[f"metadata_{safe_key}"] = value
 
         return context
 
@@ -170,24 +176,40 @@ class RuleEngine:
         """
         try:
             # Try to compile the condition
-            compile(condition, '<string>', 'eval')
+            compile(condition, "<string>", "eval")
 
             # Test with a sample context
             test_context = {
-                'data_type': 'tick_data',
-                'source_reliability': 0.8,
-                'current_hour': 12,
-                'is_market_hours': True,
-                'data_age_seconds': 300,
+                "data_type": "tick_data",
+                "source_reliability": 0.8,
+                "current_hour": 12,
+                "is_market_hours": True,
+                "data_age_seconds": 300,
             }
 
             # Try to evaluate with safe globals
             safe_globals = {
-                '__builtins__': {
-                    'abs': abs, 'all': all, 'any': any, 'bool': bool, 'dict': dict,
-                    'enumerate': enumerate, 'float': float, 'int': int, 'len': len,
-                    'list': list, 'max': max, 'min': min, 'range': range, 'round': round,
-                    'set': set, 'sorted': sorted, 'str': str, 'sum': sum, 'tuple': tuple, 'zip': zip,
+                "__builtins__": {
+                    "abs": abs,
+                    "all": all,
+                    "any": any,
+                    "bool": bool,
+                    "dict": dict,
+                    "enumerate": enumerate,
+                    "float": float,
+                    "int": int,
+                    "len": len,
+                    "list": list,
+                    "max": max,
+                    "min": min,
+                    "range": range,
+                    "round": round,
+                    "set": set,
+                    "sorted": sorted,
+                    "str": str,
+                    "sum": sum,
+                    "tuple": tuple,
+                    "zip": zip,
                 }
             }
 
@@ -230,8 +252,8 @@ class RuleEngine:
         if not request.metadata:
             return 0.0
 
-        volume = request.metadata.get('volume', 0)
-        open_interest = request.metadata.get('open_interest', 0)
+        volume = request.metadata.get("volume", 0)
+        open_interest = request.metadata.get("open_interest", 0)
 
         # High volume threshold (adjust based on market)
         high_volume_threshold = 100000
@@ -255,11 +277,11 @@ class RuleEngine:
         Returns:
             Freshness score (0.0-1.0, higher is fresher)
         """
-        if not request.metadata or 'data_timestamp' not in request.metadata:
+        if not request.metadata or "data_timestamp" not in request.metadata:
             return 0.0
 
         try:
-            data_timestamp = datetime.fromisoformat(request.metadata['data_timestamp'])
+            data_timestamp = datetime.fromisoformat(request.metadata["data_timestamp"])
             age_seconds = (datetime.utcnow() - data_timestamp).total_seconds()
 
             # Freshness decay: 100% at 0s, 50% at 300s, 0% at 3600s+
@@ -289,17 +311,23 @@ class RuleEngine:
             return 0.0
 
         # Look for volatility indicators in metadata
-        price_change_pct = abs(request.metadata.get('price_change_pct', 0))
-        bid_ask_spread = request.metadata.get('bid_ask_spread', 0)
-        vix_level = request.metadata.get('vix_level', 20)  # Default VIX ~20
+        price_change_pct = abs(request.metadata.get("price_change_pct", 0))
+        bid_ask_spread = request.metadata.get("bid_ask_spread", 0)
+        vix_level = request.metadata.get("vix_level", 20)  # Default VIX ~20
 
         # Normalize components
-        price_volatility = min(price_change_pct / 5.0, 1.0)  # 5% change = max volatility
+        price_volatility = min(
+            price_change_pct / 5.0, 1.0
+        )  # 5% change = max volatility
         spread_volatility = min(bid_ask_spread / 0.05, 1.0)  # 5 cent spread = max
         vix_volatility = min(vix_level / 50.0, 1.0)  # VIX 50 = max volatility
 
         # Combined volatility score
-        volatility = (price_volatility * 0.4) + (spread_volatility * 0.3) + (vix_volatility * 0.3)
+        volatility = (
+            (price_volatility * 0.4)
+            + (spread_volatility * 0.3)
+            + (vix_volatility * 0.3)
+        )
 
         return volatility
 
@@ -351,7 +379,9 @@ class RuleEngine:
 
         # Validate priority score range
         if not (0.0 <= rule.priority_score <= 1.0):
-            errors.append(f"Priority score {rule.priority_score} is not between 0.0 and 1.0")
+            errors.append(
+                f"Priority score {rule.priority_score} is not between 0.0 and 1.0"
+            )
 
         # Check for empty or whitespace-only fields
         if not rule.name or not rule.name.strip():
@@ -377,13 +407,17 @@ class RuleEngine:
 
         # Check for rules with very similar conditions but different priorities
         for i, rule1 in enumerate(rules):
-            for rule2 in rules[i+1:]:
-                if abs(rule1.priority_score - rule2.priority_score) > 0.3:  # Significant priority difference
+            for rule2 in rules[i + 1 :]:
+                if (
+                    abs(rule1.priority_score - rule2.priority_score) > 0.3
+                ):  # Significant priority difference
                     # Simple heuristic: if conditions are very similar in length and contain same keywords
-                    cond1_words = set(rule1.condition.lower().replace(' ', '').split())
-                    cond2_words = set(rule2.condition.lower().replace(' ', '').split())
+                    cond1_words = set(rule1.condition.lower().replace(" ", "").split())
+                    cond2_words = set(rule2.condition.lower().replace(" ", "").split())
 
-                    similarity = len(cond1_words.intersection(cond2_words)) / len(cond1_words.union(cond2_words))
+                    similarity = len(cond1_words.intersection(cond2_words)) / len(
+                        cond1_words.union(cond2_words)
+                    )
 
                     if similarity > 0.7:  # High similarity
                         conflicts.append(
@@ -414,15 +448,19 @@ class RuleEngine:
 
         for rule in sorted_rules:
             # Simple condition fingerprint (could be improved)
-            condition_fingerprint = rule.condition.lower().replace(' ', '')
+            condition_fingerprint = rule.condition.lower().replace(" ", "")
 
             if condition_fingerprint not in seen_conditions:
                 resolved_rules.append(rule)
                 seen_conditions.add(condition_fingerprint)
             else:
-                logger.warning(f"Skipping conflicting rule '{rule.name}' - higher priority rule already exists")
+                logger.warning(
+                    f"Skipping conflicting rule '{rule.name}' - higher priority rule already exists"
+                )
 
-        logger.info(f"Resolved rule conflicts: {len(rules)} -> {len(resolved_rules)} rules")
+        logger.info(
+            f"Resolved rule conflicts: {len(rules)} -> {len(resolved_rules)} rules"
+        )
         return resolved_rules
 
     def create_default_rules(self) -> List[PriorityRule]:
@@ -437,25 +475,25 @@ class RuleEngine:
                 name="Critical Market Hours High Volume",
                 description="Critical priority for high-volume data during market hours",
                 condition="is_market_hours and source_reliability > 0.8 and (metadata_volume > 50000 or metadata_open_interest > 100000)",
-                priority_score=0.95
+                priority_score=0.95,
             ),
             PriorityRule(
                 name="High Priority Real-time Data",
                 description="High priority for real-time data with good source reliability",
                 condition="data_age_seconds is not None and data_age_seconds < 300 and source_reliability > 0.7",
-                priority_score=0.85
+                priority_score=0.85,
             ),
             PriorityRule(
                 name="Medium Priority Fresh Data",
                 description="Medium priority for fresh data during market hours",
                 condition="is_market_hours and data_age_seconds is not None and data_age_seconds < 1800",
-                priority_score=0.65
+                priority_score=0.65,
             ),
             PriorityRule(
                 name="Low Priority Stale Data",
                 description="Low priority for stale data or low reliability sources",
                 condition="data_age_seconds is None or data_age_seconds > 3600 or source_reliability < 0.5",
-                priority_score=0.15
+                priority_score=0.15,
             ),
         ]
 

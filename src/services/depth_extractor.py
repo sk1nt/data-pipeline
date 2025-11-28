@@ -97,13 +97,15 @@ class DepthExtractor:
                 bid_price_1=4500.00 - (i * 0.01),  # Declining prices
                 bid_size_1=100 + (i % 50),
                 ask_price_1=4500.25 + (i * 0.01),  # Rising prices
-                ask_size_1=150 + (i % 30)
+                ask_size_1=150 + (i % 30),
             )
             snapshots.append(snapshot)
 
         return snapshots
 
-    def extract_depth_date_range(self, start_date: datetime, end_date: datetime) -> List[DepthSnapshot]:
+    def extract_depth_date_range(
+        self, start_date: datetime, end_date: datetime
+    ) -> List[DepthSnapshot]:
         """
         Extract depth data for a date range.
 
@@ -140,7 +142,9 @@ class DepthExtractor:
         file_path = self.parquet_handler.save_depth_data(snapshots, date)
         logger.info(f"Saved {len(snapshots)} depth snapshots to {file_path}")
 
-    def extract_and_save_parallel(self, start_date: datetime, end_date: datetime, max_workers: int = 4):
+    def extract_and_save_parallel(
+        self, start_date: datetime, end_date: datetime, max_workers: int = 4
+    ):
         """
         Extract depth for date range sequentially and save to Parquet.
 
@@ -149,7 +153,9 @@ class DepthExtractor:
             end_date: End date
             max_workers: Maximum number of parallel workers (ignored, sequential processing)
         """
-        logger.info(f"Starting sequential depth extraction from {start_date.date()} to {end_date.date()}")
+        logger.info(
+            f"Starting sequential depth extraction from {start_date.date()} to {end_date.date()}"
+        )
 
         # Generate list of dates to process
         dates = []

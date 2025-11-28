@@ -52,7 +52,9 @@ def collect_moves(
 
             # Nested ticker/endpoint directories
             for ticker_dir in sorted(p for p in month_dir.iterdir() if p.is_dir()):
-                for endpoint_dir in sorted(p for p in ticker_dir.iterdir() if p.is_dir()):
+                for endpoint_dir in sorted(
+                    p for p in ticker_dir.iterdir() if p.is_dir()
+                ):
                     dest = root / year / month / ticker_dir.name / endpoint_dir.name
                     dir_moves.append((endpoint_dir, dest))
 

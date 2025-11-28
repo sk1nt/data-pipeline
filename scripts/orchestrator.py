@@ -25,37 +25,110 @@ SCID_CONTRACT_WINDOWS = [
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run worker_day in parallel over a date range")
+    parser = argparse.ArgumentParser(
+        description="Run worker_day in parallel over a date range"
+    )
     parser.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
     parser.add_argument("--end", required=True, help="End date YYYY-MM-DD")
-    parser.add_argument("--workers", type=int, default=max(1, multiprocessing.cpu_count() // 2))
+    parser.add_argument(
+        "--workers", type=int, default=max(1, multiprocessing.cpu_count() // 2)
+    )
     parser.add_argument("--python", default="python3", help="Python interpreter path")
     parser.add_argument("--symbol", default="MNQ", help="Canonical symbol")
-    parser.add_argument("--scid-file", default=None, help="Fallback SCID file (used if --scid-dir not provided)")
-    parser.add_argument("--scid-dir", default=None, help="Directory containing contract-specific SCID files")
-    parser.add_argument("--depth-dir", required=True, help="Directory with .depth files")
-    parser.add_argument("--depth-prefix", default="MNQZ25_FUT_CME", help="Depth filename prefix")
-    parser.add_argument("--depth-parquet-dir", default="data/parquet/depth", help="Depth parquet root")
-    parser.add_argument("--tick-parquet-dir", default="data/parquet/tick", help="Tick parquet root")
+    parser.add_argument(
+        "--scid-file",
+        default=None,
+        help="Fallback SCID file (used if --scid-dir not provided)",
+    )
+    parser.add_argument(
+        "--scid-dir",
+        default=None,
+        help="Directory containing contract-specific SCID files",
+    )
+    parser.add_argument(
+        "--depth-dir", required=True, help="Directory with .depth files"
+    )
+    parser.add_argument(
+        "--depth-prefix", default="MNQZ25_FUT_CME", help="Depth filename prefix"
+    )
+    parser.add_argument(
+        "--depth-parquet-dir", default="data/parquet/depth", help="Depth parquet root"
+    )
+    parser.add_argument(
+        "--tick-parquet-dir", default="data/parquet/tick", help="Tick parquet root"
+    )
     parser.add_argument("--top-k", type=int, default=80)
     parser.add_argument("--depth-chunk-size", type=int, default=100_000)
     parser.add_argument("--tick-chunk-size", type=int, default=50_000)
     parser.add_argument("--max-per-day", type=int, default=0)
     parser.add_argument("--emit-tick-parquet", action="store_true")
     parser.add_argument("--log-dir", default="logs")
-    parser.add_argument("--worker-threads", type=int, default=2, help="Internal threads per worker_day")
-    parser.add_argument("--convert-existing-parquet", action="store_true", help="Convert existing parquet files to normalized schema (add ts_ms)")
-    parser.add_argument("--force-convert", action="store_true", help="Force conversion even when ts_ms column exists")
-    parser.add_argument("--recreate-corrupt", action="store_true", help="If parquet is corrupted, re-run the worker to re-source that day")
-    parser.add_argument("--convert-parquet-compression", default="zstd", help="Compression codec to use when rewriting parquet files")
-    parser.add_argument("--parquet-compression", default="zstd", help="Parquet compression codec (snappy,zstd,gzip)")
-    parser.add_argument("--parquet-compression-level", type=int, default=1, help="Parquet compression level (zstd levels 1-22)")
-    parser.add_argument("--parquet-row-group-size", type=int, default=67108864, help="Parquet row group size in bytes (used to tune chunking)")
-    parser.add_argument("--convert-timestamp-to-ms", action="store_true", help="Emit ts_ms epoch milliseconds column in Parquet instead of or in addition to timestamp")
-    parser.add_argument("--atomic-writes", action="store_true", help="Write to temp file and atomically rename to destination once complete")
-    parser.add_argument("--skip-existing", action="store_true", help="Skip processing if output file already exists")
-    parser.add_argument("--max-memory-mb", type=int, default=0, help="Optional: maximum memory in MB to allow per-worker before flush (0=disabled)")
-    parser.add_argument("--timestamp-tz", default="UTC", help="Timezone to assume for timestamps when converting to ts_ms (e.g. America/New_York). Defaults to UTC.")
+    parser.add_argument(
+        "--worker-threads", type=int, default=2, help="Internal threads per worker_day"
+    )
+    parser.add_argument(
+        "--convert-existing-parquet",
+        action="store_true",
+        help="Convert existing parquet files to normalized schema (add ts_ms)",
+    )
+    parser.add_argument(
+        "--force-convert",
+        action="store_true",
+        help="Force conversion even when ts_ms column exists",
+    )
+    parser.add_argument(
+        "--recreate-corrupt",
+        action="store_true",
+        help="If parquet is corrupted, re-run the worker to re-source that day",
+    )
+    parser.add_argument(
+        "--convert-parquet-compression",
+        default="zstd",
+        help="Compression codec to use when rewriting parquet files",
+    )
+    parser.add_argument(
+        "--parquet-compression",
+        default="zstd",
+        help="Parquet compression codec (snappy,zstd,gzip)",
+    )
+    parser.add_argument(
+        "--parquet-compression-level",
+        type=int,
+        default=1,
+        help="Parquet compression level (zstd levels 1-22)",
+    )
+    parser.add_argument(
+        "--parquet-row-group-size",
+        type=int,
+        default=67108864,
+        help="Parquet row group size in bytes (used to tune chunking)",
+    )
+    parser.add_argument(
+        "--convert-timestamp-to-ms",
+        action="store_true",
+        help="Emit ts_ms epoch milliseconds column in Parquet instead of or in addition to timestamp",
+    )
+    parser.add_argument(
+        "--atomic-writes",
+        action="store_true",
+        help="Write to temp file and atomically rename to destination once complete",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip processing if output file already exists",
+    )
+    parser.add_argument(
+        "--max-memory-mb",
+        type=int,
+        default=0,
+        help="Optional: maximum memory in MB to allow per-worker before flush (0=disabled)",
+    )
+    parser.add_argument(
+        "--timestamp-tz",
+        default="UTC",
+        help="Timezone to assume for timestamps when converting to ts_ms (e.g. America/New_York). Defaults to UTC.",
+    )
     return parser.parse_args()
 
 
@@ -179,11 +252,16 @@ def _validate_parquet(path: Path) -> (bool, bool, str):
     """
     try:
         import duckdb
+
         con = duckdb.connect()
         # simple read to confirm file is readable
-        cols = con.execute(f"SELECT * FROM read_parquet('{path}') LIMIT 1").fetchdf().columns.tolist()
-        has_ts_ms = 'ts_ms' in cols
-        return True, has_ts_ms, ''
+        cols = (
+            con.execute(f"SELECT * FROM read_parquet('{path}') LIMIT 1")
+            .fetchdf()
+            .columns.tolist()
+        )
+        has_ts_ms = "ts_ms" in cols
+        return True, has_ts_ms, ""
     except Exception as exc:
         return False, False, str(exc)
 
@@ -195,8 +273,16 @@ def run_convert_for_day(python: str, date_str: str, args: argparse.Namespace) ->
     for that day to re-source raw files before conversion.
     """
     # compute expected parquet paths
-    out_depth = Path(args.depth_parquet_dir) / args.symbol / f"{date_str.replace('-', '')}.parquet"
-    out_tick = Path(args.tick_parquet_dir) / args.symbol / f"{date_str.replace('-', '')}.parquet"
+    out_depth = (
+        Path(args.depth_parquet_dir)
+        / args.symbol
+        / f"{date_str.replace('-', '')}.parquet"
+    )
+    out_tick = (
+        Path(args.tick_parquet_dir)
+        / args.symbol
+        / f"{date_str.replace('-', '')}.parquet"
+    )
     rc_total = 0
     for p in (out_depth, out_tick):
         if not p.exists():
@@ -228,16 +314,22 @@ def run_convert_for_day(python: str, date_str: str, args: argparse.Namespace) ->
                 print(f"[orchestrator] parquet already contains ts_ms, skipping: {p}")
                 continue
             # run conversion using our script
-            cmd = [python, 'scripts/convert_parquet_to_ts_ms.py', str(p), '--out', str(p)]
+            cmd = [
+                python,
+                "scripts/convert_parquet_to_ts_ms.py",
+                str(p),
+                "--out",
+                str(p),
+            ]
             if args.timestamp_tz:
-                cmd.extend(['--timestamp-tz', args.timestamp_tz])
+                cmd.extend(["--timestamp-tz", args.timestamp_tz])
             if args.convert_parquet_compression:
-                cmd.extend(['--compression', args.convert_parquet_compression])
+                cmd.extend(["--compression", args.convert_parquet_compression])
             if args.atomic_writes:
-                cmd.append('--atomic')
+                cmd.append("--atomic")
             print(f"[orchestrator] converting parquet: {' '.join(cmd)}")
             env = os.environ.copy()
-            env['PYTHONPATH'] = str(Path('.').resolve())
+            env["PYTHONPATH"] = str(Path(".").resolve())
             if args.skip_existing:
                 print("[orchestrator] skip-existing set; already handled previously")
             proc = subprocess.Popen(cmd, env=env)
@@ -253,7 +345,9 @@ def run_convert_for_day(python: str, date_str: str, args: argparse.Namespace) ->
 def main() -> None:
     args = parse_args()
     if not args.scid_dir and not args.scid_file:
-        raise SystemExit("Provide --scid-dir for contract-aware rollover or --scid-file as a static fallback")
+        raise SystemExit(
+            "Provide --scid-dir for contract-aware rollover or --scid-file as a static fallback"
+        )
     start_dt = datetime.strptime(args.start, "%Y-%m-%d")
     end_dt = datetime.strptime(args.end, "%Y-%m-%d")
     dates = daterange(start_dt, end_dt)
@@ -262,9 +356,14 @@ def main() -> None:
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
         if args.convert_existing_parquet:
             # schedule convert tasks for each day
-            future_map = {executor.submit(run_convert_for_day, args.python, d, args): d for d in dates}
+            future_map = {
+                executor.submit(run_convert_for_day, args.python, d, args): d
+                for d in dates
+            }
         else:
-            future_map = {executor.submit(run_day, args.python, d, args): d for d in dates}
+            future_map = {
+                executor.submit(run_day, args.python, d, args): d for d in dates
+            }
         for fut in concurrent.futures.as_completed(future_map):
             day = future_map[fut]
             rc = fut.result()

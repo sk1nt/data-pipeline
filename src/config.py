@@ -1,7 +1,6 @@
+# ruff: noqa: E402
 """
-Configuration management for GEX Data Pipeline.
-
-Handles environment variables, CLI arguments, and application settings.
+DEPRECATED: This module path conflicts with package `src.config`. Please use `from src.config import settings`.
 """
 
 from pathlib import Path
@@ -12,6 +11,10 @@ from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 load_dotenv(".env")
+
+raise RuntimeError(
+    "src.config.py was moved to package src.config; import using 'from src.config import settings'"
+)
 
 
 def env_field(*env_names: str, default: Any = None, **kwargs: Any):
@@ -59,7 +62,9 @@ class Settings(BaseSettings):
     redis_port: int = env_field("REDIS_PORT", default=6379)
     redis_db: int = env_field("REDIS_DB", default=0)
     redis_password: Optional[str] = env_field("REDIS_PASSWORD")
-    timeseries_db_path: str = env_field("TIMESERIES_DB_PATH", default="data/redis_timeseries.db")
+    timeseries_db_path: str = env_field(
+        "TIMESERIES_DB_PATH", default="data/redis_timeseries.db"
+    )
     timeseries_parquet_dir: str = env_field(
         "TIMESERIES_PARQUET_DIR",
         default="data/parquet/timeseries",
@@ -67,14 +72,18 @@ class Settings(BaseSettings):
     tick_db_path: str = env_field("TICK_DB_PATH", default="data/tick_data.db")
     depth_db_path: str = env_field("DEPTH_DB_PATH", default="data/tick_mbo_data.db")
     tick_parquet_dir: str = env_field("TICK_PARQUET_DIR", default="data/parquet/tick")
-    depth_parquet_dir: str = env_field("DEPTH_PARQUET_DIR", default="data/parquet/depth")
+    depth_parquet_dir: str = env_field(
+        "DEPTH_PARQUET_DIR", default="data/parquet/depth"
+    )
     service_control_token: Optional[str] = env_field("SERVICE_CONTROL_TOKEN")
 
     # Discord bot control
     discord_bot_enabled: bool = env_field("DISCORD_BOT_ENABLED", default=False)
 
     # TastyTrade DXLink streamer
-    tastytrade_stream_enabled: bool = env_field("TASTYTRADE_STREAM_ENABLED", default=False)
+    tastytrade_stream_enabled: bool = env_field(
+        "TASTYTRADE_STREAM_ENABLED", default=False
+    )
     tastytrade_symbols: str = env_field(
         "TASTYTRADE_STREAM_SYMBOLS",
         default="MES,MNQ,NQ,SPY,QQQ,VIX",
@@ -166,14 +175,18 @@ class Settings(BaseSettings):
     )
     schwab_client_secret: Optional[str] = Field(
         default=None,
-        validation_alias=AliasChoices("SCHWAB_CLIENT_SECRET", "SCHWAB_SECRET", "SCHWAB_SECRECT"),
+        validation_alias=AliasChoices(
+            "SCHWAB_CLIENT_SECRET", "SCHWAB_SECRET", "SCHWAB_SECRECT"
+        ),
     )
     schwab_refresh_token: Optional[str] = Field(
         default=None,
         validation_alias=AliasChoices("SCHWAB_REFRESH_TOKEN", "SCHWAB_RTOKEN"),
     )
     schwab_account_id: Optional[str] = env_field("SCHWAB_ACCOUNT_ID")
-    schwab_rest_url: str = env_field("SCHWAB_REST_URL", default="https://api.schwab.com/v1")
+    schwab_rest_url: str = env_field(
+        "SCHWAB_REST_URL", default="https://api.schwab.com/v1"
+    )
     schwab_auth_url: str = env_field(
         "SCHWAB_AUTH_URL",
         default="https://api.schwab.com/oauth2/v1/authorize",
@@ -186,10 +199,16 @@ class Settings(BaseSettings):
         "SCHWAB_TOKEN_AUTH_METHOD",
         default="form",
     )
-    schwab_stream_url: str = env_field("SCHWAB_STREAM_URL", default="wss://stream.schwab.com/v1")
+    schwab_stream_url: str = env_field(
+        "SCHWAB_STREAM_URL", default="wss://stream.schwab.com/v1"
+    )
     schwab_symbols: str = env_field("SCHWAB_SYMBOLS", default="MNQ,MES,SPY,QQQ,VIX")
-    schwab_tick_channel: str = env_field("SCHWAB_TICK_CHANNEL", default="market_data:ticks")
-    schwab_level2_channel: str = env_field("SCHWAB_LEVEL2_CHANNEL", default="market_data:level2")
+    schwab_tick_channel: str = env_field(
+        "SCHWAB_TICK_CHANNEL", default="market_data:ticks"
+    )
+    schwab_level2_channel: str = env_field(
+        "SCHWAB_LEVEL2_CHANNEL", default="market_data:level2"
+    )
     schwab_heartbeat_seconds: int = env_field("SCHWAB_HEARTBEAT_SECONDS", default=15)
     schwab_redirect_uri: Optional[str] = env_field("SCHWAB_REDIRECT_URI")
     schwab_scope: str = env_field(
@@ -223,16 +242,26 @@ class Settings(BaseSettings):
         """Get CORS origins as a list."""
         if self.cors_origins == "*":
             return ["*"]
-        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+        return [
+            origin.strip() for origin in self.cors_origins.split(",") if origin.strip()
+        ]
 
     @property
     def schwab_symbol_list(self) -> list[str]:
         """Return Schwab symbol list."""
-        return [symbol.strip().upper() for symbol in self.schwab_symbols.split(",") if symbol.strip()]
+        return [
+            symbol.strip().upper()
+            for symbol in self.schwab_symbols.split(",")
+            if symbol.strip()
+        ]
 
     @property
     def tastytrade_symbol_list(self) -> list[str]:
-        return [symbol.strip().upper() for symbol in self.tastytrade_symbols.split(",") if symbol.strip()]
+        return [
+            symbol.strip().upper()
+            for symbol in self.tastytrade_symbols.split(",")
+            if symbol.strip()
+        ]
 
     @property
     def tastytrade_depth_cap(self) -> int:
@@ -241,15 +270,27 @@ class Settings(BaseSettings):
 
     @property
     def gex_symbol_list(self) -> list[str]:
-        return [symbol.strip().upper() for symbol in self.gex_poll_symbols.split(",") if symbol.strip()]
+        return [
+            symbol.strip().upper()
+            for symbol in self.gex_poll_symbols.split(",")
+            if symbol.strip()
+        ]
 
     @property
     def gex_nq_poll_symbol_list(self) -> list[str]:
-        return [symbol.strip().upper() for symbol in self.gex_nq_poll_symbols.split(",") if symbol.strip()]
+        return [
+            symbol.strip().upper()
+            for symbol in self.gex_nq_poll_symbols.split(",")
+            if symbol.strip()
+        ]
 
     @property
     def gexbot_nq_poll_symbol_list(self) -> list[str]:
-        return [symbol.strip().upper() for symbol in self.gexbot_nq_poll_symbols.split(",") if symbol.strip()]
+        return [
+            symbol.strip().upper()
+            for symbol in self.gexbot_nq_poll_symbols.split(",")
+            if symbol.strip()
+        ]
 
     @property
     def redis_params(self) -> Dict[str, Any]:

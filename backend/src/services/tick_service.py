@@ -12,16 +12,21 @@ DEFAULT_SYMBOL_MAP = {
     "NQ": "NQ_NDX",
 }
 
+
 class TickService:
     def __init__(self):
-        self.db_path = os.path.join(os.path.dirname(__file__), '../../../data/tick_data.db')
+        self.db_path = os.path.join(
+            os.path.dirname(__file__), "../../../data/tick_data.db"
+        )
 
     def _key_for(self, symbol: str) -> str:
         sym = symbol.upper()
         sym = DEFAULT_SYMBOL_MAP.get(sym, sym)
         return REDIS_TICK_KEY_TEMPLATE.format(symbol=sym)
 
-    def get_realtime_ticks(self, symbols: List[str], limit: int = 100) -> List[TickData]:
+    def get_realtime_ticks(
+        self, symbols: List[str], limit: int = 100
+    ) -> List[TickData]:
         """Get real-time tick data from Redis cache."""
         ticks = []
         for symbol in symbols:
@@ -62,14 +67,17 @@ class TickService:
         conn = duckdb.connect(self.db_path)
         try:
             # Query recent ticks from database
-            placeholders = ','.join(['?'] * len(symbols))
-            result = conn.execute(f"""
+            placeholders = ",".join(["?"] * len(symbols))
+            result = conn.execute(
+                f"""
                 SELECT symbol, timestamp, price, volume, tick_type, source
                 FROM tick_data
                 WHERE symbol IN ({placeholders})
                 ORDER BY timestamp DESC
                 LIMIT ?
-            """, symbols + [limit]).fetchall()
+            """,
+                symbols + [limit],
+            ).fetchall()
 
             ticks = []
             for row in result:
@@ -79,11 +87,12 @@ class TickService:
                     price=row[2],
                     volume=row[3],
                     tick_type=row[4],
-                    source=row[5]
+                    source=row[5],
                 )
                 ticks.append(tick)
             return ticks
         finally:
             conn.close()
+
 
 tick_service = TickService()

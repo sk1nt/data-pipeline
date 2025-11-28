@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Smoke-test the GEXBot poller independently."""
+
 import asyncio
 import sys
 from pathlib import Path
@@ -21,7 +22,10 @@ def _load_gex_poller():
     return cfg, RedisClient, RedisTimeSeriesClient, GEXBotPoller, GEXBotPollerSettings
 
 
-settings, RedisClient, RedisTimeSeriesClient, GEXBotPoller, GEXBotPollerSettings = _load_gex_poller()
+settings, RedisClient, RedisTimeSeriesClient, GEXBotPoller, GEXBotPollerSettings = (
+    _load_gex_poller()
+)
+
 
 async def main() -> None:
     redis_client = RedisClient(
@@ -47,6 +51,7 @@ async def main() -> None:
     finally:
         await poller.stop()
         print("GEX poller stopped")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

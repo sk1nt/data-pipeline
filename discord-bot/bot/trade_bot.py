@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sys
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -12,81 +13,125 @@ import redis
 from discord.ext import commands
 from zoneinfo import ZoneInfo
 
-from .tastytrade_client import TastyTradeClient
+# Add src to path for importing services
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../src"))
+
+from .tastytrade_client import TastyTradeClient, TastytradeAuthError
+
 
 class TradeBot(commands.Bot):
     def __init__(self, config):
         intents = discord.Intents.default()
         intents.message_content = True
-        super().__init__(command_prefix='!', intents=intents)
+        super().__init__(command_prefix="!", intents=intents)
         self.config = config
         self.redis_client = redis.Redis(
-            host=os.getenv('REDIS_HOST', 'localhost'),
-            port=int(os.getenv('REDIS_PORT', '6379')),
-            db=int(os.getenv('REDIS_DB', '0')),
-            password=os.getenv('REDIS_PASSWORD')
+            host=os.getenv("REDIS_HOST", "localhost"),
+            port=int(os.getenv("REDIS_PORT", "6379")),
+            db=int(os.getenv("REDIS_DB", "0")),
+            password=os.getenv("REDIS_PASSWORD"),
         )
         self.command_admin_ids = self._parse_admin_ids()
         self.command_admin_names = self._parse_admin_names()
         self.tastytrade_client = self._init_tastytrade_client()
-        self.uw_option_latest_key = os.getenv('UW_OPTION_LATEST_KEY', 'uw:options-trade:latest')
-        self.uw_option_history_key = os.getenv('UW_OPTION_HISTORY_KEY', 'uw:options-trade:history')
-        self.uw_market_latest_key = os.getenv('UW_MARKET_LATEST_KEY', 'uw:market-state:latest')
-        self.uw_market_history_key = os.getenv('UW_MARKET_HISTORY_KEY', 'uw:market-state:history')
-        self.uw_option_stream_channel = os.getenv('UW_OPTION_STREAM_CHANNEL', 'uw:options-trade:stream')
+        self.uw_option_latest_key = os.getenv(
+            "UW_OPTION_LATEST_KEY", "uw:options-trade:latest"
+        )
+        self.uw_option_history_key = os.getenv(
+            "UW_OPTION_HISTORY_KEY", "uw:options-trade:history"
+        )
+        self.uw_market_latest_key = os.getenv(
+            "UW_MARKET_LATEST_KEY", "uw:market-state:latest"
+        )
+        self.uw_market_history_key = os.getenv(
+            "UW_MARKET_HISTORY_KEY", "uw:market-state:history"
+        )
+        self.uw_option_stream_channel = os.getenv(
+            "UW_OPTION_STREAM_CHANNEL", "uw:options-trade:stream"
+        )
         # Canonical tickers for GEXBot futures endpoints so cache/API reuse shared contracts
         self.ticker_aliases = {
-            'NQ': 'NQ_NDX',
-            'MNQ': 'NQ_NDX',
-            'ES': 'ES_SPX',
-            'MES': 'ES_SPX',
+            "NQ": "NQ_NDX",
+            "MNQ": "NQ_NDX",
+            "ES": "ES_SPX",
+            "MES": "ES_SPX",
         }
-        self.display_zone = ZoneInfo(os.getenv('DISPLAY_TIMEZONE', 'America/New_York'))
-        self.redis_snapshot_prefix = os.getenv('GEX_SNAPSHOT_PREFIX', 'gex:snapshot:')
-        self.allowed_channel_ids = tuple(getattr(config, 'allowed_channel_ids', ()) or ())
-        self.status_channel_id = getattr(config, 'status_channel_id', None)
-        self.status_command_user = os.getenv('DISCORD_STATUS_USER', 'skint0552').lower()
+        self.display_zone = ZoneInfo(os.getenv("DISPLAY_TIMEZONE", "America/New_York"))
+        self.redis_snapshot_prefix = os.getenv("GEX_SNAPSHOT_PREFIX", "gex:snapshot:")
+        self.allowed_channel_ids = tuple(
+            getattr(config, "allowed_channel_ids", ()) or ()
+        )
+        self.status_channel_id = getattr(config, "status_channel_id", None)
+        self.status_command_user = os.getenv("DISCORD_STATUS_USER", "skint0552").lower()
         self.option_alert_channel_ids = self._init_alert_channels()
         self._uw_listener_task: Optional[asyncio.Task] = None
         self._uw_listener_stop = asyncio.Event()
         self._gex_feed_task: Optional[asyncio.Task] = None
         self._gex_feed_stop = asyncio.Event()
-        self.gex_feed_enabled = bool(getattr(config, 'gex_feed_enabled', False))
-        self.gex_feed_channel_ids = getattr(config, 'gex_feed_channel_ids', None)
-        self.gex_feed_symbol = (getattr(config, 'gex_feed_symbol', 'NQ_NDX') or 'NQ_NDX').upper()
+        self.gex_feed_enabled = bool(getattr(config, "gex_feed_enabled", False))
+        self.gex_feed_channel_ids = getattr(config, "gex_feed_channel_ids", None)
+        self.gex_feed_symbol = (
+            getattr(config, "gex_feed_symbol", "NQ_NDX") or "NQ_NDX"
+        ).upper()
         # Slightly faster default cadence; allow overrides down to 250ms
-        self.gex_feed_update_seconds = max(0.25, float(getattr(config, 'gex_feed_update_seconds', 0.5) or 0.5))
-        self.gex_feed_refresh_minutes = max(1, int(getattr(config, 'gex_feed_refresh_minutes', 5) or 5))
-        self.gex_feed_window_seconds = max(15, int(getattr(config, 'gex_feed_window_seconds', 60) or 60))
-        self.gex_feed_force_window = bool(getattr(config, 'gex_feed_force_window', False))
-        self.gex_feed_aggregation_seconds = max(0.25, float(getattr(config, 'gex_feed_aggregation_seconds', 0.25) or 0.25))
-        metrics_key = getattr(config, 'gex_feed_metrics_key', 'metrics:gex_feed') or 'metrics:gex_feed'
-        metrics_enabled = bool(getattr(config, 'gex_feed_metrics_enabled', False))
-        self._gex_feed_metrics = RedisGexFeedMetrics(self.redis_client, metrics_key, enabled=metrics_enabled)
-        self.gex_feed_backoff_base_seconds = max(0.05, float(getattr(config, 'gex_feed_backoff_base_seconds', 0.25) or 0.25))
-        self.gex_feed_backoff_max_seconds = max(self.gex_feed_backoff_base_seconds, float(getattr(config, 'gex_feed_backoff_max_seconds', 1.0) or 1.0))
+        self.gex_feed_update_seconds = max(
+            0.25, float(getattr(config, "gex_feed_update_seconds", 0.5) or 0.5)
+        )
+        self.gex_feed_refresh_minutes = max(
+            1, int(getattr(config, "gex_feed_refresh_minutes", 5) or 5)
+        )
+        self.gex_feed_window_seconds = max(
+            15, int(getattr(config, "gex_feed_window_seconds", 60) or 60)
+        )
+        self.gex_feed_force_window = bool(
+            getattr(config, "gex_feed_force_window", False)
+        )
+        self.gex_feed_aggregation_seconds = max(
+            0.25, float(getattr(config, "gex_feed_aggregation_seconds", 0.25) or 0.25)
+        )
+        metrics_key = (
+            getattr(config, "gex_feed_metrics_key", "metrics:gex_feed")
+            or "metrics:gex_feed"
+        )
+        metrics_enabled = bool(getattr(config, "gex_feed_metrics_enabled", False))
+        self._gex_feed_metrics = RedisGexFeedMetrics(
+            self.redis_client, metrics_key, enabled=metrics_enabled
+        )
+        self.gex_feed_backoff_base_seconds = max(
+            0.05, float(getattr(config, "gex_feed_backoff_base_seconds", 0.25) or 0.25)
+        )
+        self.gex_feed_backoff_max_seconds = max(
+            self.gex_feed_backoff_base_seconds,
+            float(getattr(config, "gex_feed_backoff_max_seconds", 1.0) or 1.0),
+        )
         self._gex_feed_backoff_seconds = 0.0
         self._gex_feed_block_until: Optional[datetime] = None
         # Disable direct API polling for GEX snapshots when running inside the bot; rely on Redis/DuckDB
-        self.gex_api_enabled = os.getenv('GEX_API_ENABLED', 'false').lower() == 'true'
-        self.gexbot_supported_key = getattr(config, 'gexbot_supported_key', 'gexbot:symbols:supported')
-        default_symbols = getattr(config, 'gexbot_default_symbols', None)
+        self.gex_api_enabled = os.getenv("GEX_API_ENABLED", "false").lower() == "true"
+        self.gexbot_supported_key = getattr(
+            config, "gexbot_supported_key", "gexbot:symbols:supported"
+        )
+        default_symbols = getattr(config, "gexbot_default_symbols", None)
         if not default_symbols:
-            default_symbols = ['NQ_NDX', 'ES_SPX', 'SPY', 'QQQ', 'SPX', 'NDX']
+            default_symbols = ["NQ_NDX", "ES_SPX", "SPY", "QQQ", "SPX", "NDX"]
         if isinstance(default_symbols, str):
-            default_symbols = [sym.strip() for sym in default_symbols.split(',') if sym.strip()]
+            default_symbols = [
+                sym.strip() for sym in default_symbols.split(",") if sym.strip()
+            ]
         self._gexbot_default_symbols = {sym.upper() for sym in default_symbols}
         # Use a path variable and create short-lived connections per query to avoid file locks
-        self.duckdb_path = os.getenv('DUCKDB_PATH', '/home/rwest/projects/data-pipeline/data/gex_data.db')
+        self.duckdb_path = os.getenv(
+            "DUCKDB_PATH", "/home/rwest/projects/data-pipeline/data/gex_data.db"
+        )
         # Register commands defined as methods on the subclass so prefix commands work
         try:
             # Use plain functions (closures) as command callbacks so signature checks pass.
             async def _ping_cmd(ctx):
-                await ctx.send('Pong!')
+                await ctx.send("Pong!")
 
             async def _gex_cmd(ctx, *args):
                 symbol, show_full = self._resolve_gex_request(args)
-                display_symbol = (symbol or 'QQQ').upper()
+                display_symbol = (symbol or "QQQ").upper()
                 ticker = self.ticker_aliases.get(display_symbol, display_symbol)
 
                 # verify supported symbol map before continuing
@@ -94,42 +139,94 @@ class TradeBot(commands.Bot):
                 supported_set = set()
                 for values in tickers_map.values():
                     if isinstance(values, list):
-                        supported_set.update(val.upper() for val in values if isinstance(val, str))
+                        supported_set.update(
+                            val.upper() for val in values if isinstance(val, str)
+                        )
 
                 if tickers_map and ticker.upper() not in supported_set:
-                    msg = self._format_supported_tickers_message(tickers_map, alias_map=self.ticker_aliases)
+                    msg = self._format_supported_tickers_message(
+                        tickers_map, alias_map=self.ticker_aliases
+                    )
                     await ctx.send(f"Unsupported symbol '{symbol}'.\n{msg}")
                     return
 
                 # Dynamic symbol enrollment removed; do not touch external keys
-                poller = getattr(self, 'gex_poller', None)
+                poller = getattr(self, "gex_poller", None)
 
                 if poller:
-                    # If client is configured for sandbox, inform user that 'live' will still be a sandbox submission
-                    if dry_run is False and getattr(self.tastytrade_client, '_use_sandbox', False):
-                        await self._send_dm_or_warn(ctx, 'Bot is configured for sandbox environment; live requests will be submitted to the sandbox and not to production. To route real orders, configure the bot with production credentials and disable sandbox mode.')
+                    # Verify TastyTrade auth/session is valid before attempting order
+                    if self.tastytrade_client:
+                        try:
+                            tt_status = await asyncio.to_thread(self.tastytrade_client.get_auth_status)
+                        except Exception:
+                            tt_status = None
+                        if tt_status and not tt_status.get('session_valid'):
+                            await self._send_dm_or_warn(ctx, 'TastyTrade authentication invalid or expired. Update the refresh token or run `!tt auth refresh <token>`.')
+                            return
+
+                    # Preflight: ensure the TastyTrade session is authorized to avoid
+                    # attempting a live trade when refresh token is invalid.
+                    # Ensure authorized before attempting to fetch positions/close.
+                    try:
+                        await asyncio.to_thread(self.tastytrade_client.ensure_authorized)
+                    except TastytradeAuthError as exc:
+                        await self._send_dm_or_warn(ctx, f'TastyTrade authentication invalid: {exc}. Update the refresh token or run `!tt auth refresh <token>`.')
+                        return
+
+                    try:
+                        await asyncio.to_thread(self.tastytrade_client.ensure_authorized)
+                    except TastytradeAuthError as exc:
+                        await self._send_dm_or_warn(ctx, f'TastyTrade authentication invalid: {exc}. Update the refresh token or run `!tt auth refresh <token>`.')
+                        return
+
                     try:
                         # No dynamic enrollment; just fetch snapshot from poller if available
-                        if hasattr(poller, 'fetch_symbol_now'):
+                        if hasattr(poller, "fetch_symbol_now"):
                             snap = await poller.fetch_symbol_now(ticker)
                             if snap:
-                                snap['_freshness'] = 'current'
-                                snap['_source'] = 'redis-cache'
-                                snap['display_symbol'] = display_symbol
-                                snap['spot_price'] = snap.get('spot_price') or snap.get('spot')
-                                snap['major_pos_vol'] = snap.get('major_pos_vol') if snap.get('major_pos_vol') is not None else 0
-                                snap['major_neg_vol'] = snap.get('major_neg_vol') if snap.get('major_neg_vol') is not None else 0
-                                snap['major_pos_oi'] = snap.get('major_pos_oi') if snap.get('major_pos_oi') is not None else 0
-                                snap['major_neg_oi'] = snap.get('major_neg_oi') if snap.get('major_neg_oi') is not None else 0
-                                snap['sum_gex_oi'] = snap.get('sum_gex_oi') if snap.get('sum_gex_oi') is not None else 0
-                                snap['max_priors'] = snap.get('max_priors') or []
+                                snap["_freshness"] = "current"
+                                snap["_source"] = "redis-cache"
+                                snap["display_symbol"] = display_symbol
+                                snap["spot_price"] = snap.get("spot_price") or snap.get(
+                                    "spot"
+                                )
+                                snap["major_pos_vol"] = (
+                                    snap.get("major_pos_vol")
+                                    if snap.get("major_pos_vol") is not None
+                                    else 0
+                                )
+                                snap["major_neg_vol"] = (
+                                    snap.get("major_neg_vol")
+                                    if snap.get("major_neg_vol") is not None
+                                    else 0
+                                )
+                                snap["major_pos_oi"] = (
+                                    snap.get("major_pos_oi")
+                                    if snap.get("major_pos_oi") is not None
+                                    else 0
+                                )
+                                snap["major_neg_oi"] = (
+                                    snap.get("major_neg_oi")
+                                    if snap.get("major_neg_oi") is not None
+                                    else 0
+                                )
+                                snap["sum_gex_oi"] = (
+                                    snap.get("sum_gex_oi")
+                                    if snap.get("sum_gex_oi") is not None
+                                    else 0
+                                )
+                                snap["max_priors"] = snap.get("max_priors") or []
                                 # Only write to the canonical snapshot key; do NOT create gex:{ticker}:latest
                                 await asyncio.to_thread(
                                     self.redis_client.set,
                                     f"{self.redis_snapshot_prefix}{ticker.upper()}",
                                     json.dumps(snap, default=str),
                                 )
-                                formatter = self.format_gex if show_full else self.format_gex_small
+                                formatter = (
+                                    self.format_gex
+                                    if show_full
+                                    else self.format_gex_small
+                                )
                                 await ctx.send(formatter(snap))
                                 return
                     except Exception:
@@ -139,21 +236,23 @@ class TradeBot(commands.Bot):
                     formatter = self.format_gex if show_full else self.format_gex_small
                     await ctx.send(formatter(data))
                 else:
-                    await ctx.send('GEX data not available')
+                    await ctx.send("GEX data not available")
 
             async def _status_cmd(ctx):
                 if not await self._ensure_status_channel_access(ctx):
                     return
                 try:
                     async with httpx.AsyncClient() as client:
-                        response = await client.get('http://localhost:8877/status')
+                        response = await client.get("http://localhost:8877/status")
                         if response.status_code == 200:
                             status_data = response.json()
                             await ctx.send(self.format_status(status_data))
                         else:
-                            await ctx.send(f'Failed to fetch status: {response.status_code}')
+                            await ctx.send(
+                                f"Failed to fetch status: {response.status_code}"
+                            )
                 except Exception as e:
-                    await ctx.send(f'Error fetching status: {e}')
+                    await ctx.send(f"Error fetching status: {e}")
 
             async def _tastytrade_cmd(ctx):
                 if not await self._ensure_privileged(ctx):
@@ -163,62 +262,82 @@ class TradeBot(commands.Bot):
             async def _market_cmd(ctx):
                 snapshot = await self._fetch_market_snapshot()
                 if not snapshot:
-                    await ctx.send('No market state snapshot available')
+                    await ctx.send("No market state snapshot available")
                     return
                 await ctx.send(self.format_market_snapshot(snapshot))
 
             async def _uwalerts_cmd(ctx):
                 alerts = await self._fetch_option_history(limit=5)
                 if not alerts:
-                    await ctx.send('No option trade alerts yet')
+                    await ctx.send("No option trade alerts yet")
                     return
-                formatted = "\n".join(self.format_option_trade_alert(alert) for alert in alerts)
+                formatted = "\n".join(
+                    self.format_option_trade_alert(alert) for alert in alerts
+                )
                 await ctx.send(formatted)
 
             async def _tt_cmd(ctx, *args):
                 if not await self._ensure_status_channel_access(ctx):
                     return
                 if not self.tastytrade_client:
-                    await self._send_dm_or_warn(ctx, 'TastyTrade client is not configured.')
+                    await self._send_dm_or_warn(
+                        ctx, "TastyTrade client is not configured."
+                    )
                     return
                 if not args:
                     summary = await self._fetch_tastytrade_summary()
                     if summary is None:
-                        await self._send_dm_or_warn(ctx, 'Unable to fetch TastyTrade summary.')
+                        await self._send_dm_or_warn(
+                            ctx, "Unable to fetch TastyTrade summary."
+                        )
                         return
                     message = self.format_tastytrade_summary(summary)
                     await self._send_dm_or_warn(ctx, message)
                     return
                 subcommand = args[0].lower()
-                if subcommand == 'status':
+                if subcommand == "status":
                     overview = await self._fetch_tastytrade_overview()
                     if overview is None:
-                        await self._send_dm_or_warn(ctx, 'Unable to fetch TastyTrade overview.')
+                        await self._send_dm_or_warn(
+                            ctx, "Unable to fetch TastyTrade overview."
+                        )
                         return
                     message = self.format_tastytrade_overview(overview)
                     await self._send_dm_or_warn(ctx, message)
                     return
-                if subcommand == 'account' and len(args) >= 2:
+                if subcommand == "account" and len(args) >= 2:
                     target = args[1]
-                    success = await asyncio.to_thread(self.tastytrade_client.set_active_account, target)
+                    success = await asyncio.to_thread(
+                        self.tastytrade_client.set_active_account, target
+                    )
                     dm_msg = (
                         f"Active TastyTrade account set to {target}."
-                        if success else f"Account {target} not found."
+                        if success
+                        else f"Account {target} not found."
                     )
                     await self._send_dm_or_warn(ctx, dm_msg)
                     return
-                if subcommand == 'help':
+                if subcommand == "help":
                     # Contextual help support: `!tt help cancel` gives targeted info
                     if len(args) >= 2:
                         topic = args[1].lower()
-                        if topic == 'order' or topic == 'orders':
-                            await self._send_dm_or_warn(ctx, '`!tt orders` - list open orders; `!tt order <order_id>` - show details; `!tt cancel <order_id>` - cancel the order; `!tt replace <order_id> <price>` - replace order price')
+                        if topic == "order" or topic == "orders":
+                            await self._send_dm_or_warn(
+                                ctx,
+                                "`!tt orders` - list open orders; `!tt order <order_id>` - show details; `!tt cancel <order_id>` - cancel the order; `!tt replace <order_id> <price>` - replace order price",
+                            )
                             return
-                        if topic == 'trade' or topic in ('buy', 'sell'):
-                            await self._send_dm_or_warn(ctx, 'Trading: `!tt buy <symbol> <tp_ticks> [qty] [live]` - market+TP; `!tt sell ...`')
+                        if topic == "trade" or topic in ("buy", "sell"):
+                            await self._send_dm_or_warn(
+                                ctx,
+                                "Trading: `!tt buy <symbol> <tp_ticks> [qty] [live]` - market+TP; `!tt sell ...`",
+                            )
                             return
-                        if topic == 'auth':
-                            await self._send_dm_or_warn(ctx, 'Auth: `!tt auth status|refresh <token>|dryrun <true|false>|sandbox <true|false>|default set <account_id>`')
+                        if topic == "auth":
+                            await self._send_dm_or_warn(
+                                ctx,
+                                "Auth: `!tt auth status|refresh <token>|dryrun <true|false>|sandbox <true|false>|default set <account_id>`",
+                            )
                             return
                     help_msg = (
                         "**TastyTrade Bot Commands (!tt):**\n\n"
@@ -261,101 +380,142 @@ class TradeBot(commands.Bot):
                     await self._send_dm_or_warn(ctx, help_msg)
                     return
                 # Trading commands
-                if subcommand in ['b', 's', 'buy', 'sell'] and len(args) >= 3:
-                    action = 'BUY' if subcommand in ['b', 'buy'] else 'SELL'
+                if subcommand in ["b", "s", "buy", "sell"] and len(args) >= 3:
+                    action = "BUY" if subcommand in ["b", "buy"] else "SELL"
                     symbol = args[1].upper()
                     try:
                         tp_ticks = float(args[2])
                     except ValueError:
-                        await self._send_dm_or_warn(ctx, 'Invalid TP ticks.')
+                        await self._send_dm_or_warn(ctx, "Invalid TP ticks.")
                         return
                     quantity = 1
                     if len(args) >= 4:
                         try:
                             quantity = int(args[3])
                         except ValueError:
-                            await self._send_dm_or_warn(ctx, 'Invalid quantity.')
+                            await self._send_dm_or_warn(ctx, "Invalid quantity.")
                             return
-                    # dry-run flag: optional 5th arg 'live' to execute against production
+                    # dry-run flag: optional 5th arg 'live' to execute against production.
+                    # Default to configured client setting (from .env) to avoid forcing manual flag.
                     dry_run = True
                     if len(args) >= 5:
-                        if args[4].lower() in ('live', 'execute', 'send'):
+                        if args[4].lower() in ("live", "execute", "send"):
                             dry_run = False
-                        elif args[4].lower() in ('dry', 'dryrun', 'test'):
+                        elif args[4].lower() in ("dry", "dryrun", "test"):
+                            dry_run = True
+                    else:
+                        # Default to client-level dry_run if client configured
+                        try:
+                            dry_run = bool(
+                                getattr(self.tastytrade_client, "_dry_run", True)
+                            )
+                        except Exception:
                             dry_run = True
                     market_price = None
                     # Determine whether to try and fetch a market snapshot for futures
                     # Accept leading slash (/NQZ5), product code (NQ), or explicit contract (NQZ25)
                     try:
                         import re
+
                         lookup_feed = None
-                        s_up = symbol.upper() if symbol else ''
+                        s_up = symbol.upper() if symbol else ""
                         # Explicit product mapping
                         if s_up in self.ticker_aliases:
                             lookup_feed = self.ticker_aliases.get(s_up)
                         # Leading slash symbol like '/NQZ5' or '/NQZ25:XCME'
-                        elif s_up.startswith('/'):
-                            prod_match = re.match(r'^/((?P<prod>NQ|MNQ|ES|MES|RTY|YM))', s_up)
+                        elif s_up.startswith("/"):
+                            prod_match = re.match(
+                                r"^/((?P<prod>NQ|MNQ|ES|MES|RTY|YM))", s_up
+                            )
                             if prod_match:
-                                lookup_feed = self.ticker_aliases.get(prod_match.group('prod'))
+                                lookup_feed = self.ticker_aliases.get(
+                                    prod_match.group("prod")
+                                )
                         # Explicit contract 'NQZ25' or 'NQZ25:XCME'
                         else:
-                            prod_match = re.match(r'^(?P<prod>NQ|MNQ|ES|MES|RTY|YM)', s_up)
+                            prod_match = re.match(
+                                r"^(?P<prod>NQ|MNQ|ES|MES|RTY|YM)", s_up
+                            )
                             if prod_match:
-                                lookup_feed = self.ticker_aliases.get(prod_match.group('prod'))
+                                lookup_feed = self.ticker_aliases.get(
+                                    prod_match.group("prod")
+                                )
 
                         if lookup_feed:
                             snap = await self.get_gex_snapshot(lookup_feed)
-                            if snap and isinstance(snap.get('spot_price'), (int, float)):
-                                market_price = float(snap.get('spot_price'))
+                            if snap and isinstance(
+                                snap.get("spot_price"), (int, float)
+                            ):
+                                market_price = float(snap.get("spot_price"))
                     except Exception:
                         market_price = None
                     try:
                         # Pass dry_run as keyword to avoid being treated as tick_size
                         result = await asyncio.to_thread(
                             self.tastytrade_client.place_market_order_with_tp,
-                            symbol, action, quantity, tp_ticks,
+                            symbol,
+                            action,
+                            quantity,
+                            tp_ticks,
                             dry_run=dry_run,
-                                market_price=market_price,
+                            market_price=market_price,
                         )
                         await self._send_dm_or_warn(ctx, result)
+                    except TastytradeAuthError as e:
+                        await self._send_dm_or_warn(ctx, f"TastyTrade auth invalid: {e}. Update the refresh token or run `!tt auth refresh <token>`.")
                     except Exception as e:
-                        await self._send_dm_or_warn(ctx, f'Order failed: {e}')
+                        await self._send_dm_or_warn(ctx, f"Order failed: {e}")
                     return
-                if subcommand == 'cancel' and len(args) >= 2:
+                if subcommand == "cancel" and len(args) >= 2:
                     if not await self._ensure_privileged(ctx):
                         return
                     order_id = args[1]
                     try:
-                        resp = await asyncio.to_thread(self.tastytrade_client.cancel_order, order_id)
-                        await self._send_dm_or_warn(ctx, f'Cancel successful: {resp}')
+                        resp = await asyncio.to_thread(
+                            self.tastytrade_client.cancel_order, order_id
+                        )
+                        await self._send_dm_or_warn(ctx, f"Cancel successful: {resp}")
+                    except TastytradeAuthError as exc:
+                        await self._send_dm_or_warn(ctx, f"TastyTrade auth invalid: {exc}")
                     except Exception as exc:
-                        await self._send_dm_or_warn(ctx, f'Failed to cancel: {exc}')
+                        await self._send_dm_or_warn(ctx, f"Failed to cancel: {exc}")
                     return
-                if subcommand == 'replace' and len(args) >= 3:
+                if subcommand == "replace" and len(args) >= 3:
                     if not await self._ensure_privileged(ctx):
                         return
                     order_id = args[1]
                     try:
                         price = float(args[2])
                     except Exception:
-                        await self._send_dm_or_warn(ctx, 'Invalid price for replace')
+                        await self._send_dm_or_warn(ctx, "Invalid price for replace")
                         return
                     try:
-                        result = await asyncio.to_thread(self.tastytrade_client.replace_order, order_id, price=price)
-                        await self._send_dm_or_warn(ctx, f'Replaced order: {result}')
+                        result = await asyncio.to_thread(
+                            self.tastytrade_client.replace_order, order_id, price=price
+                        )
+                        await self._send_dm_or_warn(ctx, f"Replaced order: {result}")
+                    except TastytradeAuthError as exc:
+                        await self._send_dm_or_warn(ctx, f"TastyTrade auth invalid: {exc}")
                     except Exception as exc:
-                        await self._send_dm_or_warn(ctx, f'Failed to replace order: {exc}')
+                        await self._send_dm_or_warn(
+                            ctx, f"Failed to replace order: {exc}"
+                        )
                     return
-                if subcommand == 'order' and len(args) >= 2:
+                if subcommand == "order" and len(args) >= 2:
                     order_id = args[1]
                     try:
-                        data = await asyncio.to_thread(self.tastytrade_client.get_order, order_id)
-                        await self._send_dm_or_warn(ctx, f'Order {order_id}: {data}')
+                        data = await asyncio.to_thread(
+                            self.tastytrade_client.get_order, order_id
+                        )
+                        await self._send_dm_or_warn(ctx, f"Order {order_id}: {data}")
+                    except TastytradeAuthError as exc:
+                        await self._send_dm_or_warn(ctx, f"TastyTrade auth invalid: {exc}")
                     except Exception as exc:
-                        await self._send_dm_or_warn(ctx, f'Failed to fetch order: {exc}')
+                        await self._send_dm_or_warn(
+                            ctx, f"Failed to fetch order: {exc}"
+                        )
                     return
-                if subcommand == 'close' and len(args) >= 2:
+                if subcommand == "close" and len(args) >= 2:
                     # close a position: close <symbol> [quantity]
                     if not await self._ensure_privileged(ctx):
                         return
@@ -365,47 +525,81 @@ class TradeBot(commands.Bot):
                         try:
                             qty = int(args[2])
                         except Exception:
-                            await self._send_dm_or_warn(ctx, 'Invalid quantity')
+                            await self._send_dm_or_warn(ctx, "Invalid quantity")
                             return
                     # Build an order opposite to current pos to close
                     # For simplicity, submit a market order in reverse direction
                     try:
                         # Determine direction based on current positions
-                        positions = await asyncio.to_thread(self.tastytrade_client.get_positions)
-                        pos_map = {p.get('symbol'): p for p in positions}
+                        positions = await asyncio.to_thread(
+                            self.tastytrade_client.get_positions
+                        )
+                        pos_map = {p.get("symbol"): p for p in positions}
                         sym = symbol.upper()
-                        pos = pos_map.get(sym) or pos_map.get(sym.lstrip('/'))
+                        pos = pos_map.get(sym) or pos_map.get(sym.lstrip("/"))
                         if not pos:
-                            await self._send_dm_or_warn(ctx, f'No position found for {symbol}')
+                            await self._send_dm_or_warn(
+                                ctx, f"No position found for {symbol}"
+                            )
                             return
-                        current_qty = int(pos.get('quantity') or 0)
+                        current_qty = int(pos.get("quantity") or 0)
                         if current_qty == 0:
-                            await self._send_dm_or_warn(ctx, f'No position to close for {symbol}')
+                            await self._send_dm_or_warn(
+                                ctx, f"No position to close for {symbol}"
+                            )
                             return
                         # Determine action to close: if position is positive (long), sell to close
-                        action = 'SELL' if current_qty > 0 else 'BUY'
-                        result = await asyncio.to_thread(self.tastytrade_client.place_market_order_with_tp, symbol, action, qty, 0, dry_run=dry_run)
-                        await self._send_dm_or_warn(ctx, result)
+                        action = "SELL" if current_qty > 0 else "BUY"
+                        try:
+                            result = await asyncio.to_thread(
+                                self.tastytrade_client.place_market_order_with_tp,
+                                symbol,
+                                action,
+                                qty,
+                                0,
+                                dry_run=dry_run,
+                            )
+                            await self._send_dm_or_warn(ctx, result)
+                        except TastytradeAuthError as exc:
+                            await self._send_dm_or_warn(ctx, f"TastyTrade auth invalid: {exc}. Update the refresh token or run `!tt auth refresh <token>`.")
+                        except Exception as exc:
+                            await self._send_dm_or_warn(ctx, f"Failed to close position: {exc}")
                     except Exception as exc:
-                        await self._send_dm_or_warn(ctx, f'Failed to close position: {exc}')
+                        await self._send_dm_or_warn(
+                            ctx, f"Failed to close position: {exc}"
+                        )
                     return
-                if subcommand == 'accounts':
-                    accounts = await asyncio.to_thread(self.tastytrade_client.get_accounts)
+                if subcommand == "accounts":
+                    accounts = await asyncio.to_thread(
+                        self.tastytrade_client.get_accounts
+                    )
                     if accounts:
-                        msg = "**TastyTrade Accounts:**\n" + "\n".join([f"• {acc.get('account-number', 'N/A')}: {acc.get('description', 'N/A')}" for acc in accounts])
+                        msg = "**TastyTrade Accounts:**\n" + "\n".join(
+                            [
+                                f"• {acc.get('account-number', 'N/A')}: {acc.get('description', 'N/A')}"
+                                for acc in accounts
+                            ]
+                        )
                     else:
                         msg = "No accounts found."
                     await self._send_dm_or_warn(ctx, msg)
                     return
-                if subcommand == 'pos':
-                    positions = await asyncio.to_thread(self.tastytrade_client.get_positions)
+                if subcommand == "pos":
+                    positions = await asyncio.to_thread(
+                        self.tastytrade_client.get_positions
+                    )
                     if positions:
-                        msg = "**Positions:**\n" + "\n".join([f"• {pos.get('symbol', 'N/A')}: {pos.get('quantity', 0)} @ {pos.get('average-price', 'N/A')}" for pos in positions])
+                        msg = "**Positions:**\n" + "\n".join(
+                            [
+                                f"• {pos.get('symbol', 'N/A')}: {pos.get('quantity', 0)} @ {pos.get('average-price', 'N/A')}"
+                                for pos in positions
+                            ]
+                        )
                     else:
                         msg = "No positions."
                     await self._send_dm_or_warn(ctx, msg)
                     return
-                if subcommand == 'future' or subcommand == 'futures':
+                if subcommand == "future" or subcommand == "futures":
                     # Allow optional product codes after the subcommand, e.g., `!tt futures NQ ES`
                     product_codes = []
                     if len(args) >= 2:
@@ -413,25 +607,43 @@ class TradeBot(commands.Bot):
                             if isinstance(token, str) and token.strip():
                                 t = token.strip().upper()
                                 # Accept product code tokens like 'NQ' or 'ES'
-                                if t in ('NQ', 'MNQ', 'ES', 'MES', 'RTY', 'YM'):
+                                if t in ("NQ", "MNQ", "ES", "MES", "RTY", "YM"):
                                     product_codes.append(t)
                     try:
                         if product_codes:
-                            futures = await asyncio.to_thread(self.tastytrade_client.list_futures, product_codes)
+                            futures = await asyncio.to_thread(
+                                self.tastytrade_client.list_futures, product_codes
+                            )
                         else:
-                            futures = await asyncio.to_thread(self.tastytrade_client.get_futures_list)
+                            futures = await asyncio.to_thread(
+                                self.tastytrade_client.get_futures_list
+                            )
                         if not futures:
-                            msg = 'No futures found.'
+                            msg = "No futures found."
                         else:
                             # Format each contract with symbol, streamer_symbol, exp date and tradeable flag
                             lines = []
                             for fut in futures:
-                                sym = fut.get('symbol') or fut.get('streamer_symbol') or 'N/A'
-                                sstream = fut.get('streamer_symbol') or ''
-                                exp = fut.get('expiration_date') or ''
-                                tradeable = fut.get('is_tradeable')
-                                trade_txt = 'tradeable' if tradeable else 'not tradeable' if tradeable is not None else ''
-                                desc = fut.get('description') or fut.get('product_code') or ''
+                                sym = (
+                                    fut.get("symbol")
+                                    or fut.get("streamer_symbol")
+                                    or "N/A"
+                                )
+                                sstream = fut.get("streamer_symbol") or ""
+                                exp = fut.get("expiration_date") or ""
+                                tradeable = fut.get("is_tradeable")
+                                trade_txt = (
+                                    "tradeable"
+                                    if tradeable
+                                    else "not tradeable"
+                                    if tradeable is not None
+                                    else ""
+                                )
+                                desc = (
+                                    fut.get("description")
+                                    or fut.get("product_code")
+                                    or ""
+                                )
                                 parts = [f"{sym}"]
                                 if sstream:
                                     parts.append(f"({sstream})")
@@ -441,31 +653,44 @@ class TradeBot(commands.Bot):
                                     parts.append(trade_txt)
                                 if desc:
                                     parts.append(f"- {desc}")
-                                lines.append(' '.join(parts))
-                            msg = "**Futures:**\n" + "\n".join([f"• {l}" for l in lines])
+                                lines.append(" ".join(parts))
+                            msg = "**Futures:**\n" + "\n".join(
+                                [f"• {line}" for line in lines]
+                            )
                     except Exception as exc:
                         msg = f"Failed to fetch futures list: {exc}"
                     await self._send_dm_or_warn(ctx, msg)
                     return
-                if subcommand == 'auth' and len(args) >= 2:
+                if subcommand == "auth" and len(args) >= 2:
                     # auth subcommands: refresh, status, dryrun, default
                     act = args[1].lower()
-                    if act == 'refresh' and len(args) >= 3:
+                    if act == "refresh" and len(args) >= 3:
                         if not await self._ensure_privileged(ctx):
                             return
                         new_token = args[2]
                         try:
-                            await asyncio.to_thread(self.tastytrade_client.set_refresh_token, new_token)
-                            await self._send_dm_or_warn(ctx, 'TastyTrade refresh token updated; session reinitialized.')
+                            await asyncio.to_thread(
+                                self.tastytrade_client.set_refresh_token, new_token
+                            )
+                            await self._send_dm_or_warn(
+                                ctx,
+                                "TastyTrade refresh token updated; session reinitialized.",
+                            )
                         except Exception as exc:
-                            await self._send_dm_or_warn(ctx, f'Failed to update refresh token: {exc}')
+                            await self._send_dm_or_warn(
+                                ctx, f"Failed to update refresh token: {exc}"
+                            )
                         return
-                    if act == 'status':
+                    if act == "status":
                         if not await self._ensure_privileged(ctx):
                             return
-                        status = await asyncio.to_thread(self.tastytrade_client.get_auth_status)
+                        status = await asyncio.to_thread(
+                            self.tastytrade_client.get_auth_status
+                        )
                         if not isinstance(status, dict):
-                            await self._send_dm_or_warn(ctx, 'Unable to fetch auth status')
+                            await self._send_dm_or_warn(
+                                ctx, "Unable to fetch auth status"
+                            )
                             return
                         msg = (
                             f"TastyTrade Auth Status:\n"
@@ -475,57 +700,88 @@ class TradeBot(commands.Bot):
                             f"Use Sandbox: {status.get('use_sandbox')}\n"
                             f"Dry Run: {status.get('dry_run')}\n"
                         )
-                        err = status.get('error')
+                        err = status.get("error")
                         if err:
                             msg += f"Error: {err}\n"
                         await self._send_dm_or_warn(ctx, msg)
                         return
-                    if act == 'dryrun' and len(args) >= 3:
+                    if act == "dryrun" and len(args) >= 3:
                         if not await self._ensure_privileged(ctx):
                             return
                         val = args[2].lower()
-                        flag = val in ('true', '1', 'yes', 'on', 'enable', 'enabled')
-                        await asyncio.to_thread(self.tastytrade_client.set_dry_run, flag)
-                        await self._send_dm_or_warn(ctx, f"Set TastyTrade dry_run = {flag}")
+                        flag = val in ("true", "1", "yes", "on", "enable", "enabled")
+                        await asyncio.to_thread(
+                            self.tastytrade_client.set_dry_run, flag
+                        )
+                        await self._send_dm_or_warn(
+                            ctx, f"Set TastyTrade dry_run = {flag}"
+                        )
                         return
-                    if act == 'default' and len(args) >= 4 and args[2].lower() == 'set':
+                    if act == "default" and len(args) >= 4 and args[2].lower() == "set":
                         if not await self._ensure_privileged(ctx):
                             return
                         target = args[3]
-                        success = await asyncio.to_thread(self.tastytrade_client.set_active_account, target)
-                        msg = f"Active account set to {target}" if success else f"Failed to set active account to {target}"
+                        success = await asyncio.to_thread(
+                            self.tastytrade_client.set_active_account, target
+                        )
+                        msg = (
+                            f"Active account set to {target}"
+                            if success
+                            else f"Failed to set active account to {target}"
+                        )
                         await self._send_dm_or_warn(ctx, msg)
                         return
-                    if act == 'get-refresh':
+                    if act == "get-refresh":
                         if not await self._ensure_privileged(ctx):
                             return
-                        await self._send_dm_or_warn(ctx, 'To retrieve a refresh token, run `python scripts/get_tastytrade_refresh_token.py --sandbox` locally and update your .env or paste token here using `!tt auth refresh <token>`.')
+                        await self._send_dm_or_warn(
+                            ctx,
+                            "To retrieve a refresh token, run `python scripts/get_tastytrade_refresh_token.py --sandbox` locally and update your .env or paste token here using `!tt auth refresh <token>`.",
+                        )
                         return
                     # !tt auth refresh <token>
                     if not await self._ensure_privileged(ctx):
                         return
                     new_token = args[2]
                     try:
-                        await asyncio.to_thread(self.tastytrade_client.set_refresh_token, new_token)
-                        await self._send_dm_or_warn(ctx, 'TastyTrade refresh token updated; session reinitialized.')
+                        await asyncio.to_thread(
+                            self.tastytrade_client.set_refresh_token, new_token
+                        )
+                        await self._send_dm_or_warn(
+                            ctx,
+                            "TastyTrade refresh token updated; session reinitialized.",
+                        )
                     except Exception as exc:
-                        await self._send_dm_or_warn(ctx, f'Failed to update refresh token: {exc}')
+                        await self._send_dm_or_warn(
+                            ctx, f"Failed to update refresh token: {exc}"
+                        )
                     return
-                    if act == 'sandbox' and len(args) >= 3:
+                    if act == "sandbox" and len(args) >= 3:
                         if not await self._ensure_privileged(ctx):
                             return
                         val = args[2].lower()
-                        flag = val in ('true', '1', 'yes', 'on', 'enable', 'enabled')
+                        flag = val in ("true", "1", "yes", "on", "enable", "enabled")
                         try:
-                            await asyncio.to_thread(self.tastytrade_client.set_use_sandbox, flag)
-                            await self._send_dm_or_warn(ctx, f"Set TastyTrade sandbox mode = {flag}")
+                            await asyncio.to_thread(
+                                self.tastytrade_client.set_use_sandbox, flag
+                            )
+                            await self._send_dm_or_warn(
+                                ctx, f"Set TastyTrade sandbox mode = {flag}"
+                            )
                         except Exception as exc:
-                            await self._send_dm_or_warn(ctx, f"Failed to set sandbox mode: {exc}")
+                            await self._send_dm_or_warn(
+                                ctx, f"Failed to set sandbox mode: {exc}"
+                            )
                         return
-                if subcommand in ('orders', 'list-orders', 'list_orders', 'list'):
+                if subcommand in ("orders", "list-orders", "list_orders", "list"):
                     orders = await asyncio.to_thread(self.tastytrade_client.get_orders)
                     if orders:
-                        msg = "**Orders:**\n" + "\n".join([f"• {ord.get('id', 'N/A')}: {ord.get('action', 'N/A')} {ord.get('quantity', 0)} {ord.get('symbol', 'N/A')} @ {ord.get('price', 'N/A')}" for ord in orders])
+                        msg = "**Orders:**\n" + "\n".join(
+                            [
+                                f"• {ord.get('id', 'N/A')}: {ord.get('action', 'N/A')} {ord.get('quantity', 0)} {ord.get('symbol', 'N/A')} @ {ord.get('price', 'N/A')}"
+                                for ord in orders
+                            ]
+                        )
                     else:
                         msg = "No orders."
                     await self._send_dm_or_warn(ctx, msg)
@@ -533,42 +789,82 @@ class TradeBot(commands.Bot):
                 # Default to summary
                 summary = await self._fetch_tastytrade_summary()
                 if summary is None:
-                    await self._send_dm_or_warn(ctx, 'Unable to fetch TastyTrade summary.')
+                    await self._send_dm_or_warn(
+                        ctx, "Unable to fetch TastyTrade summary."
+                    )
                     return
                 message = self.format_tastytrade_summary(summary)
                 await self._send_dm_or_warn(ctx, message)
 
-            self.add_command(commands.Command(_ping_cmd, name='ping'))
-            self.add_command(commands.Command(_gex_cmd, name='gex'))
-            self.add_command(commands.Command(_status_cmd, name='status'))
-            self.add_command(commands.Command(_tastytrade_cmd, name='tastytrade'))
-            self.add_command(commands.Command(_market_cmd, name='market'))
-            self.add_command(commands.Command(_uwalerts_cmd, name='uw'))
-            self.add_command(commands.Command(_tt_cmd, name='tt'))
+            self.add_command(commands.Command(_ping_cmd, name="ping"))
+            self.add_command(commands.Command(_gex_cmd, name="gex"))
+            self.add_command(commands.Command(_status_cmd, name="status"))
+            self.add_command(commands.Command(_tastytrade_cmd, name="tastytrade"))
+            self.add_command(commands.Command(_market_cmd, name="market"))
+            self.add_command(commands.Command(_uwalerts_cmd, name="uw"))
+            self.add_command(commands.Command(_tt_cmd, name="tt"))
         except Exception as e:
             # If registration fails (e.g., during import-time tests), print error for debugging
             print(f"Command registration failed: {e}")
 
     async def on_ready(self):
-        print(f'Bot logged in as {self.user}')
+        print(f"Bot logged in as {self.user}")
         if not self._uw_listener_task:
             self._uw_listener_stop.clear()
-            self._uw_listener_task = asyncio.create_task(self._listen_option_trade_stream())
+            self._uw_listener_task = asyncio.create_task(
+                self._listen_option_trade_stream()
+            )
         if self._should_run_gex_feed() and not self._gex_feed_task:
             self._gex_feed_stop.clear()
             self._gex_feed_task = asyncio.create_task(self._run_gex_feed_loop())
-            print('GEX feed loop started')
+            print("GEX feed loop started")
 
     async def on_message(self, message):
         if message.author == self.user:
             return
         if not self._is_allowed_channel(message.channel):
             return
+
+        # Check for alert messages
+        if message.content.startswith("Alert"):
+            await self._process_alert_message(message)
+
         await super().on_message(message)
+
+    async def _process_alert_message(self, message):
+        """Process an alert message from Discord."""
+        print(f"Processing alert message: {message.content}")
+
+        # Check authorization for automated trades
+        from services.auth_service import AuthService
+
+        if not AuthService.verify_user_for_automated_trades(str(message.author.id)):
+            print(f"User {message.author.id} not authorized for automated trades")
+            await message.channel.send(
+                "You are not authorized to send automated trade alerts."
+            )
+            return
+
+        # Import here to avoid circular imports
+        from services.automated_options_service import AutomatedOptionsService
+
+        result = await AutomatedOptionsService().process_alert(
+            message.content, str(message.channel.id), str(message.author.id)
+        )
+        if result:
+            print(f"Alert processed successfully: {result}")
+            # If result indicates an auth error, surface the specific message
+            if isinstance(result, str) and 'authentication invalid' in result.lower():
+                await message.channel.send(result)
+            else:
+                await message.channel.send(f"Automated order placed: {result}")
+        else:
+            print("Alert processing returned None")
+            await message.channel.send("Alert processing failed or no action taken.")
 
     async def get_context(self, origin, *, cls=commands.Context):
         ctx = await super().get_context(origin, cls=cls)
-        if ctx and not self._is_allowed_channel(getattr(ctx, 'channel', None)):
+        if ctx and not self._is_allowed_channel(getattr(ctx, "channel", None)):
             ctx.command = None
         return ctx
 
@@ -590,7 +886,7 @@ class TradeBot(commands.Bot):
         await super().close()
 
     async def ping(self, ctx):
-        await ctx.send('Pong!')
+        await ctx.send("Pong!")
 
     def _should_run_gex_feed(self) -> bool:
         if not self.gex_feed_enabled:
@@ -609,10 +905,16 @@ class TradeBot(commands.Bot):
         if self._gex_feed_backoff_seconds <= 0:
             self._gex_feed_backoff_seconds = self.gex_feed_backoff_base_seconds
         else:
-            self._gex_feed_backoff_seconds = min(self.gex_feed_backoff_max_seconds, self._gex_feed_backoff_seconds * 2)
+            self._gex_feed_backoff_seconds = min(
+                self.gex_feed_backoff_max_seconds, self._gex_feed_backoff_seconds * 2
+            )
         block_for = self._gex_feed_backoff_seconds
-        self._gex_feed_block_until = datetime.now(timezone.utc) + timedelta(seconds=block_for)
-        print(f"GEX feed rate-limited (HTTP {status}); backing off for {block_for:.1f}s")
+        self._gex_feed_block_until = datetime.now(timezone.utc) + timedelta(
+            seconds=block_for
+        )
+        print(
+            f"GEX feed rate-limited (HTTP {status}); backing off for {block_for:.1f}s"
+        )
 
     def _is_feed_blocked(self) -> bool:
         if not self._gex_feed_block_until:
@@ -620,7 +922,7 @@ class TradeBot(commands.Bot):
         return datetime.now(timezone.utc) < self._gex_feed_block_until
 
     def _handle_feed_http_exception(self, exc: discord.HTTPException) -> bool:
-        status = getattr(exc, 'status', None)
+        status = getattr(exc, "status", None)
         if status in (427, 429):
             self._record_feed_rate_limit(status)
             return True
@@ -629,30 +931,34 @@ class TradeBot(commands.Bot):
     async def _sleep_between_feed_updates(self) -> None:
         delay = self.gex_feed_update_seconds
         if self._is_feed_blocked():
-            remaining = (self._gex_feed_block_until - datetime.now(timezone.utc)).total_seconds()
+            remaining = (
+                self._gex_feed_block_until - datetime.now(timezone.utc)
+            ).total_seconds()
             delay = max(delay, remaining)
         elif self._gex_feed_backoff_seconds:
             delay = max(delay, self._gex_feed_backoff_seconds)
         await asyncio.sleep(max(0.05, delay))
 
     async def _get_supported_tickers(self) -> dict:
-        cache_key = 'gexbot:tickers:categories'
+        cache_key = "gexbot:tickers:categories"
         try:
             raw = await asyncio.to_thread(self.redis_client.get, cache_key)
             if raw:
                 if isinstance(raw, (bytes, bytearray)):
-                    raw = raw.decode('utf-8')
+                    raw = raw.decode("utf-8")
                 return json.loads(raw)
         except Exception:
             pass
 
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get('https://api.gexbot.com/tickers')
+                resp = await client.get("https://api.gexbot.com/tickers")
                 data = resp.json()
                 if resp.status_code == 200 and isinstance(data, dict):
                     try:
-                        await asyncio.to_thread(self.redis_client.setex, cache_key, 86400, json.dumps(data))
+                        await asyncio.to_thread(
+                            self.redis_client.setex, cache_key, 86400, json.dumps(data)
+                        )
                     except Exception:
                         pass
                     return data
@@ -660,10 +966,12 @@ class TradeBot(commands.Bot):
             pass
         return {}
 
-    def _format_supported_tickers_message(self, tickers_map: dict, alias_map: Optional[dict] = None) -> str:
+    def _format_supported_tickers_message(
+        self, tickers_map: dict, alias_map: Optional[dict] = None
+    ) -> str:
         if not isinstance(tickers_map, dict) or not tickers_map:
-            return 'Unsupported symbol. Unable to fetch supported symbol list.'
-        msg = 'Unsupported symbol. Supported tickers by category:\n'
+            return "Unsupported symbol. Unable to fetch supported symbol list."
+        msg = "Unsupported symbol. Supported tickers by category:\n"
         for category, symbols in tickers_map.items():
             if isinstance(symbols, list) and symbols:
                 msg += f"**{category.title()}**: {', '.join(sorted(symbols))}\n"
@@ -672,7 +980,7 @@ class TradeBot(commands.Bot):
             for key, value in alias_map.items():
                 alias_texts.append(f"{key}/{key.lower()} -> {value}")
             if alias_texts:
-                msg += '\nAliases: ' + '; '.join(alias_texts)
+                msg += "\nAliases: " + "; ".join(alias_texts)
         return msg
 
     # Dynamic enrollment removed from bot; no write path for gexbot:symbols:dynamic
@@ -680,7 +988,7 @@ class TradeBot(commands.Bot):
     async def _run_gex_feed_loop(self):
         try:
             while not self._gex_feed_stop.is_set():
-                print('GEX feed loop tick')
+                print("GEX feed loop tick")
                 if not self._should_run_gex_feed():
                     await asyncio.sleep(60)
                     continue
@@ -692,7 +1000,9 @@ class TradeBot(commands.Bot):
                     session_end = now + timedelta(hours=8)
                 else:
                     if now >= end:
-                        await self._sleep_with_stop((start + timedelta(days=1) - now).total_seconds())
+                        await self._sleep_with_stop(
+                            (start + timedelta(days=1) - now).total_seconds()
+                        )
                         continue
                     if now < start:
                         await self._sleep_with_stop((start - now).total_seconds())
@@ -725,19 +1035,21 @@ class TradeBot(commands.Bot):
                 except Exception as exc:
                     print(f"Failed to fetch channel {cid}: {exc}")
                     continue
-            if hasattr(channel, 'send'):
+            if hasattr(channel, "send"):
                 channels.append(channel)
         if not channels:
             print(f"GEX feed: no channels resolved from IDs {ids}")
         return channels
 
-    async def _run_gex_feed_session(self, channels: List[discord.abc.Messageable], session_end: datetime) -> None:
+    async def _run_gex_feed_session(
+        self, channels: List[discord.abc.Messageable], session_end: datetime
+    ) -> None:
         tracker = RollingWindowTracker(window_seconds=self.gex_feed_window_seconds)
         messages: Dict[int, discord.Message] = {}
         next_refresh = self._next_refresh_boundary(datetime.now(self.display_zone))
         # Buffer aggregation state so we only send one message per aggregation window
         pending_content: Optional[str] = None
-        pending_delta_map: Optional[Dict[str, 'MetricSnapshot']] = None
+        pending_delta_map: Optional[Dict[str, "MetricSnapshot"]] = None
         pending_first_ts: Optional[datetime] = None
         while not self._gex_feed_stop.is_set():
             now = datetime.now(self.display_zone)
@@ -749,7 +1061,7 @@ class TradeBot(commands.Bot):
             # Prefer polling canonical Redis snapshot keys for the feed to avoid stale cache race conditions
             data = await self.get_gex_snapshot(self.gex_feed_symbol)
             if not data:
-                await self._gex_feed_metrics.record_error(now, reason='no_data')
+                await self._gex_feed_metrics.record_error(now, reason="no_data")
                 await self._sleep_between_feed_updates()
                 continue
             delta_map = self._build_feed_delta_map(tracker, data, now)
@@ -772,10 +1084,14 @@ class TradeBot(commands.Bot):
             if age >= effective_wait:
                 if not messages:
                     messages = await self._post_feed_messages(channels, pending_content)
-                    await self._gex_feed_metrics.record_update(now, pending_delta_map, refresh=True)
+                    await self._gex_feed_metrics.record_update(
+                        now, pending_delta_map, refresh=True
+                    )
                 else:
                     await self._edit_feed_messages(messages, pending_content)
-                    await self._gex_feed_metrics.record_update(now, pending_delta_map, refresh=False)
+                    await self._gex_feed_metrics.record_update(
+                        now, pending_delta_map, refresh=False
+                    )
                 # Clear buffer
                 pending_content = None
                 pending_delta_map = None
@@ -784,11 +1100,17 @@ class TradeBot(commands.Bot):
                 # Force immediate refresh; publish any pending content first
                 if pending_content:
                     if not messages:
-                        messages = await self._post_feed_messages(channels, pending_content)
-                        await self._gex_feed_metrics.record_update(now, pending_delta_map, refresh=True)
+                        messages = await self._post_feed_messages(
+                            channels, pending_content
+                        )
+                        await self._gex_feed_metrics.record_update(
+                            now, pending_delta_map, refresh=True
+                        )
                     else:
                         await self._edit_feed_messages(messages, pending_content)
-                        await self._gex_feed_metrics.record_update(now, pending_delta_map, refresh=False)
+                        await self._gex_feed_metrics.record_update(
+                            now, pending_delta_map, refresh=False
+                        )
                     pending_content = None
                     pending_delta_map = None
                     pending_first_ts = None
@@ -799,13 +1121,19 @@ class TradeBot(commands.Bot):
             await self._sleep_between_feed_updates()
 
     def _next_refresh_boundary(self, current: datetime) -> datetime:
-        minute_block = (current.minute // self.gex_feed_refresh_minutes) * self.gex_feed_refresh_minutes
-        boundary = current.replace(minute=minute_block, second=0, microsecond=0) + timedelta(minutes=self.gex_feed_refresh_minutes)
+        minute_block = (
+            current.minute // self.gex_feed_refresh_minutes
+        ) * self.gex_feed_refresh_minutes
+        boundary = current.replace(
+            minute=minute_block, second=0, microsecond=0
+        ) + timedelta(minutes=self.gex_feed_refresh_minutes)
         if boundary <= current:
             boundary += timedelta(minutes=self.gex_feed_refresh_minutes)
         return boundary
 
-    async def _post_feed_messages(self, channels: List[discord.abc.Messageable], content: str) -> Dict[int, discord.Message]:
+    async def _post_feed_messages(
+        self, channels: List[discord.abc.Messageable], content: str
+    ) -> Dict[int, discord.Message]:
         messages: Dict[int, discord.Message] = {}
         if self._is_feed_blocked():
             return messages
@@ -813,21 +1141,29 @@ class TradeBot(commands.Bot):
         for channel in channels:
             try:
                 msg = await channel.send(content)
-                print(f"GEX feed: posted new message to channel {getattr(channel, 'id', 'unknown')}")
+                print(
+                    f"GEX feed: posted new message to channel {getattr(channel, 'id', 'unknown')}"
+                )
             except discord.HTTPException as exc:
                 if self._handle_feed_http_exception(exc):
                     rate_limited = True
-                print(f"Failed to send GEX feed message to {getattr(channel, 'id', 'unknown')}: {exc}")
+                print(
+                    f"Failed to send GEX feed message to {getattr(channel, 'id', 'unknown')}: {exc}"
+                )
                 continue
             except Exception as exc:
-                print(f"Failed to send GEX feed message to {getattr(channel, 'id', 'unknown')}: {exc}")
+                print(
+                    f"Failed to send GEX feed message to {getattr(channel, 'id', 'unknown')}: {exc}"
+                )
                 continue
-            messages[getattr(channel, 'id', id(channel))] = msg
+            messages[getattr(channel, "id", id(channel))] = msg
         if not rate_limited:
             self._reset_feed_backoff()
         return messages
 
-    async def _edit_feed_messages(self, messages: Dict[int, discord.Message], content: str) -> None:
+    async def _edit_feed_messages(
+        self, messages: Dict[int, discord.Message], content: str
+    ) -> None:
         stale_ids = []
         if self._is_feed_blocked():
             return
@@ -860,17 +1196,29 @@ class TradeBot(commands.Bot):
             finally:
                 messages.pop(cid, None)
 
-    def _build_feed_delta_map(self, tracker: 'RollingWindowTracker', data: dict, now: datetime) -> Dict[str, 'MetricSnapshot']:
+    def _build_feed_delta_map(
+        self, tracker: "RollingWindowTracker", data: dict, now: datetime
+    ) -> Dict[str, "MetricSnapshot"]:
         mapping: Dict[str, MetricSnapshot] = {}
-        mapping['spot'] = tracker.update('spot', data.get('spot_price'), now)
-        mapping['zero_gamma'] = tracker.update('zero_gamma', data.get('zero_gamma'), now)
-        mapping['call_wall'] = tracker.update('call_wall', data.get('major_pos_vol'), now)
-        mapping['put_wall'] = tracker.update('put_wall', data.get('major_neg_vol'), now)
-        mapping['net_gex'] = tracker.update('net_gex', data.get('net_gex'), now)
-        mapping['scaled_gamma'] = tracker.update('scaled_gamma', data.get('sum_gex_oi'), now)
+        mapping["spot"] = tracker.update("spot", data.get("spot_price"), now)
+        mapping["zero_gamma"] = tracker.update(
+            "zero_gamma", data.get("zero_gamma"), now
+        )
+        mapping["call_wall"] = tracker.update(
+            "call_wall", data.get("major_pos_vol"), now
+        )
+        mapping["put_wall"] = tracker.update("put_wall", data.get("major_neg_vol"), now)
+        mapping["net_gex"] = tracker.update("net_gex", data.get("net_gex"), now)
+        mapping["scaled_gamma"] = tracker.update(
+            "scaled_gamma", data.get("sum_gex_oi"), now
+        )
         max_entry = self._extract_current_maxchange_entry(data)
-        max_delta = max_entry[1] if max_entry and isinstance(max_entry[1], (int, float)) else None
-        mapping['maxchange'] = tracker.update('maxchange', max_delta, now)
+        max_delta = (
+            max_entry[1]
+            if max_entry and isinstance(max_entry[1], (int, float))
+            else None
+        )
+        mapping["maxchange"] = tracker.update("maxchange", max_delta, now)
         return mapping
 
     async def gex(self, ctx, *args):
@@ -878,43 +1226,49 @@ class TradeBot(commands.Bot):
         symbol, show_full = self._resolve_gex_request(args)
         data = await self.get_gex_data(symbol)
         if data:
-            response = self.format_gex(data) if show_full else self.format_gex_short(data)
+            response = (
+                self.format_gex(data) if show_full else self.format_gex_short(data)
+            )
             await ctx.send(response)
         else:
-            await ctx.send('GEX data not available')
+            await ctx.send("GEX data not available")
 
     async def status(self, ctx):
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get('http://localhost:8877/status')
+                response = await client.get("http://localhost:8877/status")
                 if response.status_code == 200:
                     status_data = response.json()
                     # Format the status nicely
                     formatted = self.format_status(status_data)
                     await ctx.send(formatted)
                 else:
-                    await ctx.send(f'Failed to fetch status: {response.status_code}')
+                    await ctx.send(f"Failed to fetch status: {response.status_code}")
         except Exception as e:
-            await ctx.send(f'Error fetching status: {e}')
+            await ctx.send(f"Error fetching status: {e}")
 
     async def tastytrade(self, ctx):
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get('http://localhost:8877/status')
+                response = await client.get("http://localhost:8877/status")
                 if response.status_code == 200:
                     status_data = response.json()
-                    tt_status = status_data.get('tastytrade_streamer', {})
+                    tt_status = status_data.get("tastytrade_streamer", {})
                     formatted = "**TastyTrade Status:**\n"
                     formatted += f"Running: {tt_status.get('running', False)}\n"
                     formatted += f"Trade Samples: {tt_status.get('trade_samples', 0)}\n"
-                    formatted += f"Last Trade: {tt_status.get('last_trade_ts', 'N/A')}\n"
+                    formatted += (
+                        f"Last Trade: {tt_status.get('last_trade_ts', 'N/A')}\n"
+                    )
                     formatted += f"Depth Samples: {tt_status.get('depth_samples', 0)}\n"
-                    formatted += f"Last Depth: {tt_status.get('last_depth_ts', 'N/A')}\n"
+                    formatted += (
+                        f"Last Depth: {tt_status.get('last_depth_ts', 'N/A')}\n"
+                    )
                     await ctx.send(formatted)
                 else:
-                    await ctx.send(f'Failed to fetch status: {response.status_code}')
+                    await ctx.send(f"Failed to fetch status: {response.status_code}")
         except Exception as e:
-            await ctx.send(f'Error fetching TastyTrade status: {e}')
+            await ctx.send(f"Error fetching TastyTrade status: {e}")
 
     async def get_gex_data(self, symbol: str):
         """Async dual-source retrieval: Redis cache -> DuckDB -> GEXBot API fallback.
@@ -924,12 +1278,13 @@ class TradeBot(commands.Bot):
         - stale: 5-30
         - incomplete: >30
         """
-        display_symbol = (symbol or 'QQQ').upper()
+        display_symbol = (symbol or "QQQ").upper()
         ticker = self.ticker_aliases.get(display_symbol, display_symbol)
         # No transient cache key: use canonical snapshot key only
         snapshot_key = f"{self.redis_snapshot_prefix}{ticker.upper()}"
+
         async def finalize(data: dict) -> dict:
-            data.setdefault('display_symbol', display_symbol)
+            data.setdefault("display_symbol", display_symbol)
             # Only use snapshot_key for enrichment; transient cache key removed
             await self._populate_wall_ladders(data, ticker, None, snapshot_key)
             return data
@@ -941,16 +1296,23 @@ class TradeBot(commands.Bot):
                 normalized = self._normalize_snapshot_payload(snapshot, ticker)
                 if normalized:
                     now = datetime.now(timezone.utc)
-                    ts = normalized.get('timestamp') or now
+                    ts = normalized.get("timestamp") or now
                     if isinstance(ts, datetime):
-                        age = (now - (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc))).total_seconds()
+                        age = (
+                            now - (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc))
+                        ).total_seconds()
                     else:
                         age = 9999
-                    normalized['display_symbol'] = display_symbol
+                    normalized["display_symbol"] = display_symbol
                     if age <= 30:
-                        normalized['_freshness'] = 'current' if age <= 5 else 'stale'
-                        normalized['_source'] = 'redis-snapshot'
-                        await asyncio.to_thread(self.redis_client.setex, snapshot_key, 300, json.dumps(normalized, default=str))
+                        normalized["_freshness"] = "current" if age <= 5 else "stale"
+                        normalized["_source"] = "redis-snapshot"
+                        await asyncio.to_thread(
+                            self.redis_client.setex,
+                            snapshot_key,
+                            300,
+                            json.dumps(normalized, default=str),
+                        )
                         return await finalize(normalized)
         except Exception as e:
             print(f"Redis snapshot check failed: {e}")
@@ -964,35 +1326,58 @@ class TradeBot(commands.Bot):
                 normalized = self._normalize_snapshot_payload(snapshot, ticker)
                 if normalized:
                     now = datetime.now(timezone.utc)
-                    ts = normalized.get('timestamp') or now
+                    ts = normalized.get("timestamp") or now
                     if isinstance(ts, datetime):
-                        age = (now - (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc))).total_seconds()
+                        age = (
+                            now - (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc))
+                        ).total_seconds()
                     else:
                         age = 9999
-                    normalized['display_symbol'] = display_symbol
+                    normalized["display_symbol"] = display_symbol
                     if age <= 5:
-                        normalized['_freshness'] = 'current'
+                        normalized["_freshness"] = "current"
                         # snapshot returned from the pipeline; mark as redis snapshot
-                        normalized['_source'] = 'redis-snapshot'
-                        await asyncio.to_thread(self.redis_client.setex, snapshot_key, 300, json.dumps(normalized, default=str))
+                        normalized["_source"] = "redis-snapshot"
+                        await asyncio.to_thread(
+                            self.redis_client.setex,
+                            snapshot_key,
+                            300,
+                            json.dumps(normalized, default=str),
+                        )
                         return await finalize(normalized)
                     if age <= 30:
-                        normalized['_freshness'] = 'stale'
-                        normalized['_source'] = 'redis-snapshot'
-                        await asyncio.to_thread(self.redis_client.setex, snapshot_key, 300, json.dumps(normalized, default=str))
-                        asyncio.create_task(self._refresh_gex_from_api(ticker, snapshot_key, display_symbol))
+                        normalized["_freshness"] = "stale"
+                        normalized["_source"] = "redis-snapshot"
+                        await asyncio.to_thread(
+                            self.redis_client.setex,
+                            snapshot_key,
+                            300,
+                            json.dumps(normalized, default=str),
+                        )
+                        asyncio.create_task(
+                            self._refresh_gex_from_api(
+                                ticker, snapshot_key, display_symbol
+                            )
+                        )
                         return await finalize(normalized)
-                    normalized['_freshness'] = 'incomplete'
-                    normalized['_source'] = 'redis-snapshot'
-                    await asyncio.to_thread(self.redis_client.setex, snapshot_key, 300, json.dumps(normalized, default=str))
+                    normalized["_freshness"] = "incomplete"
+                    normalized["_source"] = "redis-snapshot"
+                    await asyncio.to_thread(
+                        self.redis_client.setex,
+                        snapshot_key,
+                        300,
+                        json.dumps(normalized, default=str),
+                    )
                     return await finalize(normalized)
         except Exception as e:
             print(f"Snapshot redis check failed for {snapshot_key}: {e}")
 
         # 2) Query local DuckDB snapshot before resorting to live API
         try:
+
             def query_db():
                 import duckdb
+
                 q = f"""
                 SELECT timestamp, ticker, spot_price, zero_gamma, net_gex,
                        sum_gex_vol, delta_risk_reversal, min_dte, sec_min_dte,
@@ -1031,55 +1416,71 @@ class TradeBot(commands.Bot):
             result = await asyncio.to_thread(query_db)
             if result:
                 columns = [
-                    'timestamp',
-                    'ticker',
-                    'spot_price',
-                    'zero_gamma',
-                    'net_gex',
-                    'sum_gex_vol',
-                    'delta_risk_reversal',
-                    'min_dte',
-                    'sec_min_dte',
-                    'major_pos_vol',
-                    'major_neg_vol',
-                    'major_pos_oi',
-                    'major_neg_oi',
-                    'sum_gex_oi',
-                    'max_priors',
+                    "timestamp",
+                    "ticker",
+                    "spot_price",
+                    "zero_gamma",
+                    "net_gex",
+                    "sum_gex_vol",
+                    "delta_risk_reversal",
+                    "min_dte",
+                    "sec_min_dte",
+                    "major_pos_vol",
+                    "major_neg_vol",
+                    "major_pos_oi",
+                    "major_neg_oi",
+                    "sum_gex_oi",
+                    "max_priors",
                 ]
                 data = dict(zip(columns, result))
-                data['display_symbol'] = display_symbol
-                data['_source'] = 'DB'
+                data["display_symbol"] = display_symbol
+                data["_source"] = "DB"
                 # Normalize timestamp
-                ts = data.get('timestamp')
+                ts = data.get("timestamp")
                 if isinstance(ts, str):
                     try:
-                        data['timestamp'] = datetime.fromisoformat(ts)
+                        data["timestamp"] = datetime.fromisoformat(ts)
                     except Exception:
-                        data['timestamp'] = datetime.fromtimestamp(float(ts)).astimezone(timezone.utc)
+                        data["timestamp"] = datetime.fromtimestamp(
+                            float(ts)
+                        ).astimezone(timezone.utc)
                 elif isinstance(ts, (int, float)):
-                    data['timestamp'] = datetime.fromtimestamp(float(ts)).astimezone(timezone.utc)
+                    data["timestamp"] = datetime.fromtimestamp(float(ts)).astimezone(
+                        timezone.utc
+                    )
 
                 # Parse max_priors
-                if isinstance(data.get('max_priors'), str):
+                if isinstance(data.get("max_priors"), str):
                     try:
-                        data['max_priors'] = json.loads(data['max_priors'])
+                        data["max_priors"] = json.loads(data["max_priors"])
                     except Exception:
-                        data['max_priors'] = []
+                        data["max_priors"] = []
 
                 # determine freshness
                 now = datetime.now(timezone.utc)
-                rec_ts = data.get('timestamp') or now
-                age = (now - (rec_ts if isinstance(rec_ts, datetime) and rec_ts.tzinfo else rec_ts.replace(tzinfo=timezone.utc))).total_seconds()
+                rec_ts = data.get("timestamp") or now
+                age = (
+                    now
+                    - (
+                        rec_ts
+                        if isinstance(rec_ts, datetime) and rec_ts.tzinfo
+                        else rec_ts.replace(tzinfo=timezone.utc)
+                    )
+                ).total_seconds()
                 if age <= 5:
-                    data['_freshness'] = 'current'
+                    data["_freshness"] = "current"
                 elif age <= 30:
-                    data['_freshness'] = 'stale'
+                    data["_freshness"] = "stale"
                 else:
-                    data['_freshness'] = 'incomplete'
+                    data["_freshness"] = "incomplete"
 
                 # cache result for future by writing canonical snapshot key
-                await asyncio.to_thread(self.redis_client.setex, snapshot_key, 300, json.dumps(data, default=str))
+                await asyncio.to_thread(
+                    self.redis_client.setex,
+                    snapshot_key,
+                    300,
+                    json.dumps(data, default=str),
+                )
                 return await finalize(data)
         except Exception as e:
             print(f"DuckDB query failed: {e}")
@@ -1090,11 +1491,16 @@ class TradeBot(commands.Bot):
                 return None
             api_data = await self._poll_gexbot_api(ticker)
             if api_data:
-                api_data['_freshness'] = 'current'
-                api_data['_source'] = 'API'
-                api_data['display_symbol'] = display_symbol
+                api_data["_freshness"] = "current"
+                api_data["_source"] = "API"
+                api_data["display_symbol"] = display_symbol
                 try:
-                    await asyncio.to_thread(self.redis_client.setex, snapshot_key, 300, json.dumps(api_data, default=str))
+                    await asyncio.to_thread(
+                        self.redis_client.setex,
+                        snapshot_key,
+                        300,
+                        json.dumps(api_data, default=str),
+                    )
                 except Exception:
                     pass
                 return await finalize(api_data)
@@ -1107,50 +1513,56 @@ class TradeBot(commands.Bot):
         """Poll the zero endpoint only, limiting outbound requests."""
         if not self.gex_api_enabled:
             return None
-        api_key = os.getenv('GEXBOT_API_KEY', 'XXXXXXXXXXXX')
-        base = 'https://api.gexbot.com'
+        api_key = os.getenv("GEXBOT_API_KEY", "XXXXXXXXXXXX")
+        base = "https://api.gexbot.com"
         zero_url = f"{base}/{ticker}/classic/zero?key={api_key}"
 
         async with httpx.AsyncClient(timeout=10.0) as client:
-            responses = {'zero': None}
+            responses = {"zero": None}
             try:
                 resp = await client.get(zero_url)
                 if resp.status_code == 200:
-                    responses['zero'] = resp.json()
+                    responses["zero"] = resp.json()
             except Exception:
-                responses['zero'] = None
+                responses["zero"] = None
 
         # Normalize into expected schema
         now = datetime.now(timezone.utc)
         data = {
-            'timestamp': now,
-            'ticker': ticker,
-            'spot_price': None,
-            'zero_gamma': None,
-            'net_gex': None,
-            'major_pos_vol': None,
-            'major_neg_vol': None,
-            'major_pos_oi': None,
-            'major_neg_oi': None,
-            'sum_gex_oi': None,
-            'max_priors': [],
-            'strikes': [],
+            "timestamp": now,
+            "ticker": ticker,
+            "spot_price": None,
+            "zero_gamma": None,
+            "net_gex": None,
+            "major_pos_vol": None,
+            "major_neg_vol": None,
+            "major_pos_oi": None,
+            "major_neg_oi": None,
+            "sum_gex_oi": None,
+            "max_priors": [],
+            "strikes": [],
         }
 
-        z = responses.get('zero')
+        z = responses.get("zero")
         if z:
             # common fields
-            data['spot_price'] = z.get('spot_price') or z.get('price') or data['spot_price']
-            data['zero_gamma'] = z.get('zero_gamma') or z.get('zero_gamma_vol') or data['zero_gamma']
-            data['net_gex'] = z.get('net_gex') or z.get('sum_gex') or data['net_gex']
-            data['major_pos_vol'] = z.get('major_pos_vol') or data['major_pos_vol']
-            data['major_neg_vol'] = z.get('major_neg_vol') or data['major_neg_vol']
-            data['major_pos_oi'] = z.get('major_pos_oi') or data['major_pos_oi']
-            data['major_neg_oi'] = z.get('major_neg_oi') or data['major_neg_oi']
-            data['sum_gex_oi'] = z.get('sum_gex_oi') or z.get('net_gex_oi') or data['sum_gex_oi']
-            strikes = z.get('strikes')
+            data["spot_price"] = (
+                z.get("spot_price") or z.get("price") or data["spot_price"]
+            )
+            data["zero_gamma"] = (
+                z.get("zero_gamma") or z.get("zero_gamma_vol") or data["zero_gamma"]
+            )
+            data["net_gex"] = z.get("net_gex") or z.get("sum_gex") or data["net_gex"]
+            data["major_pos_vol"] = z.get("major_pos_vol") or data["major_pos_vol"]
+            data["major_neg_vol"] = z.get("major_neg_vol") or data["major_neg_vol"]
+            data["major_pos_oi"] = z.get("major_pos_oi") or data["major_pos_oi"]
+            data["major_neg_oi"] = z.get("major_neg_oi") or data["major_neg_oi"]
+            data["sum_gex_oi"] = (
+                z.get("sum_gex_oi") or z.get("net_gex_oi") or data["sum_gex_oi"]
+            )
+            strikes = z.get("strikes")
             if strikes:
-                data['strikes'] = strikes
+                data["strikes"] = strikes
 
         return data
 
@@ -1162,7 +1574,7 @@ class TradeBot(commands.Bot):
         """
         if not symbol:
             return None
-        display_symbol = (symbol or 'QQQ').upper()
+        display_symbol = (symbol or "QQQ").upper()
         ticker = self.ticker_aliases.get(display_symbol, display_symbol)
         snapshot_key = f"{self.redis_snapshot_prefix}{ticker}"
         try:
@@ -1176,36 +1588,45 @@ class TradeBot(commands.Bot):
         if not normalized:
             return None
         now = datetime.now(timezone.utc)
-        ts = normalized.get('timestamp') or now
+        ts = normalized.get("timestamp") or now
         if isinstance(ts, datetime):
-            age = (now - (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc))).total_seconds()
+            age = (
+                now - (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc))
+            ).total_seconds()
         else:
             age = 9999
-        normalized['display_symbol'] = display_symbol
-        normalized['_source'] = 'redis-snapshot'
+        normalized["display_symbol"] = display_symbol
+        normalized["_source"] = "redis-snapshot"
         if age <= 5:
-            normalized['_freshness'] = 'current'
+            normalized["_freshness"] = "current"
         elif age <= 30:
-            normalized['_freshness'] = 'stale'
+            normalized["_freshness"] = "stale"
         else:
-            normalized['_freshness'] = 'incomplete'
+            normalized["_freshness"] = "incomplete"
         try:
             await self._populate_wall_ladders(normalized, ticker, None, snapshot_key)
         except Exception:
             pass
         return normalized
 
-    async def _refresh_gex_from_api(self, ticker: str, snapshot_key: str, display_symbol: Optional[str] = None):
+    async def _refresh_gex_from_api(
+        self, ticker: str, snapshot_key: str, display_symbol: Optional[str] = None
+    ):
         """Background task to refresh cached snapshot from GEXBot API."""
         if not self.gex_api_enabled:
             return
         try:
             api_data = await self._poll_gexbot_api(ticker)
             if api_data:
-                api_data['_freshness'] = 'current'
+                api_data["_freshness"] = "current"
                 if display_symbol:
-                    api_data['display_symbol'] = display_symbol
-                await asyncio.to_thread(self.redis_client.setex, snapshot_key, 300, json.dumps(api_data, default=str))
+                    api_data["display_symbol"] = display_symbol
+                await asyncio.to_thread(
+                    self.redis_client.setex,
+                    snapshot_key,
+                    300,
+                    json.dumps(api_data, default=str),
+                )
         except Exception as e:
             print(f"Background refresh failed for {ticker}: {e}")
 
@@ -1218,12 +1639,12 @@ class TradeBot(commands.Bot):
             token = arg.strip()
             if not token:
                 continue
-            if token.lower() == 'full':
+            if token.lower() == "full":
                 show_full = True
                 continue
             if symbol is None:
                 symbol = token.upper()
-        return (symbol or 'QQQ'), show_full
+        return (symbol or "QQQ"), show_full
 
     def _normalize_snapshot_payload(self, snapshot_blob, ticker: str):
         try:
@@ -1238,14 +1659,16 @@ class TradeBot(commands.Bot):
         except json.JSONDecodeError:
             return None
 
-        ts = payload.get('timestamp') or payload.get('ts')
+        ts = payload.get("timestamp") or payload.get("ts")
         if isinstance(ts, str):
             try:
-                parsed_ts = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                parsed_ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
             except ValueError:
                 parsed_ts = None
         elif isinstance(ts, (int, float)):
-            parsed_ts = datetime.fromtimestamp(float(ts) / (1000 if ts > 1e12 else 1), tz=timezone.utc)
+            parsed_ts = datetime.fromtimestamp(
+                float(ts) / (1000 if ts > 1e12 else 1), tz=timezone.utc
+            )
         elif isinstance(ts, datetime):
             parsed_ts = ts
         else:
@@ -1255,36 +1678,42 @@ class TradeBot(commands.Bot):
 
         def get_first(*values):
             for value in values:
-                if value not in (None, ''):
+                if value not in (None, ""):
                     return value
             return None
 
         data = {
-            'timestamp': parsed_ts,
-            'ticker': ticker,
-            'spot_price': get_first(payload.get('spot'), payload.get('spot_price'), payload.get('price')),
-            'zero_gamma': get_first(payload.get('zero_gamma'), payload.get('zero_gamma_vol')),
-            'net_gex': payload.get('net_gex') or payload.get('sum_gex'),
-            'major_pos_vol': payload.get('major_pos_vol'),
-            'major_neg_vol': payload.get('major_neg_vol'),
-            'major_pos_oi': payload.get('major_pos_oi'),
-            'major_neg_oi': payload.get('major_neg_oi'),
-            'sum_gex_oi': payload.get('sum_gex_oi') or payload.get('net_gex_oi'),
-            'max_priors': self._extract_max_priors(payload),
-            'maxchange': payload.get('maxchange') if isinstance(payload.get('maxchange'), dict) else {},
-            'strikes': payload.get('strikes'),
+            "timestamp": parsed_ts,
+            "ticker": ticker,
+            "spot_price": get_first(
+                payload.get("spot"), payload.get("spot_price"), payload.get("price")
+            ),
+            "zero_gamma": get_first(
+                payload.get("zero_gamma"), payload.get("zero_gamma_vol")
+            ),
+            "net_gex": payload.get("net_gex") or payload.get("sum_gex"),
+            "major_pos_vol": payload.get("major_pos_vol"),
+            "major_neg_vol": payload.get("major_neg_vol"),
+            "major_pos_oi": payload.get("major_pos_oi"),
+            "major_neg_oi": payload.get("major_neg_oi"),
+            "sum_gex_oi": payload.get("sum_gex_oi") or payload.get("net_gex_oi"),
+            "max_priors": self._extract_max_priors(payload),
+            "maxchange": payload.get("maxchange")
+            if isinstance(payload.get("maxchange"), dict)
+            else {},
+            "strikes": payload.get("strikes"),
         }
         return data
 
     def _extract_max_priors(self, payload: dict) -> List[list]:
-        maxchange = payload.get('maxchange')
+        maxchange = payload.get("maxchange")
         normalized: List[list] = []
         mapping = [
-            ('one', 1),
-            ('five', 5),
-            ('ten', 10),
-            ('fifteen', 15),
-            ('thirty', 30),
+            ("one", 1),
+            ("five", 5),
+            ("ten", 10),
+            ("fifteen", 15),
+            ("thirty", 30),
         ]
         if isinstance(maxchange, dict):
             for key, interval in mapping:
@@ -1295,7 +1724,7 @@ class TradeBot(commands.Bot):
             if normalized:
                 return normalized
 
-        fallback = payload.get('max_priors') or payload.get('priors') or []
+        fallback = payload.get("max_priors") or payload.get("priors") or []
         if isinstance(fallback, list):
             for idx, item in enumerate(fallback):
                 if isinstance(item, (list, tuple)):
@@ -1309,52 +1738,64 @@ class TradeBot(commands.Bot):
         if not isinstance(payload, dict):
             return False
         required = [
-            'spot_price',
-            'major_pos_vol',
-            'major_neg_vol',
-            'major_pos_oi',
-            'major_neg_oi',
-            'sum_gex_oi',
+            "spot_price",
+            "major_pos_vol",
+            "major_neg_vol",
+            "major_pos_oi",
+            "major_neg_oi",
+            "sum_gex_oi",
         ]
         for field in required:
             value = payload.get(field)
             if value is None:
                 return False
-        max_priors = payload.get('max_priors')
+        max_priors = payload.get("max_priors")
         if not max_priors:
             return False
         return True
 
-    async def _populate_wall_ladders(self, data: dict, ticker: str, cache_key: Optional[str], snapshot_key: str) -> None:
+    async def _populate_wall_ladders(
+        self, data: dict, ticker: str, cache_key: Optional[str], snapshot_key: str
+    ) -> None:
         if not isinstance(data, dict) or not ticker:
             return
-        if data.get('_wall_ladders_ready'):
+        if data.get("_wall_ladders_ready"):
             return
         summary = await self._build_wall_ladders(data, ticker, cache_key, snapshot_key)
         if summary:
-            data['_wall_ladders'] = summary
-        data['_wall_ladders_ready'] = True
+            data["_wall_ladders"] = summary
+        data["_wall_ladders_ready"] = True
 
-    async def _build_wall_ladders(self, data: dict, ticker: str, cache_key: Optional[str], snapshot_key: str) -> Optional[dict]:
-        strikes = self._normalize_strike_entries(data.get('strikes'))
-        source = 'payload' if strikes else None
+    async def _build_wall_ladders(
+        self, data: dict, ticker: str, cache_key: Optional[str], snapshot_key: str
+    ) -> Optional[dict]:
+        strikes = self._normalize_strike_entries(data.get("strikes"))
+        source = "payload" if strikes else None
         if not strikes:
-            strikes, source = await self._load_strikes_from_cache(ticker, cache_key, snapshot_key)
+            strikes, source = await self._load_strikes_from_cache(
+                ticker, cache_key, snapshot_key
+            )
         if not strikes:
-            ts_ms = self._timestamp_to_epoch_ms(data.get('timestamp'))
+            ts_ms = self._timestamp_to_epoch_ms(data.get("timestamp"))
             if ts_ms is not None:
-                strikes, source = await asyncio.to_thread(self._query_strikes_from_db, ticker, ts_ms)
+                strikes, source = await asyncio.to_thread(
+                    self._query_strikes_from_db, ticker, ts_ms
+                )
         if not strikes:
             return None
         summary = {
-            'call': self._summarize_wall_ladder(data.get('major_pos_vol'), strikes, prefer_positive=True),
-            'put': self._summarize_wall_ladder(data.get('major_neg_vol'), strikes, prefer_positive=False),
+            "call": self._summarize_wall_ladder(
+                data.get("major_pos_vol"), strikes, prefer_positive=True
+            ),
+            "put": self._summarize_wall_ladder(
+                data.get("major_neg_vol"), strikes, prefer_positive=False
+            ),
         }
         summary = {k: v for k, v in summary.items() if v}
         if not summary:
             return None
         if source:
-            summary['source'] = source
+            summary["source"] = source
         return summary
 
     async def _load_strikes_from_cache(
@@ -1375,13 +1816,15 @@ class TradeBot(commands.Bot):
                 payload = json.loads(raw)
             except Exception:
                 continue
-            strikes = self._normalize_strike_entries(payload.get('strikes'))
+            strikes = self._normalize_strike_entries(payload.get("strikes"))
             if strikes:
-                source = 'redis-cache' if key == cache_key else 'redis-snapshot'
+                source = "redis-cache" if key == cache_key else "redis-snapshot"
                 return strikes, source
         return [], None
 
-    def _query_strikes_from_db(self, ticker: str, epoch_ms: int) -> Tuple[List[Tuple[float, float]], Optional[str]]:
+    def _query_strikes_from_db(
+        self, ticker: str, epoch_ms: int
+    ) -> Tuple[List[Tuple[float, float]], Optional[str]]:
         if not ticker:
             return [], None
         query = """
@@ -1396,12 +1839,13 @@ class TradeBot(commands.Bot):
         conn = None
         try:
             import duckdb
+
             try:
                 conn = duckdb.connect(self.duckdb_path, read_only=True)
             except TypeError:
                 conn = duckdb.connect(self.duckdb_path)
             rows = conn.execute(query, [ticker, epoch_ms]).fetchall()
-            source = 'duckdb'
+            source = "duckdb"
         except Exception:
             rows = []
         finally:
@@ -1436,8 +1880,8 @@ class TradeBot(commands.Bot):
                         except (TypeError, ValueError):
                             gamma = None
                 elif isinstance(entry, dict):
-                    strike = entry.get('strike') or entry.get('strike_price')
-                    gamma = entry.get('gamma') or entry.get('total_gamma')
+                    strike = entry.get("strike") or entry.get("strike_price")
+                    gamma = entry.get("gamma") or entry.get("total_gamma")
                     try:
                         strike = float(strike)
                     except (TypeError, ValueError):
@@ -1523,9 +1967,9 @@ class TradeBot(commands.Bot):
 
     def _parse_admin_ids(self) -> set[int]:
         ids: set[int] = set()
-        raw = os.getenv('DISCORD_ADMIN_USER_IDS')
+        raw = os.getenv("DISCORD_ADMIN_USER_IDS")
         if raw:
-            for part in raw.split(','):
+            for part in raw.split(","):
                 part = part.strip()
                 if not part:
                     continue
@@ -1533,7 +1977,7 @@ class TradeBot(commands.Bot):
                     ids.add(int(part))
                 except ValueError:
                     continue
-        owner = os.getenv('DISCORD_OWNER_ID')
+        owner = os.getenv("DISCORD_OWNER_ID")
         if owner:
             try:
                 ids.add(int(owner))
@@ -1542,24 +1986,26 @@ class TradeBot(commands.Bot):
         return ids
 
     def _parse_admin_names(self) -> set[str]:
-        raw = os.getenv('DISCORD_ADMIN_USERNAMES', 'skint0552')
-        names = {name.strip().lower() for name in raw.split(',') if name.strip()}
+        raw = os.getenv("DISCORD_ADMIN_USERNAMES", "skint0552")
+        names = {name.strip().lower() for name in raw.split(",") if name.strip()}
         if not names:
-            names = {'skint0552'}
+            names = {"skint0552"}
         return names
 
     def _init_tastytrade_client(self) -> Optional[TastyTradeClient]:
-        creds = getattr(self.config, 'tastytrade_credentials', None)
+        creds = getattr(self.config, "tastytrade_credentials", None)
         if not creds or not creds.client_secret or not creds.refresh_token:
             return None
         default_account = creds.default_account
         use_sandbox = creds.use_sandbox_environment
+        dry_run = creds.dry_run
         try:
             return TastyTradeClient(
                 client_secret=creds.client_secret,
                 refresh_token=creds.refresh_token,
                 default_account=default_account,
                 use_sandbox=use_sandbox,
+                dry_run=dry_run,
             )
         except Exception as exc:
             print(f"Failed to initialize TastyTrade client: {exc}")
@@ -1572,7 +2018,7 @@ class TradeBot(commands.Bot):
             author_id = None
         if author_id is not None and author_id in self.command_admin_ids:
             return True
-        author_name = getattr(ctx.author, 'name', '') or ''
+        author_name = getattr(ctx.author, "name", "") or ""
         if author_name.lower() in self.command_admin_names:
             return True
         return False
@@ -1580,11 +2026,11 @@ class TradeBot(commands.Bot):
     async def _ensure_privileged(self, ctx) -> bool:
         if self._is_privileged_user(ctx):
             return True
-        await ctx.send('You are not authorized to use this command.')
+        await ctx.send("You are not authorized to use this command.")
         return False
 
     def _init_alert_channels(self) -> List[int]:
-        specific = getattr(self.config, 'uw_channel_ids', None) or ()
+        specific = getattr(self.config, "uw_channel_ids", None) or ()
         if specific:
             return [cid for cid in specific if cid]
         channels: List[int] = []
@@ -1600,24 +2046,30 @@ class TradeBot(commands.Bot):
             return True
         if channel is None:
             return True
-        channel_id = getattr(channel, 'id', None)
+        channel_id = getattr(channel, "id", None)
         if channel_id is None:
             return True
         # Allow DMs for privileged commands
-        if getattr(channel, 'type', None) == discord.ChannelType.private:
+        if getattr(channel, "type", None) == discord.ChannelType.private:
             return True
         return int(channel_id) in self.allowed_channel_ids
 
     async def _ensure_status_channel_access(self, ctx) -> bool:
         if not self._is_privileged_user(ctx):
-            await ctx.send('You are not authorized to use this command.')
+            await ctx.send("You are not authorized to use this command.")
             return False
-        if self.status_channel_id and getattr(ctx.channel, 'id', None) != self.status_channel_id and getattr(ctx.channel, 'type', None) != discord.ChannelType.private:
-            await ctx.send('This command may only be used in the status channel.')
+        if (
+            self.status_channel_id
+            and getattr(ctx.channel, "id", None) != self.status_channel_id
+            and getattr(ctx.channel, "type", None) != discord.ChannelType.private
+        ):
+            await ctx.send("This command may only be used in the status channel.")
             return False
-        author_name = (getattr(ctx.author, 'name', '') or '').lower()
+        author_name = (getattr(ctx.author, "name", "") or "").lower()
         if author_name != self.status_command_user:
-            await self._send_dm_or_warn(ctx, 'Status commands are restricted to authorized users.')
+            await self._send_dm_or_warn(
+                ctx, "Status commands are restricted to authorized users."
+            )
             return False
         return True
 
@@ -1634,11 +2086,11 @@ class TradeBot(commands.Bot):
                 if not message:
                     await asyncio.sleep(0.1)
                     continue
-                if message.get('type') != 'message':
+                if message.get("type") != "message":
                     continue
-                data = message.get('data')
+                data = message.get("data")
                 if isinstance(data, bytes):
-                    data = data.decode('utf-8')
+                    data = data.decode("utf-8")
                 try:
                     payload = json.loads(data)
                 except Exception as exc:
@@ -1672,20 +2124,24 @@ class TradeBot(commands.Bot):
 
     async def _fetch_market_snapshot(self) -> Optional[dict]:
         try:
-            raw = await asyncio.to_thread(self.redis_client.get, self.uw_market_latest_key)
+            raw = await asyncio.to_thread(
+                self.redis_client.get, self.uw_market_latest_key
+            )
         except Exception as exc:
             print(f"Redis error fetching market snapshot: {exc}")
             return None
         if not raw:
             try:
-                raw = await asyncio.to_thread(self.redis_client.lindex, self.uw_market_history_key, 0)
+                raw = await asyncio.to_thread(
+                    self.redis_client.lindex, self.uw_market_history_key, 0
+                )
             except Exception as exc:
                 print(f"Redis error fetching historical market snapshot: {exc}")
                 raw = None
             if not raw:
                 return None
         if isinstance(raw, bytes):
-            raw = raw.decode('utf-8')
+            raw = raw.decode("utf-8")
         try:
             return json.loads(raw)
         except Exception as exc:
@@ -1694,14 +2150,16 @@ class TradeBot(commands.Bot):
 
     async def _fetch_option_history(self, limit: int = 5) -> List[dict]:
         try:
-            entries = await asyncio.to_thread(self.redis_client.lrange, self.uw_option_history_key, 0, limit - 1)
+            entries = await asyncio.to_thread(
+                self.redis_client.lrange, self.uw_option_history_key, 0, limit - 1
+            )
         except Exception as exc:
             print(f"Redis error fetching option history: {exc}")
             return []
         results: List[dict] = []
         for entry in entries:
             if isinstance(entry, bytes):
-                entry = entry.decode('utf-8')
+                entry = entry.decode("utf-8")
             try:
                 results.append(json.loads(entry))
             except Exception:
@@ -1738,7 +2196,7 @@ class TradeBot(commands.Bot):
 
     async def _send_dm_or_warn(self, ctx, content: str) -> None:
         if not await self._send_dm(ctx.author, content):
-            await ctx.send('Unable to DM you. Check your privacy settings.')
+            await ctx.send("Unable to DM you. Check your privacy settings.")
 
     def _format_wall_value_line(
         self,
@@ -1749,12 +2207,12 @@ class TradeBot(commands.Bot):
         *,
         label_width: int,
         volume_width: int,
-        gap: str = '',
+        gap: str = "",
     ) -> str:
         vol = fmt_price(volume_value)
-        oi = fmt_price(oi_value) if oi_value is not None else ''
+        oi = fmt_price(oi_value) if oi_value is not None else ""
         label = f"{label_text:<{label_width}}"
-        spacer = gap if gap is not None else ''
+        spacer = gap if gap is not None else ""
         return f"{label}{spacer}{vol:<{volume_width}}{oi}"
 
     def _format_wall_short_line(
@@ -1764,9 +2222,9 @@ class TradeBot(commands.Bot):
         fmt_price,
         *,
         label_width: int,
-        gap: str = '',
+        gap: str = "",
     ) -> str:
-        spacer = gap if gap is not None else ''
+        spacer = gap if gap is not None else ""
         return f"{label_text:<{label_width}}{spacer}{fmt_price(value)}"
 
     def _format_wall_line(
@@ -1780,76 +2238,93 @@ class TradeBot(commands.Bot):
         default_line: Optional[str] = None,
         gap_override: Optional[str] = None,
     ) -> str:
-        ladders = data.get('_wall_ladders')
+        ladders = data.get("_wall_ladders")
         summary = ladders.get(ladder_key) if isinstance(ladders, dict) else None
-        if not summary or not summary.get('entries'):
-            fallback_value = data.get('major_pos_vol' if ladder_key == 'call' else 'major_neg_vol')
+        if not summary or not summary.get("entries"):
+            fallback_value = data.get(
+                "major_pos_vol" if ladder_key == "call" else "major_neg_vol"
+            )
             if default_line:
                 return default_line
-            gap = gap_override if gap_override is not None else ''
+            gap = gap_override if gap_override is not None else ""
             return f"{label_text:<{label_width}}{gap}{fmt_price(fallback_value)}"
         label = f"{label_text:<{label_width}}"
-        major = fmt_price(summary.get('major_strike') or (data.get('major_pos_vol') if ladder_key == 'call' else data.get('major_neg_vol')))
+        major = fmt_price(
+            summary.get("major_strike")
+            or (
+                data.get("major_pos_vol")
+                if ladder_key == "call"
+                else data.get("major_neg_vol")
+            )
+        )
         segments = [major]
-        for entry in summary.get('entries', [])[:2]:
-            strike_txt = fmt_price(entry.get('strike'))
-            pct = entry.get('pct_vs_major')
+        for entry in summary.get("entries", [])[:2]:
+            strike_txt = fmt_price(entry.get("strike"))
+            pct = entry.get("pct_vs_major")
             pct_txt = f"{pct:.0f}%" if isinstance(pct, (int, float)) else "N/A%"
             segments.append(f"{strike_txt} {pct_txt}")
-        gap = gap_override if gap_override is not None else '  '
+        gap = gap_override if gap_override is not None else "  "
         return f"{label}{gap}{'  '.join(segments)}"
 
     def _resolve_gex_source_label(self, data: dict) -> str:
         # Primary: explicit source set on the data (set in get_gex_data)
-        src = data.get('_source')
+        src = data.get("_source")
         if isinstance(src, str):
             s = src.strip()
             if not s:
                 pass
             else:
                 lowered = s.lower()
-                if lowered == 'cache':
-                    return 'cache'
-                if 'redis' in lowered:
-                    return 'redis'
-                if lowered == 'db' or 'duckdb' in lowered:
-                    return 'DB'
-                if lowered == 'api' or 'payload' in lowered or 'api' in lowered:
-                    return 'API'
+                if lowered == "cache":
+                    return "cache"
+                if "redis" in lowered:
+                    return "redis"
+                if lowered == "db" or "duckdb" in lowered:
+                    return "DB"
+                if lowered == "api" or "payload" in lowered or "api" in lowered:
+                    return "API"
                 return s
 
         # Secondary: derived from wall ladder source (redis-snapshot, redis-cache, duckdb, payload)
-        ladders = data.get('_wall_ladders')
+        ladders = data.get("_wall_ladders")
         if isinstance(ladders, dict):
-            raw = ladders.get('source')
+            raw = ladders.get("source")
             if raw:
                 lowered = str(raw).lower()
-                if 'redis' in lowered:
-                    return 'redis'
-                if 'duckdb' in lowered:
-                    return 'DB'
-                if 'payload' in lowered or 'api' in lowered:
-                    return 'API'
+                if "redis" in lowered:
+                    return "redis"
+                if "duckdb" in lowered:
+                    return "DB"
+                if "payload" in lowered or "api" in lowered:
+                    return "API"
                 return str(raw)
 
         # Fallback: use freshness or 'local'
-        freshness = data.get('_freshness')
+        freshness = data.get("_freshness")
         if isinstance(freshness, str):
             return freshness
-        return 'local'
+        return "local"
 
     def _extract_current_maxchange_entry(self, data: dict) -> Optional[Tuple[Any, Any]]:
-        maxchange = data.get('maxchange') if isinstance(data.get('maxchange'), dict) else data.get('maxchange')
+        maxchange = (
+            data.get("maxchange")
+            if isinstance(data.get("maxchange"), dict)
+            else data.get("maxchange")
+        )
         entry = None
         if isinstance(maxchange, dict):
-            entry = maxchange.get('current')
+            entry = maxchange.get("current")
         if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
-            priors = data.get('max_priors') or []
+            priors = data.get("max_priors") or []
             if priors and isinstance(priors[0], (list, tuple)) and len(priors[0]) >= 3:
                 entry = [priors[0][1], priors[0][2]]
         if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
             return None
-        if len(entry) >= 3 and isinstance(entry[1], (int, float)) and isinstance(entry[2], (int, float)):
+        if (
+            len(entry) >= 3
+            and isinstance(entry[1], (int, float))
+            and isinstance(entry[2], (int, float))
+        ):
             strike_val = entry[1]
             delta_val = entry[2]
         else:
@@ -1858,7 +2333,7 @@ class TradeBot(commands.Bot):
         return strike_val, delta_val
 
     def format_gex(self, data):
-        dt = data.get('timestamp')
+        dt = data.get("timestamp")
         if isinstance(dt, str):
             try:
                 dt = datetime.fromisoformat(dt)
@@ -1870,9 +2345,11 @@ class TradeBot(commands.Bot):
             local_dt = dt.astimezone(self.display_zone)
         else:
             local_dt = None
-        formatted_time = local_dt.strftime("%m/%d/%Y  %I:%M:%S %p %Z") if local_dt else "N/A"
+        formatted_time = (
+            local_dt.strftime("%m/%d/%Y  %I:%M:%S %p %Z") if local_dt else "N/A"
+        )
 
-        ticker = data.get('display_symbol') or data.get('ticker', 'QQQ')
+        ticker = data.get("display_symbol") or data.get("ticker", "QQQ")
 
         def fmt_price(x):
             return f"{x:.2f}" if isinstance(x, (int, float)) else "N/A"
@@ -1884,17 +2361,17 @@ class TradeBot(commands.Bot):
             if not isinstance(x, (int, float)):
                 return "N/A"
             # Display magnitude scaled by 1000 with Bn suffix for both signs
-            return f"{(abs(x)/1000):.4f}Bn"
+            return f"{(abs(x) / 1000):.4f}Bn"
 
         def fmt_net_abs(x):
             return f"{abs(x):.5f}" if isinstance(x, (int, float)) else "N/A"
 
         ansi = {
-            'reset': "\u001b[0m",
-            'dim_white': "\u001b[2;37m",
-            'yellow': "\u001b[2;33m",
-            'green': "\u001b[2;32m",
-            'red': "\u001b[2;31m",
+            "reset": "\u001b[0m",
+            "dim_white": "\u001b[2;37m",
+            "yellow": "\u001b[2;33m",
+            "green": "\u001b[2;32m",
+            "red": "\u001b[2;31m",
         }
 
         def colorize(code, text):
@@ -1902,22 +2379,30 @@ class TradeBot(commands.Bot):
                 return text
             return f"{code}{text}{ansi['reset']}"
 
-        def color_for_value(value, neutral='yellow'):
+        def color_for_value(value, neutral="yellow"):
             if not isinstance(value, (int, float)):
                 return neutral
             if value > 0:
-                return 'green'
+                return "green"
             if value < 0:
-                return 'red'
+                return "red"
             return neutral
 
         label_width = 19
         volume_width = 22
 
-        def fmt_pair(label: str, volume_value, oi_value=None, *, volume_color=None, oi_color=None, formatter=None):
+        def fmt_pair(
+            label: str,
+            volume_value,
+            oi_value=None,
+            *,
+            volume_color=None,
+            oi_color=None,
+            formatter=None,
+        ):
             formatter = formatter or fmt_price
             vol = formatter(volume_value)
-            oi = formatter(oi_value) if oi_value is not None else ''
+            oi = formatter(oi_value) if oi_value is not None else ""
             if volume_color:
                 vol = colorize(ansi.get(volume_color), vol)
             if oi_color:
@@ -1932,19 +2417,19 @@ class TradeBot(commands.Bot):
         )
 
         wall_label_width = max(label_width - 4, 1)
-        call_gap = ' ' * 5
-        put_gap = ' ' * 3
+        call_gap = " " * 5
+        put_gap = " " * 3
         call_wall_line = self._format_wall_line(
             data,
-            'call',
-            'call wall',
+            "call",
+            "call wall",
             fmt_price,
             label_width=wall_label_width,
             gap_override=call_gap,
             default_line=self._format_wall_value_line(
-                'call wall',
-                data.get('major_pos_vol'),
-                data.get('major_pos_oi'),
+                "call wall",
+                data.get("major_pos_vol"),
+                data.get("major_pos_oi"),
                 fmt_price,
                 label_width=wall_label_width,
                 volume_width=volume_width,
@@ -1953,15 +2438,15 @@ class TradeBot(commands.Bot):
         )
         put_wall_line = self._format_wall_line(
             data,
-            'put',
-            'put wall',
+            "put",
+            "put wall",
             fmt_price,
             label_width=wall_label_width,
             gap_override=put_gap,
             default_line=self._format_wall_value_line(
-                'put wall',
-                data.get('major_neg_vol'),
-                data.get('major_neg_oi'),
+                "put wall",
+                data.get("major_neg_vol"),
+                data.get("major_neg_oi"),
                 fmt_price,
                 label_width=wall_label_width,
                 volume_width=volume_width,
@@ -1971,38 +2456,54 @@ class TradeBot(commands.Bot):
 
         table_lines = [
             "volume                                   oi",
-            fmt_pair('zero gamma', data.get('zero_gamma'), volume_color='yellow', formatter=fmt_price),
+            fmt_pair(
+                "zero gamma",
+                data.get("zero_gamma"),
+                volume_color="yellow",
+                formatter=fmt_price,
+            ),
             call_wall_line,
             put_wall_line,
             fmt_pair(
-                'net gex',
-                data.get('net_gex'),
-                data.get('sum_gex_oi'),
-                volume_color=color_for_value(data.get('net_gex')),
-                oi_color=color_for_value(data.get('sum_gex_oi')),
+                "net gex",
+                data.get("net_gex"),
+                data.get("sum_gex_oi"),
+                volume_color=color_for_value(data.get("net_gex")),
+                oi_color=color_for_value(data.get("sum_gex_oi")),
                 formatter=fmt_net_gex,
             ),
         ]
 
         maxchange_lines = ["", "max change gex"]
         current_entry = self._extract_current_maxchange_entry(data)
+
         def fmt_delta_entry(label: str, entry):
             if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
                 return f"{label:<18}N/A  N/ABn"
-            if len(entry) >= 3 and isinstance(entry[1], (int, float)) and isinstance(entry[2], (int, float)):
+            if (
+                len(entry) >= 3
+                and isinstance(entry[1], (int, float))
+                and isinstance(entry[2], (int, float))
+            ):
                 strike_val = entry[1]
                 delta = entry[2]
             else:
                 strike_val = entry[0]
                 delta = entry[1]
-            strike = fmt_price(strike_val) if isinstance(strike_val, (int, float)) else str(strike_val)
+            strike = (
+                fmt_price(strike_val)
+                if isinstance(strike_val, (int, float))
+                else str(strike_val)
+            )
             delta_color = ansi.get(color_for_value(delta))
-            delta_text = fmt_net_gex(delta) if isinstance(delta, (int, float)) else str(delta)
+            delta_text = (
+                fmt_net_gex(delta) if isinstance(delta, (int, float)) else str(delta)
+            )
             return f"{label:<18}{strike:<8} {colorize(delta_color, delta_text)}"
 
-        maxchange_lines.append(fmt_delta_entry('current', current_entry))
+        maxchange_lines.append(fmt_delta_entry("current", current_entry))
 
-        max_priors = data.get('max_priors', []) or []
+        max_priors = data.get("max_priors", []) or []
         intervals = [1, 5, 10, 15, 30]
         for i, interval in enumerate(intervals):
             entry = max_priors[i] if i < len(max_priors) else None
@@ -2013,7 +2514,7 @@ class TradeBot(commands.Bot):
         return f"```ansi\n{body}\n```"
 
     def format_gex_small(self, data):
-        dt = data.get('timestamp')
+        dt = data.get("timestamp")
         if isinstance(dt, str):
             try:
                 dt = datetime.fromisoformat(dt)
@@ -2030,7 +2531,7 @@ class TradeBot(commands.Bot):
         if local_dt:
             formatted_time = local_dt.strftime("%m/%d/%Y  %I:%M:%S %p %Z")
 
-        ticker = data.get('display_symbol') or data.get('ticker', 'QQQ')
+        ticker = data.get("display_symbol") or data.get("ticker", "QQQ")
 
         def fmt_price(x):
             return f"{x:.2f}" if isinstance(x, (int, float)) else "N/A"
@@ -2038,14 +2539,14 @@ class TradeBot(commands.Bot):
         def fmt_net_gex(x):
             if not isinstance(x, (int, float)):
                 return "N/A"
-            return f"{(abs(x)/1000):.4f}Bn"
+            return f"{(abs(x) / 1000):.4f}Bn"
 
         ansi = {
-            'reset': "\u001b[0m",
-            'dim_white': "\u001b[2;37m",
-            'yellow': "\u001b[2;33m",
-            'green': "\u001b[2;32m",
-            'red': "\u001b[2;31m",
+            "reset": "\u001b[0m",
+            "dim_white": "\u001b[2;37m",
+            "yellow": "\u001b[2;33m",
+            "green": "\u001b[2;32m",
+            "red": "\u001b[2;31m",
         }
 
         def colorize(code, text):
@@ -2053,79 +2554,101 @@ class TradeBot(commands.Bot):
                 return text
             return f"{code}{text}{ansi['reset']}"
 
-        def color_for_value(value, neutral='yellow'):
+        def color_for_value(value, neutral="yellow"):
             if not isinstance(value, (int, float)):
                 return neutral
             if value > 0:
-                return 'green'
+                return "green"
             if value < 0:
-                return 'red'
+                return "red"
             return neutral
 
         header_parts = [f"{ansi['dim_white']}GEX: {ticker}{ansi['reset']}"]
         if formatted_time:
             header_parts.append(formatted_time)
-        price_text = fmt_price(data.get('spot_price'))
+        price_text = fmt_price(data.get("spot_price"))
         header_parts.append(f"{ansi['dim_white']}{price_text}{ansi['reset']}")
-        header_parts.append(f"{ansi['dim_white']}{self._resolve_gex_source_label(data)}{ansi['reset']}")
+        header_parts.append(
+            f"{ansi['dim_white']}{self._resolve_gex_source_label(data)}{ansi['reset']}"
+        )
         header = "  ".join(header_parts)
 
         classic_label_width = 19
         wall_label_width = max(classic_label_width - 4, 1)
-        call_gap = '    '
-        put_gap = '    '
+        call_gap = "    "
+        put_gap = "    "
 
         zero_gamma_line = f"{'zero gamma':<{classic_label_width}}{colorize(ansi['yellow'], fmt_price(data.get('zero_gamma')))}"
-        call_wall_line = self._format_wall_line(
-            data,
-            'call',
-            'call wall',
-            fmt_price,
-            label_width=wall_label_width,
-            gap_override=call_gap,
-            default_line=self._format_wall_short_line(
-                'call wall',
-                data.get('major_pos_vol'),
+        call_wall_line = (
+            self._format_wall_line(
+                data,
+                "call",
+                "call wall",
                 fmt_price,
                 label_width=wall_label_width,
-                gap=call_gap,
-            ),
-        ) + '  '
-        put_wall_line = self._format_wall_line(
-            data,
-            'put',
-            'put wall',
-            fmt_price,
-            label_width=wall_label_width,
-            gap_override=put_gap,
-            default_line=self._format_wall_short_line(
-                'put wall',
-                data.get('major_neg_vol'),
+                gap_override=call_gap,
+                default_line=self._format_wall_short_line(
+                    "call wall",
+                    data.get("major_pos_vol"),
+                    fmt_price,
+                    label_width=wall_label_width,
+                    gap=call_gap,
+                ),
+            )
+            + "  "
+        )
+        put_wall_line = (
+            self._format_wall_line(
+                data,
+                "put",
+                "put wall",
                 fmt_price,
                 label_width=wall_label_width,
-                gap=put_gap,
-            ),
-        ) + '  '
+                gap_override=put_gap,
+                default_line=self._format_wall_short_line(
+                    "put wall",
+                    data.get("major_neg_vol"),
+                    fmt_price,
+                    label_width=wall_label_width,
+                    gap=put_gap,
+                ),
+            )
+            + "  "
+        )
 
-        net_color_code = ansi.get(color_for_value(data.get('net_gex')))
-        net_value = colorize(net_color_code, fmt_net_gex(data.get('net_gex')))
+        net_color_code = ansi.get(color_for_value(data.get("net_gex")))
+        net_value = colorize(net_color_code, fmt_net_gex(data.get("net_gex")))
         net_line = f"{'net gex':<{classic_label_width}}{net_value}"
 
         current_entry = self._extract_current_maxchange_entry(data)
+
         def fmt_current_entry(entry):
             label = f"{'current':<{classic_label_width}}"
             if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
                 return f"{label}N/A"
-            if len(entry) >= 3 and isinstance(entry[1], (int, float)) and isinstance(entry[2], (int, float)):
+            if (
+                len(entry) >= 3
+                and isinstance(entry[1], (int, float))
+                and isinstance(entry[2], (int, float))
+            ):
                 strike_val = entry[1]
                 delta_val = entry[2]
             else:
                 strike_val = entry[0]
                 delta_val = entry[1]
-            strike_txt = fmt_price(strike_val) if isinstance(strike_val, (int, float)) else str(strike_val)
-            delta_txt = fmt_net_gex(delta_val) if isinstance(delta_val, (int, float)) else str(delta_val)
+            strike_txt = (
+                fmt_price(strike_val)
+                if isinstance(strike_val, (int, float))
+                else str(strike_val)
+            )
+            delta_txt = (
+                fmt_net_gex(delta_val)
+                if isinstance(delta_val, (int, float))
+                else str(delta_val)
+            )
             delta_color = ansi.get(color_for_value(delta_val))
             return f"{label}{strike_txt:<12}{colorize(delta_color, delta_txt)}"
+
         current_line = fmt_current_entry(current_entry)
 
         lines = [
@@ -2146,9 +2669,9 @@ class TradeBot(commands.Bot):
         *,
         include_time: bool = True,
         time_format: Optional[str] = None,
-        delta_block: Optional[Dict[str, 'MetricSnapshot']] = None,
+        delta_block: Optional[Dict[str, "MetricSnapshot"]] = None,
     ):
-        dt = data.get('timestamp')
+        dt = data.get("timestamp")
         if isinstance(dt, str):
             try:
                 dt = datetime.fromisoformat(dt)
@@ -2165,7 +2688,7 @@ class TradeBot(commands.Bot):
             fmt = time_format or "%m/%d/%Y  %I:%M:%S %p %Z"
             formatted_time = local_dt.strftime(fmt)
 
-        ticker = data.get('display_symbol') or data.get('ticker', 'QQQ')
+        ticker = data.get("display_symbol") or data.get("ticker", "QQQ")
 
         def fmt_price(x):
             return f"{x:.2f}" if isinstance(x, (int, float)) else "N/A"
@@ -2174,14 +2697,14 @@ class TradeBot(commands.Bot):
         def fmt_net_gex(x):
             if not isinstance(x, (int, float)):
                 return "N/A"
-            return f"{(abs(x)/1000):.4f}Bn"
+            return f"{(abs(x) / 1000):.4f}Bn"
 
         ansi = {
-            'reset': "\u001b[0m",
-            'dim_white': "\u001b[2;37m",
-            'yellow': "\u001b[2;33m",
-            'green': "\u001b[2;32m",
-            'red': "\u001b[2;31m",
+            "reset": "\u001b[0m",
+            "dim_white": "\u001b[2;37m",
+            "yellow": "\u001b[2;33m",
+            "green": "\u001b[2;32m",
+            "red": "\u001b[2;31m",
         }
 
         def colorize(code, text):
@@ -2189,30 +2712,30 @@ class TradeBot(commands.Bot):
                 return text
             return f"{code}{text}{ansi['reset']}"
 
-        def color_for_value(value, neutral='yellow'):
+        def color_for_value(value, neutral="yellow"):
             if not isinstance(value, (int, float)):
                 return neutral
             if value > 0:
-                return 'green'
+                return "green"
             if value < 0:
-                return 'red'
+                return "red"
             return neutral
 
         wall_label_width = 15
-        call_gap = ' ' * 4
-        put_gap = ' ' * 3
+        call_gap = " " * 4
+        put_gap = " " * 3
         classic_label_width = 18
         zero_gamma_line = f"{'zero gamma':<{classic_label_width}}{colorize(ansi['yellow'], fmt_price(data.get('zero_gamma')))}"
         major_pos_line = self._format_wall_line(
             data,
-            'call',
-            'call wall',
+            "call",
+            "call wall",
             fmt_price,
             label_width=wall_label_width,
             gap_override=call_gap,
             default_line=self._format_wall_short_line(
-                'call wall',
-                data.get('major_pos_vol'),
+                "call wall",
+                data.get("major_pos_vol"),
                 fmt_price,
                 label_width=wall_label_width,
                 gap=call_gap,
@@ -2220,68 +2743,72 @@ class TradeBot(commands.Bot):
         )
         major_neg_line = self._format_wall_line(
             data,
-            'put',
-            'put wall',
+            "put",
+            "put wall",
             fmt_price,
             label_width=wall_label_width,
             gap_override=put_gap,
             default_line=self._format_wall_short_line(
-                'put wall',
-                data.get('major_neg_vol'),
+                "put wall",
+                data.get("major_neg_vol"),
                 fmt_price,
                 label_width=wall_label_width,
                 gap=put_gap,
             ),
         )
 
-        net_color_code = ansi.get(color_for_value(data.get('net_gex')))
-        net_value = colorize(net_color_code, fmt_net_gex(data.get('net_gex')))
+        net_color_code = ansi.get(color_for_value(data.get("net_gex")))
+        net_value = colorize(net_color_code, fmt_net_gex(data.get("net_gex")))
 
-        sum_gex_oi_value = fmt_price(data.get('sum_gex_oi'))
-        sum_gex_oi_color = ansi.get(color_for_value(data.get('sum_gex_oi')))
+        sum_gex_oi_value = fmt_price(data.get("sum_gex_oi"))
+        sum_gex_oi_color = ansi.get(color_for_value(data.get("sum_gex_oi")))
         sum_oi_line = f"{'sum gex oi':<{classic_label_width}}{colorize(sum_gex_oi_color, sum_gex_oi_value)}"
 
-        delta_rr_value = data.get('delta_risk_reversal')
+        delta_rr_value = data.get("delta_risk_reversal")
         delta_rr_color = ansi.get(color_for_value(delta_rr_value))
         delta_rr_line = f"{'delta risk rev':<{classic_label_width}}{colorize(delta_rr_color, fmt_price(delta_rr_value))}"
 
         current_entry = self._extract_current_maxchange_entry(data)
 
-        def snapshot(key: str) -> 'MetricSnapshot':
+        def snapshot(key: str) -> "MetricSnapshot":
             snap = delta_block.get(key) if delta_block else None
             if isinstance(snap, MetricSnapshot):
                 return snap
-            return MetricSnapshot(value=None, delta=None, percent=None, previous=None, baseline=None)
+            return MetricSnapshot(
+                value=None, delta=None, percent=None, previous=None, baseline=None
+            )
 
         def fmt_abs(value, digits: int = 2) -> str:
             if not isinstance(value, (int, float)):
-                return 'N/A'
+                return "N/A"
             return f"{abs(value):.{digits}f}"
 
         def fmt_percent(value) -> str:
             if not isinstance(value, (int, float)):
-                return 'n/a%'
+                return "n/a%"
             return f"{value:+.2f}%"
 
         def color_for_delta(delta) -> str:
             if not isinstance(delta, (int, float)):
-                return 'yellow'
-            return 'green' if delta >= 0 else 'red'
+                return "yellow"
+            return "green" if delta >= 0 else "red"
 
         header_parts = [f"{ansi['dim_white']}GEX: {ticker}{ansi['reset']}"]
         if include_time:
             header_parts.append(formatted_time)
 
-        price_text = fmt_price(data.get('spot_price'))
+        price_text = fmt_price(data.get("spot_price"))
         if delta_block:
-            spot_snap = snapshot('spot')
+            spot_snap = snapshot("spot")
             delta_text = fmt_abs(spot_snap.delta)
             percent_text = fmt_percent(spot_snap.percent)
             delta_color = ansi.get(color_for_delta(spot_snap.delta))
             delta_display = colorize(delta_color, f"Δ{delta_text} {percent_text}")
             price_text = f"{price_text}  {delta_display}"
         header_parts.append(f"{ansi['dim_white']}{price_text}{ansi['reset']}")
-        header_parts.append(f"{ansi['dim_white']}{self._resolve_gex_source_label(data)}{ansi['reset']}")
+        header_parts.append(
+            f"{ansi['dim_white']}{self._resolve_gex_source_label(data)}{ansi['reset']}"
+        )
         header = "  ".join(header_parts)
 
         if delta_block:
@@ -2296,24 +2823,37 @@ class TradeBot(commands.Bot):
                 fmt_net_gex,
             )
         else:
+
             def fmt_delta_entry(label: str, entry):
                 if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
                     return f"{label:<18}N/A  N/ABn"
-                if len(entry) >= 3 and isinstance(entry[1], (int, float)) and isinstance(entry[2], (int, float)):
+                if (
+                    len(entry) >= 3
+                    and isinstance(entry[1], (int, float))
+                    and isinstance(entry[2], (int, float))
+                ):
                     strike_val = entry[1]
                     delta = entry[2]
                 else:
                     strike_val = entry[0]
                     delta = entry[1]
-                strike_txt = fmt_price(strike_val) if isinstance(strike_val, (int, float)) else str(strike_val)
-                delta_txt = fmt_net_gex(delta) if isinstance(delta, (int, float)) else str(delta)
+                strike_txt = (
+                    fmt_price(strike_val)
+                    if isinstance(strike_val, (int, float))
+                    else str(strike_val)
+                )
+                delta_txt = (
+                    fmt_net_gex(delta)
+                    if isinstance(delta, (int, float))
+                    else str(delta)
+                )
                 delta_color = ansi.get(color_for_value(delta))
                 return f"{label:<18}{strike_txt:<8} {colorize(delta_color, delta_txt)}"
 
             maxchange_lines = ["", "max change gex"]
-            maxchange_lines.append(fmt_delta_entry('current', current_entry))
+            maxchange_lines.append(fmt_delta_entry("current", current_entry))
 
-            max_priors = data.get('max_priors', []) or []
+            max_priors = data.get("max_priors", []) or []
             intervals = [1, 5, 10, 15, 30]
             for i, interval in enumerate(intervals):
                 entry = max_priors[i] if i < len(max_priors) else None
@@ -2338,7 +2878,7 @@ class TradeBot(commands.Bot):
         self,
         header: str,
         data: dict,
-        delta_block: Dict[str, 'MetricSnapshot'],
+        delta_block: Dict[str, "MetricSnapshot"],
         ansi: Dict[str, str],
         colorize,
         color_for_value,
@@ -2347,28 +2887,30 @@ class TradeBot(commands.Bot):
     ) -> List[str]:
         def fmt_abs(value, digits: int = 2) -> str:
             if not isinstance(value, (int, float)):
-                return 'N/A'
+                return "N/A"
             return f"{abs(value):.{digits}f}"
 
         def fmt_percent(value) -> str:
             if not isinstance(value, (int, float)):
-                return 'n/a%'
+                return "n/a%"
             return f"{abs(value):.2f}%"
 
         def color_for_delta(delta) -> str:
             if not isinstance(delta, (int, float)):
-                return 'yellow'
-            return 'green' if delta >= 0 else 'red'
+                return "yellow"
+            return "green" if delta >= 0 else "red"
 
-        def snapshot(key: str) -> 'MetricSnapshot':
+        def snapshot(key: str) -> "MetricSnapshot":
             snap = delta_block.get(key)
             if isinstance(snap, MetricSnapshot):
                 return snap
-            return MetricSnapshot(value=None, delta=None, percent=None, previous=None, baseline=None)
+            return MetricSnapshot(
+                value=None, delta=None, percent=None, previous=None, baseline=None
+            )
 
         def fmt_prev(value) -> str:
             if not isinstance(value, (int, float)):
-                return 'n/a'
+                return "n/a"
             return fmt_abs(value)
 
         lines = [header, ""]
@@ -2376,118 +2918,146 @@ class TradeBot(commands.Bot):
         def append_prev_line(label: str, snap_key: str):
             snap = snapshot(snap_key)
             delta = None
-            if isinstance(snap.value, (int, float)) and isinstance(snap.previous, (int, float)):
+            if isinstance(snap.value, (int, float)) and isinstance(
+                snap.previous, (int, float)
+            ):
                 delta = snap.value - snap.previous
             color = color_for_delta(delta)
             current_txt = colorize(ansi.get(color), fmt_abs(snap.value))
             prev_txt = fmt_prev(snap.previous)
             lines.append(f"{label:<17}{current_txt:<10} ({prev_txt})")
 
-        append_prev_line('zero gamma', 'zero_gamma')
+        append_prev_line("zero gamma", "zero_gamma")
         classic_label_width = 19
         wall_label_width = max(classic_label_width - 4, 1)
-        call_gap = '  '
-        put_gap = '  '
+        call_gap = "  "
+        put_gap = "  "
 
-        call_wall_line = self._format_wall_line(
-            data,
-            'call',
-            'call wall',
-            fmt_price,
-            label_width=wall_label_width,
-            gap_override=call_gap,
-            default_line=self._format_wall_short_line(
-                'call wall',
-                data.get('major_pos_vol'),
+        call_wall_line = (
+            self._format_wall_line(
+                data,
+                "call",
+                "call wall",
                 fmt_price,
                 label_width=wall_label_width,
-                gap=call_gap,
-            ),
-        ) + '  '
-        put_wall_line = self._format_wall_line(
-            data,
-            'put',
-            'put wall',
-            fmt_price,
-            label_width=wall_label_width,
-            gap_override=put_gap,
-            default_line=self._format_wall_short_line(
-                'put wall',
-                data.get('major_neg_vol'),
+                gap_override=call_gap,
+                default_line=self._format_wall_short_line(
+                    "call wall",
+                    data.get("major_pos_vol"),
+                    fmt_price,
+                    label_width=wall_label_width,
+                    gap=call_gap,
+                ),
+            )
+            + "  "
+        )
+        put_wall_line = (
+            self._format_wall_line(
+                data,
+                "put",
+                "put wall",
                 fmt_price,
                 label_width=wall_label_width,
-                gap=put_gap,
-            ),
-        ) + '  '
+                gap_override=put_gap,
+                default_line=self._format_wall_short_line(
+                    "put wall",
+                    data.get("major_neg_vol"),
+                    fmt_price,
+                    label_width=wall_label_width,
+                    gap=put_gap,
+                ),
+            )
+            + "  "
+        )
         lines.append(call_wall_line)
         lines.append(put_wall_line)
 
         def fmt_net_change(delta) -> str:
             if not isinstance(delta, (int, float)):
-                return 'N/ABn'
-            return f"{(abs(delta)/1000):.4f}Bn"
+                return "N/ABn"
+            return f"{(abs(delta) / 1000):.4f}Bn"
 
-        net_snap = snapshot('net_gex')
-        net_value = colorize(ansi.get(color_for_value(data.get('net_gex'))), fmt_net_gex(data.get('net_gex')))
+        net_snap = snapshot("net_gex")
+        net_value = colorize(
+            ansi.get(color_for_value(data.get("net_gex"))),
+            fmt_net_gex(data.get("net_gex")),
+        )
         net_change_color = ansi.get(color_for_delta(net_snap.delta))
         net_change_txt = colorize(net_change_color, fmt_net_change(net_snap.delta))
         lines.append(f"net gex           {net_value:<10} Δ{net_change_txt}")
 
-        scaled_snap = snapshot('scaled_gamma')
-        scaled_value = fmt_net_gex(data.get('sum_gex_oi'))
-        scaled_change_txt = colorize(ansi.get(color_for_delta(scaled_snap.delta)), fmt_net_change(scaled_snap.delta))
+        scaled_snap = snapshot("scaled_gamma")
+        scaled_value = fmt_net_gex(data.get("sum_gex_oi"))
+        scaled_change_txt = colorize(
+            ansi.get(color_for_delta(scaled_snap.delta)),
+            fmt_net_change(scaled_snap.delta),
+        )
         lines.append(f"scaled gamma      {scaled_value:<10} Δ{scaled_change_txt}")
 
         current_entry = self._extract_current_maxchange_entry(data)
         if current_entry:
             strike_val, delta_val = current_entry
             current_price = fmt_price(strike_val)
-            delta_text = fmt_net_gex(delta_val) if isinstance(delta_val, (int, float)) else str(delta_val)
+            delta_text = (
+                fmt_net_gex(delta_val)
+                if isinstance(delta_val, (int, float))
+                else str(delta_val)
+            )
             delta_color = ansi.get(color_for_value(delta_val))
             current_delta = colorize(delta_color, delta_text)
         else:
-            current_price = 'N/A'
-            current_delta = colorize(ansi['yellow'], 'N/ABn')
-        max_snap = snapshot('maxchange')
-        max_change_txt = colorize(ansi.get(color_for_delta(max_snap.delta)), fmt_net_change(max_snap.delta))
-        lines.append(f"current strike    {current_price:<8}   {current_delta}  Δ{max_change_txt}")
+            current_price = "N/A"
+            current_delta = colorize(ansi["yellow"], "N/ABn")
+        max_snap = snapshot("maxchange")
+        max_change_txt = colorize(
+            ansi.get(color_for_delta(max_snap.delta)), fmt_net_change(max_snap.delta)
+        )
+        lines.append(
+            f"current strike    {current_price:<8}   {current_delta}  Δ{max_change_txt}"
+        )
         return lines
 
     def format_option_trade_alert(self, payload: dict) -> str:
-        data = payload.get('data') or payload
-        timestamp = data.get('timestamp') or payload.get('received_at') or 'N/A'
+        data = payload.get("data") or payload
+        timestamp = data.get("timestamp") or payload.get("received_at") or "N/A"
         if isinstance(timestamp, str):
-            timestamp = timestamp.replace('T', ' ').replace('Z', ' UTC')
-        transaction_types = data.get('transaction_type') or data.get('transaction_types') or []
+            timestamp = timestamp.replace("T", " ").replace("Z", " UTC")
+        transaction_types = (
+            data.get("transaction_type") or data.get("transaction_types") or []
+        )
         if isinstance(transaction_types, str):
             transaction_types = [transaction_types]
-        ticker = data.get('ticker') or data.get('symbol') or 'UNKNOWN'
-        side = data.get('side') or data.get('direction') or 'N/A'
-        call_put = data.get('call_put') or data.get('option_type') or ''
-        strike = data.get('strike') or data.get('strike_price') or 'N/A'
-        contract = data.get('contract') or 'n/a'
-        dte = data.get('dte') or data.get('days_to_expiration') or 'N/A'
-        stock_spot = data.get('stock_spot') or data.get('underlying_price') or 'N/A'
-        bid_range = data.get('bid_ask_range') or data.get('bid_range') or 'N/A'
-        option_spot = data.get('option_spot') or data.get('option_price') or 'N/A'
-        size = data.get('size') or data.get('contracts') or 'N/A'
-        premium = data.get('premium') or data.get('notional') or 'N/A'
-        volume = data.get('volume') or 'N/A'
-        oi = data.get('oi') or data.get('open_interest') or 'N/A'
-        chain_bid = data.get('chain_bid') or data.get('bid') or 'N/A'
-        chain_ask = data.get('chain_ask') or data.get('ask') or 'N/A'
-        legs = data.get('legs') or []
-        code = data.get('code') or 'N/A'
-        flags = data.get('flags') or []
-        tags = data.get('tags') or []
-        uw_info = data.get('unusual_whales') or {}
-        uw_id = uw_info.get('alert_id') or 'n/a'
-        uw_score = uw_info.get('score')
+        ticker = data.get("ticker") or data.get("symbol") or "UNKNOWN"
+        side = data.get("side") or data.get("direction") or "N/A"
+        call_put = data.get("call_put") or data.get("option_type") or ""
+        strike = data.get("strike") or data.get("strike_price") or "N/A"
+        contract = data.get("contract") or "n/a"
+        dte = data.get("dte") or data.get("days_to_expiration") or "N/A"
+        stock_spot = data.get("stock_spot") or data.get("underlying_price") or "N/A"
+        bid_range = data.get("bid_ask_range") or data.get("bid_range") or "N/A"
+        option_spot = data.get("option_spot") or data.get("option_price") or "N/A"
+        size = data.get("size") or data.get("contracts") or "N/A"
+        premium = data.get("premium") or data.get("notional") or "N/A"
+        volume = data.get("volume") or "N/A"
+        oi = data.get("oi") or data.get("open_interest") or "N/A"
+        chain_bid = data.get("chain_bid") or data.get("bid") or "N/A"
+        chain_ask = data.get("chain_ask") or data.get("ask") or "N/A"
+        legs = data.get("legs") or []
+        code = data.get("code") or "N/A"
+        flags = data.get("flags") or []
+        tags = data.get("tags") or []
+        uw_info = data.get("unusual_whales") or {}
+        uw_id = uw_info.get("alert_id") or "n/a"
+        uw_score = uw_info.get("score")
 
-        legs_text = ", ".join(
-            f"{leg.get('ratio', 1)}x{leg.get('strike')} {leg.get('type')}"
-            for leg in legs if isinstance(leg, dict)
-        ) or "n/a"
+        legs_text = (
+            ", ".join(
+                f"{leg.get('ratio', 1)}x{leg.get('strike')} {leg.get('type')}"
+                for leg in legs
+                if isinstance(leg, dict)
+            )
+            or "n/a"
+        )
         flags_text = ", ".join(flags) if flags else "n/a"
         tags_text = ", ".join(tags) if tags else "n/a"
         tx_text = ", ".join(transaction_types) if transaction_types else "unknown"
@@ -2515,17 +3085,17 @@ class TradeBot(commands.Bot):
         return "```ansi\n" + "\n".join(lines) + "\n```"
 
     def format_market_snapshot(self, payload: dict) -> str:
-        data = payload.get('data') or payload
-        timestamp = data.get('timestamp') or payload.get('received_at') or 'N/A'
-        ticker = data.get('ticker') or data.get('symbol') or 'INDEX'
-        stock_spot = data.get('stock_spot') or data.get('price') or 'N/A'
-        bid = data.get('bid') or 'N/A'
-        ask = data.get('ask') or 'N/A'
-        volume = data.get('volume') or 'N/A'
-        advancers = data.get('advancers') or 'N/A'
-        decliners = data.get('decliners') or 'N/A'
-        net_flow = data.get('net_flow') or data.get('net') or 'N/A'
-        session = data.get('session') or data.get('market_session') or 'N/A'
+        data = payload.get("data") or payload
+        timestamp = data.get("timestamp") or payload.get("received_at") or "N/A"
+        ticker = data.get("ticker") or data.get("symbol") or "INDEX"
+        stock_spot = data.get("stock_spot") or data.get("price") or "N/A"
+        bid = data.get("bid") or "N/A"
+        ask = data.get("ask") or "N/A"
+        volume = data.get("volume") or "N/A"
+        advancers = data.get("advancers") or "N/A"
+        decliners = data.get("decliners") or "N/A"
+        net_flow = data.get("net_flow") or data.get("net") or "N/A"
+        session = data.get("session") or data.get("market_session") or "N/A"
 
         lines = [
             f"Market state | {ticker}",
@@ -2630,7 +3200,13 @@ class RollingWindowTracker:
             percent = self._last_percent.get(key)
         else:
             self._last_percent[key] = percent
-        return MetricSnapshot(value=value, delta=delta, percent=percent, previous=previous_value, baseline=baseline)
+        return MetricSnapshot(
+            value=value,
+            delta=delta,
+            percent=percent,
+            previous=previous_value,
+            baseline=baseline,
+        )
 
 
 class RedisGexFeedMetrics:
@@ -2641,16 +3217,18 @@ class RedisGexFeedMetrics:
         self._update_count = 0
         self._error_count = 0
 
-    async def record_update(self, now: datetime, delta_map: Dict[str, MetricSnapshot], *, refresh: bool) -> None:
+    async def record_update(
+        self, now: datetime, delta_map: Dict[str, MetricSnapshot], *, refresh: bool
+    ) -> None:
         if not self.enabled:
             return
         self._update_count += 1
         mapping = {
-            'last_update_ts': now.isoformat(),
-            'update_count': str(self._update_count),
+            "last_update_ts": now.isoformat(),
+            "update_count": str(self._update_count),
         }
         if refresh:
-            mapping['last_refresh_ts'] = now.isoformat()
+            mapping["last_refresh_ts"] = now.isoformat()
         mapping.update(self._flatten_delta_map(delta_map))
         await asyncio.to_thread(self.redis_client.hset, self.key, mapping=mapping)
 
@@ -2659,24 +3237,26 @@ class RedisGexFeedMetrics:
             return
         self._error_count += 1
         mapping = {
-            'last_error_ts': now.isoformat(),
-            'error_count': str(self._error_count),
-            'last_error_reason': reason,
+            "last_error_ts": now.isoformat(),
+            "error_count": str(self._error_count),
+            "last_error_reason": reason,
         }
         await asyncio.to_thread(self.redis_client.hset, self.key, mapping=mapping)
 
-    def _flatten_delta_map(self, delta_map: Dict[str, MetricSnapshot]) -> Dict[str, str]:
+    def _flatten_delta_map(
+        self, delta_map: Dict[str, MetricSnapshot]
+    ) -> Dict[str, str]:
         flattened: Dict[str, str] = {}
         for key, snapshot in (delta_map or {}).items():
             if not isinstance(snapshot, MetricSnapshot):
                 continue
-            flattened[f'{key}_value'] = self._stringify(snapshot.value)
-            flattened[f'{key}_delta'] = self._stringify(snapshot.delta)
-            flattened[f'{key}_percent'] = self._stringify(snapshot.percent)
+            flattened[f"{key}_value"] = self._stringify(snapshot.value)
+            flattened[f"{key}_delta"] = self._stringify(snapshot.delta)
+            flattened[f"{key}_percent"] = self._stringify(snapshot.percent)
         return flattened
 
     @staticmethod
     def _stringify(value: Optional[float]) -> str:
         if value is None:
-            return ''
+            return ""
         return f"{value}"

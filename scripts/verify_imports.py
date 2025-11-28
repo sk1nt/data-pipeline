@@ -168,7 +168,9 @@ def compute_coverage(
     reports: List[dict] = []
     for spec, dates in zip(specs, per_spec_dates):
         effective_start = max(start_date, spec.coverage_start or start_date)
-        effective_dates = [d for d in dates if effective_start <= d <= window_end and d.weekday() < 5]
+        effective_dates = [
+            d for d in dates if effective_start <= d <= window_end and d.weekday() < 5
+        ]
         expected_days = _business_days(effective_start, window_end)
         if effective_start > window_end:
             expected_days = []

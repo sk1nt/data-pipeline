@@ -8,11 +8,15 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 security = HTTPBearer()
 
+
 def get_db_connection():
-    db_path = os.path.join(os.path.dirname(__file__), '../../../data/tick_data.db')
+    db_path = os.path.join(os.path.dirname(__file__), "../../../data/tick_data.db")
     return duckdb.connect(db_path)
 
-def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+
+def verify_api_key(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> str:
     """Verify API key and return model_id."""
     api_key = credentials.credentials
     key_hash = hashlib.sha256(api_key.encode()).hexdigest()
@@ -20,8 +24,7 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)
     conn = get_db_connection()
     try:
         result = conn.execute(
-            "SELECT model_id FROM ai_model WHERE api_key_hash = ?",
-            [key_hash]
+            "SELECT model_id FROM ai_model WHERE api_key_hash = ?", [key_hash]
         ).fetchone()
 
         if not result:
@@ -32,20 +35,20 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)
         # Update last access
         conn.execute(
             "UPDATE ai_model SET last_access = CURRENT_TIMESTAMP, query_count = query_count + 1 WHERE model_id = ?",
-            [model_id]
+            [model_id],
         )
 
         return model_id
     finally:
         conn.close()
 
+
 def check_permissions(model_id: str, required_permissions: dict) -> bool:
     """Check if model has required permissions."""
     conn = get_db_connection()
     try:
         result = conn.execute(
-            "SELECT access_permissions FROM ai_model WHERE model_id = ?",
-            [model_id]
+            "SELECT access_permissions FROM ai_model WHERE model_id = ?", [model_id]
         ).fetchone()
 
         if not result:

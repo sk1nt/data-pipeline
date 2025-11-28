@@ -19,7 +19,7 @@ class TestPriorityRequest:
         request = PriorityRequest(
             data_type=GEXDataType.TICK_DATA,
             priority_level=PriorityLevel.HIGH,
-            source_id=uuid4()
+            source_id=uuid4(),
         )
 
         assert request.data_type == GEXDataType.TICK_DATA
@@ -34,7 +34,7 @@ class TestPriorityRequest:
             data_type=GEXDataType.DEPTH_DATA,
             priority_level=PriorityLevel.URGENT,
             source_id=uuid4(),
-            deadline=deadline
+            deadline=deadline,
         )
 
         assert request.deadline == deadline
@@ -47,7 +47,7 @@ class TestPriorityRequest:
             data_type=GEXDataType.TICK_DATA,
             priority_level=PriorityLevel.NORMAL,
             source_id=uuid4(),
-            deadline=past_deadline
+            deadline=past_deadline,
         )
 
         assert request.is_overdue() is True
@@ -58,10 +58,7 @@ class TestDataSource:
 
     def test_create_data_source(self):
         """Test creating a basic data source."""
-        source = DataSource(
-            base_url="https://api.example.com",
-            name="Example API"
-        )
+        source = DataSource(base_url="https://api.example.com", name="Example API")
 
         assert source.base_url == "https://api.example.com"
         assert source.name == "Example API"
@@ -73,32 +70,20 @@ class TestDataSource:
     def test_data_source_url_validation(self):
         """Test URL validation for data source."""
         # Valid HTTPS URL
-        source = DataSource(
-            base_url="https://api.example.com",
-            name="Valid HTTPS"
-        )
+        source = DataSource(base_url="https://api.example.com", name="Valid HTTPS")
         assert source.base_url == "https://api.example.com"
 
         # Valid HTTP URL
-        source = DataSource(
-            base_url="http://api.example.com",
-            name="Valid HTTP"
-        )
+        source = DataSource(base_url="http://api.example.com", name="Valid HTTP")
         assert source.base_url == "http://api.example.com"
 
         # Invalid URL should raise ValueError
         with pytest.raises(ValueError, match="base_url must be a valid HTTP/HTTPS URL"):
-            DataSource(
-                base_url="ftp://api.example.com",
-                name="Invalid Protocol"
-            )
+            DataSource(base_url="ftp://api.example.com", name="Invalid Protocol")
 
     def test_data_source_metrics(self):
         """Test data source metrics calculation."""
-        source = DataSource(
-            base_url="https://api.example.com",
-            name="Test Source"
-        )
+        source = DataSource(base_url="https://api.example.com", name="Test Source")
 
         # Initial state
         assert source.success_rate == 1.0  # No requests yet
@@ -120,10 +105,7 @@ class TestDataSource:
 
     def test_data_source_reliability(self):
         """Test reliability threshold checking."""
-        source = DataSource(
-            base_url="https://api.example.com",
-            name="Test Source"
-        )
+        source = DataSource(base_url="https://api.example.com", name="Test Source")
 
         # Initially reliable
         assert source.is_reliable() is True

@@ -30,29 +30,105 @@ def setup_sys_path() -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Process a single trading day of MNQ depth + ticks")
+    parser = argparse.ArgumentParser(
+        description="Process a single trading day of MNQ depth + ticks"
+    )
     parser.add_argument("--date", required=True, help="Trading date YYYY-MM-DD")
-    parser.add_argument("--symbol", default="MNQ", help="Canonical symbol (used in output paths)")
-    parser.add_argument("--scid-file", required=True, help="Path to SCID file covering the date")
-    parser.add_argument("--depth-dir", required=True, help="Directory containing .depth files")
-    parser.add_argument("--depth-prefix", default="MNQZ25_FUT_CME", help="Depth filename prefix before .YYYY-MM-DD.depth")
-    parser.add_argument("--depth-parquet-dir", default="data/parquet/depth", help="Depth parquet root")
-    parser.add_argument("--tick-parquet-dir", default="data/parquet/tick", help="Tick parquet root")
-    parser.add_argument("--top-k", type=int, default=80, help="Number of bid/ask levels to retain")
-    parser.add_argument("--depth-chunk-size", type=int, default=100_000, help="Snapshots per depth parquet chunk flush")
-    parser.add_argument("--tick-chunk-size", type=int, default=50_000, help="Tick rows per parquet chunk flush")
-    parser.add_argument("--max-per-day", type=int, default=0, help="Optional tick cap per day (0 = unlimited)")
-    parser.add_argument("--emit-tick-parquet", action="store_true", help="Write tick parquet slices (always on)")
-    parser.add_argument("--log-dir", default="logs", help="Directory for per-day worker logs")
-    parser.add_argument("--threads", type=int, default=0, help="Internal thread count (0 = auto)")
-    parser.add_argument("--parquet-compression", default="zstd", help="Parquet compression codec (snappy,zstd,gzip)")
-    parser.add_argument("--parquet-compression-level", type=int, default=1, help="Parquet compression level (if supported by codec)")
-    parser.add_argument("--parquet-row-group-size", type=int, default=0, help="Target parquet row group size in bytes (0 = default chunking)")
-    parser.add_argument("--max-memory-mb", type=int, default=0, help="Optional: maximum memory in MB to allow before flushing (0 = disabled)")
-    parser.add_argument("--convert-timestamp-to-ms", action="store_true", help="Add ts_ms epoch milliseconds column (recommended) and keep timestamp")
-    parser.add_argument("--timestamp-tz", default="UTC", help="Timezone name for naive timestamps (e.g. UTC, America/New_York). If timestamp has tzinfo, it will be respected.")
-    parser.add_argument("--atomic-writes", action="store_true", help="Write to a temporary file and then atomically rename to final path on success")
-    parser.add_argument("--skip-existing", action="store_true", help="Skip writing if the target parquet file already exists")
+    parser.add_argument(
+        "--symbol", default="MNQ", help="Canonical symbol (used in output paths)"
+    )
+    parser.add_argument(
+        "--scid-file", required=True, help="Path to SCID file covering the date"
+    )
+    parser.add_argument(
+        "--depth-dir", required=True, help="Directory containing .depth files"
+    )
+    parser.add_argument(
+        "--depth-prefix",
+        default="MNQZ25_FUT_CME",
+        help="Depth filename prefix before .YYYY-MM-DD.depth",
+    )
+    parser.add_argument(
+        "--depth-parquet-dir", default="data/parquet/depth", help="Depth parquet root"
+    )
+    parser.add_argument(
+        "--tick-parquet-dir", default="data/parquet/tick", help="Tick parquet root"
+    )
+    parser.add_argument(
+        "--top-k", type=int, default=80, help="Number of bid/ask levels to retain"
+    )
+    parser.add_argument(
+        "--depth-chunk-size",
+        type=int,
+        default=100_000,
+        help="Snapshots per depth parquet chunk flush",
+    )
+    parser.add_argument(
+        "--tick-chunk-size",
+        type=int,
+        default=50_000,
+        help="Tick rows per parquet chunk flush",
+    )
+    parser.add_argument(
+        "--max-per-day",
+        type=int,
+        default=0,
+        help="Optional tick cap per day (0 = unlimited)",
+    )
+    parser.add_argument(
+        "--emit-tick-parquet",
+        action="store_true",
+        help="Write tick parquet slices (always on)",
+    )
+    parser.add_argument(
+        "--log-dir", default="logs", help="Directory for per-day worker logs"
+    )
+    parser.add_argument(
+        "--threads", type=int, default=0, help="Internal thread count (0 = auto)"
+    )
+    parser.add_argument(
+        "--parquet-compression",
+        default="zstd",
+        help="Parquet compression codec (snappy,zstd,gzip)",
+    )
+    parser.add_argument(
+        "--parquet-compression-level",
+        type=int,
+        default=1,
+        help="Parquet compression level (if supported by codec)",
+    )
+    parser.add_argument(
+        "--parquet-row-group-size",
+        type=int,
+        default=0,
+        help="Target parquet row group size in bytes (0 = default chunking)",
+    )
+    parser.add_argument(
+        "--max-memory-mb",
+        type=int,
+        default=0,
+        help="Optional: maximum memory in MB to allow before flushing (0 = disabled)",
+    )
+    parser.add_argument(
+        "--convert-timestamp-to-ms",
+        action="store_true",
+        help="Add ts_ms epoch milliseconds column (recommended) and keep timestamp",
+    )
+    parser.add_argument(
+        "--timestamp-tz",
+        default="UTC",
+        help="Timezone name for naive timestamps (e.g. UTC, America/New_York). If timestamp has tzinfo, it will be respected.",
+    )
+    parser.add_argument(
+        "--atomic-writes",
+        action="store_true",
+        help="Write to a temporary file and then atomically rename to final path on success",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip writing if the target parquet file already exists",
+    )
     return parser.parse_args()
 
 
@@ -145,19 +221,19 @@ def write_depth_parquet(
         for idx in range(top_k):
             if idx < len(snapshot.bids):
                 level = snapshot.bids[idx]
-                record[f"bid_price_{idx+1}"] = level.price / 100.0
-                record[f"bid_size_{idx+1}"] = level.quantity
+                record[f"bid_price_{idx + 1}"] = level.price / 100.0
+                record[f"bid_size_{idx + 1}"] = level.quantity
             else:
-                record[f"bid_price_{idx+1}"] = None
-                record[f"bid_size_{idx+1}"] = None
+                record[f"bid_price_{idx + 1}"] = None
+                record[f"bid_size_{idx + 1}"] = None
         for idx in range(top_k):
             if idx < len(snapshot.asks):
                 level = snapshot.asks[idx]
-                record[f"ask_price_{idx+1}"] = level.price / 100.0
-                record[f"ask_size_{idx+1}"] = level.quantity
+                record[f"ask_price_{idx + 1}"] = level.price / 100.0
+                record[f"ask_size_{idx + 1}"] = level.quantity
             else:
-                record[f"ask_price_{idx+1}"] = None
-                record[f"ask_size_{idx+1}"] = None
+                record[f"ask_price_{idx + 1}"] = None
+                record[f"ask_size_{idx + 1}"] = None
         if convert_timestamp_to_ms:
             # Robust conversion: support datetime or numeric epoch (seconds or ms)
             val = snapshot.timestamp
@@ -201,7 +277,9 @@ def write_depth_parquet(
             tbl = pl.DataFrame(rows)
             arrow_tbl = tbl.to_arrow()
             if writer is None:
-                writer = pq.ParquetWriter(tmp_file, arrow_tbl.schema, compression=parquet_compression)
+                writer = pq.ParquetWriter(
+                    tmp_file, arrow_tbl.schema, compression=parquet_compression
+                )
             writer.write_table(arrow_tbl)
             rows.clear()
             if snapshots % 100000 == 0:
@@ -210,7 +288,9 @@ def write_depth_parquet(
         tbl = pl.DataFrame(rows)
         arrow_tbl = tbl.to_arrow()
         if writer is None:
-            writer = pq.ParquetWriter(tmp_file, arrow_tbl.schema, compression=parquet_compression)
+            writer = pq.ParquetWriter(
+                tmp_file, arrow_tbl.schema, compression=parquet_compression
+            )
         writer.write_table(arrow_tbl)
         rows.clear()
     if writer is not None:
@@ -218,7 +298,9 @@ def write_depth_parquet(
     if atomic_writes and tmp_file.exists():
         tmp_file.replace(out_file)
     duration = time.time() - start
-    logger.info("Depth: wrote %d snapshots to %s in %.2fs", snapshots, out_file, duration)
+    logger.info(
+        "Depth: wrote %d snapshots to %s in %.2fs", snapshots, out_file, duration
+    )
     return snapshots
 
 
@@ -275,7 +357,9 @@ def write_tick_parquet(
     limit = max_per_day if max_per_day > 0 else None
     if convert_timestamp_to_ms:
         logger.info("Ticks: convert timestamps to ms using tz=%s", timestamp_tz)
-    for record in parse_scid_file_backwards_generator(str(scid_file), date_filter=date_filter, max_records=limit):
+    for record in parse_scid_file_backwards_generator(
+        str(scid_file), date_filter=date_filter, max_records=limit
+    ):
         ts = record["timestamp"]
         if ts.strftime("%Y-%m-%d") != date_str:
             continue
@@ -321,7 +405,9 @@ def write_tick_parquet(
             tbl = pl.DataFrame(rows)
             arrow_tbl = tbl.to_arrow()
             if writer is None:
-                writer = pq.ParquetWriter(tmp_file, arrow_tbl.schema, compression=parquet_compression)
+                writer = pq.ParquetWriter(
+                    tmp_file, arrow_tbl.schema, compression=parquet_compression
+                )
             writer.write_table(arrow_tbl)
             rows.clear()
             if ticks % 100000 == 0:
@@ -330,7 +416,9 @@ def write_tick_parquet(
         tbl = pl.DataFrame(rows)
         arrow_tbl = tbl.to_arrow()
         if writer is None:
-            writer = pq.ParquetWriter(tmp_file, arrow_tbl.schema, compression=parquet_compression)
+            writer = pq.ParquetWriter(
+                tmp_file, arrow_tbl.schema, compression=parquet_compression
+            )
         writer.write_table(arrow_tbl)
         rows.clear()
     if writer is not None:

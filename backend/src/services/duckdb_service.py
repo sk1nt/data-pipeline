@@ -8,12 +8,14 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = os.getenv("DUCKDB_PATH", "data/tick_data.db")
 
+
 def get_db_connection():
     """Get DuckDB connection, creating database if needed."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = duckdb.connect(DB_PATH)
     create_tables(conn)
     return conn
+
 
 def create_tables(conn: duckdb.DuckDBPyConnection):
     """Create all necessary tables if they don't exist."""
@@ -97,58 +99,74 @@ def create_tables(conn: duckdb.DuckDBPyConnection):
 
     logger.info("Database tables created or verified")
 
-def insert_ai_model(model_id: str, name: str, permissions: Dict[str, Any], api_key_hash: str):
+
+def insert_ai_model(
+    model_id: str, name: str, permissions: Dict[str, Any], api_key_hash: str
+):
     """Insert a new AI model."""
     conn = get_db_connection()
     try:
-        conn.execute("""
+        conn.execute(
+            """
             INSERT OR IGNORE INTO ai_model (model_id, name, access_permissions, api_key_hash)
             VALUES (?, ?, ?, ?)
-        """, [model_id, name, json.dumps(permissions), api_key_hash])
+        """,
+            [model_id, name, json.dumps(permissions), api_key_hash],
+        )
         conn.commit()
     finally:
         conn.close()
 
-def get_historical_ticks(symbol: str, start_time, end_time, interval: str = "1h") -> List[Dict[str, Any]]:
+
+def get_historical_ticks(
+    symbol: str, start_time, end_time, interval: str = "1h"
+) -> List[Dict[str, Any]]:
     """Get historical enriched data."""
     conn = get_db_connection()
     try:
         # For simplicity, return raw ticks aggregated
-        result = conn.execute("""
+        result = conn.execute(
+            """
             SELECT symbol, timestamp, price, volume
             FROM tick_data
             WHERE symbol = ? AND timestamp BETWEEN ? AND ?
             ORDER BY timestamp
-        """, [symbol, start_time, end_time]).fetchall()
-        
+        """,
+            [symbol, start_time, end_time],
+        ).fetchall()
+
         return [
             {
                 "symbol": row[0],
                 "timestamp": row[1],
                 "price": float(row[2]),
-                "volume": row[3]
+                "volume": row[3],
             }
             for row in result
         ]
     finally:
         conn.close()
 
+
 def store_tick_data(ticks: List[Dict[str, Any]]):
     """Store tick data."""
     conn = get_db_connection()
     try:
         for tick in ticks:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO tick_data (symbol, timestamp, price, volume, tick_type, source)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, [
-                tick["symbol"],
-                tick["timestamp"],
-                tick["price"],
-                tick.get("volume"),
-                tick.get("tick_type", "trade"),
-                tick.get("source", "unknown")
-            ])
+            """,
+                [
+                    tick["symbol"],
+                    tick["timestamp"],
+                    tick["price"],
+                    tick.get("volume"),
+                    tick.get("tick_type", "trade"),
+                    tick.get("source", "unknown"),
+                ],
+            )
         conn.commit()
     finally:
         conn.close()

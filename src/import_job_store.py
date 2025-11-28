@@ -8,7 +8,7 @@ import duckdb
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class ImportJobStore:
@@ -56,7 +56,17 @@ class ImportJobStore:
             ).fetchone()
             if not row:
                 return None
-            keys = ["id", "url", "checksum", "ticker", "status", "records_processed", "last_error", "created_at", "updated_at"]
+            keys = [
+                "id",
+                "url",
+                "checksum",
+                "ticker",
+                "status",
+                "records_processed",
+                "last_error",
+                "created_at",
+                "updated_at",
+            ]
             return dict(zip(keys, row))
         finally:
             con.close()
@@ -78,7 +88,10 @@ class ImportJobStore:
         now = _now()
         con = self._connect()
         try:
-            con.execute("UPDATE import_jobs SET status = ?, updated_at = ? WHERE id = ?", ["started", now, job_id])
+            con.execute(
+                "UPDATE import_jobs SET status = ?, updated_at = ? WHERE id = ?",
+                ["started", now, job_id],
+            )
         finally:
             con.close()
 

@@ -5,7 +5,7 @@ from src.api.gex_api import router as gex_router
 app = FastAPI(
     title="Data Pipeline API",
     description="API for importing and querying GEX data",
-    version="1.0.0"
+    version="1.0.0",
 )
 
 # Add CORS middleware
@@ -20,9 +20,11 @@ app.add_middleware(
 # Include routers
 app.include_router(gex_router, prefix="/api", tags=["GEX"])
 
+
 @app.get("/")
 async def root():
     return {"message": "Data Pipeline API", "version": "1.0.0"}
+
 
 @app.get("/health")
 async def health():

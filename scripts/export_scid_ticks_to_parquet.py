@@ -37,7 +37,9 @@ from src.lib.scid_parser import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export SCID ticks to Parquet")
-    parser.add_argument("--scid-dir", required=True, help="Directory containing *.scid files")
+    parser.add_argument(
+        "--scid-dir", required=True, help="Directory containing *.scid files"
+    )
     parser.add_argument(
         "--start-date",
         required=True,
@@ -146,7 +148,9 @@ def roll_start_datetime(exp_year: int, exp_month: int) -> dt.datetime:
     return dt.datetime.combine(roll_sunday, dt.time(22, 0))
 
 
-def build_contract_windows(scid_files: List[Path]) -> Dict[Path, Tuple[dt.datetime, dt.datetime]]:
+def build_contract_windows(
+    scid_files: List[Path],
+) -> Dict[Path, Tuple[dt.datetime, dt.datetime]]:
     """
     For each SCID file determine [start, end) timestamps that should map to that contract
     based on CME quarterly roll schedule.
@@ -178,7 +182,9 @@ def ensure_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def write_parquet(symbol: str, date_key: dt.date, rows: List[dict], out_root: Path) -> None:
+def write_parquet(
+    symbol: str, date_key: dt.date, rows: List[dict], out_root: Path
+) -> None:
     if not rows:
         return
     df = (
@@ -212,7 +218,9 @@ def export_symbol(
     for scid_path in scid_files:
         count = 0
         interval = contract_windows.get(scid_path)
-        for record in parse_scid_file_backwards_generator(str(scid_path), max_records=max_records):
+        for record in parse_scid_file_backwards_generator(
+            str(scid_path), max_records=max_records
+        ):
             ts: dt.datetime = record["timestamp"]
             if ts > end_dt:
                 continue
@@ -260,7 +268,11 @@ def main() -> None:
 
     start_dt = dt.datetime.strptime(args.start_date, "%Y-%m-%d")
     # inclusive end-of-day
-    end_dt = dt.datetime.strptime(args.end_date, "%Y-%m-%d") + dt.timedelta(days=1) - dt.timedelta(microseconds=1)
+    end_dt = (
+        dt.datetime.strptime(args.end_date, "%Y-%m-%d")
+        + dt.timedelta(days=1)
+        - dt.timedelta(microseconds=1)
+    )
     max_records = args.max_records if args.max_records > 0 else None
 
     for symbol in args.symbols:

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Smoke-test the TastyTrade DXLink streamer without running the full pipeline."""
+
 import asyncio
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ def _load_tastytrade_dependencies():
 
 settings, StreamerSettings, TastyTradeStreamer = _load_tastytrade_dependencies()
 
+
 async def main() -> None:
     streamer = TastyTradeStreamer(
         StreamerSettings(
@@ -38,6 +40,7 @@ async def main() -> None:
     finally:
         await streamer.stop()
         print("Streamer stopped")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

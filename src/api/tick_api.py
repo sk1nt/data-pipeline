@@ -6,11 +6,12 @@ from src.models.tick_record import TickRecord
 
 router = APIRouter()
 
+
 @router.get("/ticks", response_model=List[TickRecord])
 async def get_tick_data(
     symbol: str = Query(..., enum=["MNQ", "NQ"], description="Symbol"),
     start: Optional[datetime] = Query(None, description="Start timestamp"),
-    end: Optional[datetime] = Query(None, description="End timestamp")
+    end: Optional[datetime] = Query(None, description="End timestamp"),
 ):
     """Query tick records."""
     try:

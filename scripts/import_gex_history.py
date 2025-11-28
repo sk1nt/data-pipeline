@@ -27,13 +27,18 @@ def download_file(url: str, out_path: Path) -> None:
     """Download a file from a URL to a local path."""
     with requests.get(url, stream=True) as r:
         r.raise_for_status()
-        with open(out_path, 'wb') as f:
+        with open(out_path, "wb") as f:
             for chunk in r.iter_content(chunk_size=8192):
                 f.write(chunk)
 
 
-def import_to_duckdb_and_parquet(file_path: Path, duckdb_path: Path, parquet_path: Path,
-                                 table_name: str = "strikes", batch_size: int = 50) -> None:
+def import_to_duckdb_and_parquet(
+    file_path: Path,
+    duckdb_path: Path,
+    parquet_path: Path,
+    table_name: str = "strikes",
+    batch_size: int = 50,
+) -> None:
     """Import file to DuckDB and export strikes to Parquet using streaming JSON processing."""
     LOG = logging.getLogger("import_gex_history")
 
@@ -41,7 +46,7 @@ def import_to_duckdb_and_parquet(file_path: Path, duckdb_path: Path, parquet_pat
     import pandas as pd
     import json
     from decimal import Decimal
-    
+
     def convert_decimals(obj):
         """Recursively convert Decimal objects to floats."""
         if isinstance(obj, Decimal):
@@ -53,13 +58,15 @@ def import_to_duckdb_and_parquet(file_path: Path, duckdb_path: Path, parquet_pat
         else:
             return obj
 
-    LOG.info(f"Processing JSON file with streaming: {file_path} in batches of {batch_size}")
+    LOG.info(
+        f"Processing JSON file with streaming: {file_path} in batches of {batch_size}"
+    )
 
     con = duckdb.connect(str(duckdb_path))
-    
+
     # Drop table if exists to allow re-imports
     con.execute("DROP TABLE IF EXISTS strikes")
-    
+
     # Create table with explicit schema to avoid type inference issues
     create_table_sql = f"""
     CREATE TABLE {table_name} (
@@ -84,7 +91,7 @@ def import_to_duckdb_and_parquet(file_path: Path, duckdb_path: Path, parquet_pat
     """
     con.execute(create_table_sql)
     LOG.info("Created table with explicit schema")
-    
+
     batch_data = []
     column_order = [
         "timestamp",
@@ -107,14 +114,14 @@ def import_to_duckdb_and_parquet(file_path: Path, duckdb_path: Path, parquet_pat
     ]
     batch_count = 0
     total_processed = 0
-    
+
     # Use ijson for streaming JSON parsing
-    with open(file_path, 'rb') as f:
+    with open(file_path, "rb") as f:
         # Parse items in the JSON array
-        for record in ijson.items(f, 'item'):
+        for record in ijson.items(f, "item"):
             # Convert Decimal objects to floats recursively
             record = convert_decimals(record)
-            
+
             ts = record.get("timestamp")
             if isinstance(ts, str):
                 ts_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -127,61 +134,71 @@ def import_to_duckdb_and_parquet(file_path: Path, duckdb_path: Path, parquet_pat
             record["timestamp_iso"] = ts_dt.isoformat()
 
             # Convert complex types to JSON strings
-            if 'strikes' in record:
-                record['strikes'] = json.dumps(record['strikes'])
-            if 'max_priors' in record:
-                record['max_priors'] = json.dumps(record['max_priors'])
-            
+            if "strikes" in record:
+                record["strikes"] = json.dumps(record["strikes"])
+            if "max_priors" in record:
+                record["max_priors"] = json.dumps(record["max_priors"])
+
             batch_data.append(record)
-            
+
             # Process batch when it reaches batch_size
             if len(batch_data) >= batch_size:
                 batch_count += 1
-                LOG.info(f"Processing batch {batch_count} ({len(batch_data)} records, total: {total_processed + len(batch_data)})")
-                
+                LOG.info(
+                    f"Processing batch {batch_count} ({len(batch_data)} records, total: {total_processed + len(batch_data)})"
+                )
+
                 # Convert to DataFrame
                 batch_df = pd.DataFrame(batch_data, columns=column_order)
                 con.register("batch_df", batch_df)
-                
+
                 # Insert batch with explicit column order
                 selected_cols = ", ".join(column_order)
                 con.execute(
                     f"INSERT INTO {table_name} ({selected_cols}) SELECT {selected_cols} FROM batch_df"
                 )
-                
+
                 total_processed += len(batch_data)
                 batch_data = []  # Reset for next batch
-    
+
     # Process any remaining records
     if batch_data:
         batch_count += 1
-        LOG.info(f"Processing final batch {batch_count} ({len(batch_data)} records, total: {total_processed + len(batch_data)})")
-        
+        LOG.info(
+            f"Processing final batch {batch_count} ({len(batch_data)} records, total: {total_processed + len(batch_data)})"
+        )
+
         batch_df = pd.DataFrame(batch_data, columns=column_order)
         con.register("batch_df", batch_df)
         selected_cols = ", ".join(column_order)
         con.execute(
             f"INSERT INTO {table_name} ({selected_cols}) SELECT {selected_cols} FROM batch_df"
         )
-        
+
         total_processed += len(batch_data)
 
     LOG.info(f"Completed processing {total_processed} records")
     LOG.info(f"Exporting to Parquet: {parquet_path}")
-    
+
     # Export the entire table to Parquet
     con.execute(f"COPY {table_name} TO '{parquet_path}' (FORMAT PARQUET)")
     con.close()
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     LOG = logging.getLogger("import_gex_history")
-    parser = argparse.ArgumentParser(description="Download GEX history blob and import into DuckDB/Parquet.")
+    parser = argparse.ArgumentParser(
+        description="Download GEX history blob and import into DuckDB/Parquet."
+    )
     parser.add_argument("url", help="Signed URL for the history blob")
     parser.add_argument("ticker", help="Ticker symbol, e.g. NQ_NDX")
     parser.add_argument("endpoint", help="Endpoint/kind for the dataset, e.g. gex_zero")
-    parser.add_argument("--queue-id", type=int, help="Optional queue id for status tracking")
+    parser.add_argument(
+        "--queue-id", type=int, help="Optional queue id for status tracking"
+    )
     args = parser.parse_args()
 
     queue_id = args.queue_id
@@ -209,7 +226,7 @@ def main():
     day_str = trade_date.strftime("%Y-%m-%d")
 
     # Include endpoint (e.g., gex_zero) in directory and filename for clarity
-    endpoint_clean = endpoint.replace('/', '_').replace(' ', '_')
+    endpoint_clean = endpoint.replace("/", "_").replace(" ", "_")
     raw_dir = PROJECT_ROOT / "data" / "source" / "gexbot" / ticker / endpoint_clean
     raw_dir.mkdir(parents=True, exist_ok=True)
     source_name = Path(urlsplit(url).path).name or f"{day_str}.json"
@@ -222,7 +239,17 @@ def main():
         day_str,
         local_file,
     )
-    parquet_dir = PROJECT_ROOT / "data" / "parquet" / "gex" / year / month / ticker / endpoint_clean / day_str
+    parquet_dir = (
+        PROJECT_ROOT
+        / "data"
+        / "parquet"
+        / "gex"
+        / year
+        / month
+        / ticker
+        / endpoint_clean
+        / day_str
+    )
     parquet_dir.mkdir(parents=True, exist_ok=True)
     parquet_file = parquet_dir / "strikes.parquet"
     (PROJECT_ROOT / "data").mkdir(parents=True, exist_ok=True)
@@ -233,10 +260,16 @@ def main():
             gex_history_queue.mark_job_started(queue_id)
         LOG.info(f"Downloading {url} to {local_file}...")
         download_file(url, local_file)
-        LOG.info(f"Download complete. File exists: {local_file.exists()} Size: {local_file.stat().st_size if local_file.exists() else 'N/A'}")
+        LOG.info(
+            f"Download complete. File exists: {local_file.exists()} Size: {local_file.stat().st_size if local_file.exists() else 'N/A'}"
+        )
         LOG.info(f"Importing {local_file} to DuckDB and Parquet...")
-        import_to_duckdb_and_parquet(local_file, duckdb_file, parquet_file, batch_size=50)
-        LOG.info(f"Done. Parquet file: {parquet_file} Exists: {parquet_file.exists()} Size: {parquet_file.stat().st_size if parquet_file.exists() else 'N/A'}")
+        import_to_duckdb_and_parquet(
+            local_file, duckdb_file, parquet_file, batch_size=50
+        )
+        LOG.info(
+            f"Done. Parquet file: {parquet_file} Exists: {parquet_file.exists()} Size: {parquet_file.stat().st_size if parquet_file.exists() else 'N/A'}"
+        )
         if queue_id is not None:
             LOG.info(f"Marking queue {queue_id} as completed")
             gex_history_queue.mark_job_completed(queue_id)

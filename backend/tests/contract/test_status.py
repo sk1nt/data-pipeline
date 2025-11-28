@@ -3,6 +3,7 @@ from backend.src.api.main import app
 
 client = TestClient(app)
 
+
 def test_status_contract():
     """Contract test for /status endpoint."""
     response = client.get("/api/v1/status")

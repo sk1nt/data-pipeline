@@ -12,7 +12,9 @@ from zoneinfo import ZoneInfo
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Remove GEX data before cutoff date (UTC).")
+    parser = argparse.ArgumentParser(
+        description="Remove GEX data before cutoff date (UTC)."
+    )
     parser.add_argument(
         "--cutoff",
         required=True,
@@ -32,7 +34,10 @@ def delete_from_gex_data(cutoff_epoch_ms: int, dry_run: bool) -> None:
         for table in ["gex_snapshots", "gex_strikes"]:
             stmt = f"DELETE FROM {table} WHERE timestamp < ?"
             if dry_run:
-                count = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE timestamp < ?", [cutoff_epoch_ms]).fetchone()[0]
+                count = conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE timestamp < ?",
+                    [cutoff_epoch_ms],
+                ).fetchone()[0]
                 print(f"[dry-run] {table}: would delete {count:,} rows")
             else:
                 conn.execute(stmt, [cutoff_epoch_ms])

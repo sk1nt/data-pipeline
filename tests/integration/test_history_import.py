@@ -1,4 +1,5 @@
 """Integration-style tests for /gex_history_url workflow."""
+
 from __future__ import annotations
 
 import sys
@@ -33,8 +34,13 @@ def test_history_endpoint_enqueues_request(client):
         "type": "gex_zero",
         "ticker": "SPY",
     }
-    with patch("src.lib.gex_history_queue.gex_history_queue.enqueue_request", return_value=101) as mock_enqueue, \
-         patch("src.data_pipeline._trigger_queue_processing", new=AsyncMock()):
+    with (
+        patch(
+            "src.lib.gex_history_queue.gex_history_queue.enqueue_request",
+            return_value=101,
+        ) as mock_enqueue,
+        patch("src.data_pipeline._trigger_queue_processing", new=AsyncMock()),
+    ):
         response = client.post("/gex_history_url", json=payload)
 
     assert response.status_code == 200
@@ -55,7 +61,9 @@ def test_history_endpoint_rejects_bad_url(client):
         "type": "gex_zero",
         "ticker": "SPY",
     }
-    with patch("src.lib.gex_history_queue.gex_history_queue.enqueue_request") as mock_enqueue:
+    with patch(
+        "src.lib.gex_history_queue.gex_history_queue.enqueue_request"
+    ) as mock_enqueue:
         response = client.post("/gex_history_url", json=payload)
 
     assert response.status_code == 422
@@ -68,8 +76,13 @@ def test_history_endpoint_infers_ticker_from_url(client):
         "gex_type": "gex_zero",
         "metadata": {"any": "value"},
     }
-    with patch("src.lib.gex_history_queue.gex_history_queue.enqueue_request", return_value=202) as mock_enqueue, \
-         patch("src.data_pipeline._trigger_queue_processing", new=AsyncMock()):
+    with (
+        patch(
+            "src.lib.gex_history_queue.gex_history_queue.enqueue_request",
+            return_value=202,
+        ) as mock_enqueue,
+        patch("src.data_pipeline._trigger_queue_processing", new=AsyncMock()),
+    ):
         response = client.post("/gex_history_url", json=payload)
 
     assert response.status_code == 200

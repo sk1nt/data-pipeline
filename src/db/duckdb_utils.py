@@ -19,7 +19,9 @@ class DuckDBUtils:
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
 
-    def execute_query(self, query: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
+    def execute_query(
+        self, query: str, params: Optional[tuple] = None
+    ) -> List[Dict[str, Any]]:
         """Execute a SELECT query and return results as list of dicts."""
         self._ensure_dir()
         with closing(duckdb.connect(self.db_path)) as conn:
@@ -50,7 +52,7 @@ class DuckDBUtils:
                 result = conn.execute(query, params)
             else:
                 result = conn.execute(query)
-            return getattr(result, 'rowcount', 0)
+            return getattr(result, "rowcount", 0)
 
     def create_table_if_not_exists(self, table_name: str, schema: str):
         """Create a table if it doesn't exist (short-lived connection)."""
@@ -66,8 +68,8 @@ class DuckDBUtils:
             return
         self._ensure_dir()
         columns = list(data[0].keys())
-        placeholders = ', '.join(['?' for _ in columns])
-        column_names = ', '.join(columns)
+        placeholders = ", ".join(["?" for _ in columns])
+        column_names = ", ".join(columns)
         query = f"INSERT INTO {table_name} ({column_names}) VALUES ({placeholders})"
         values = [tuple(row[col] for col in columns) for row in data]
         with closing(duckdb.connect(self.db_path)) as conn:
@@ -84,16 +86,17 @@ class DuckDBUtils:
             except Exception:
                 return False
 
-    def export_query_to_parquet(self, query: str, output_path: str,
-                                partition_by: Optional[List[str]] = None):
+    def export_query_to_parquet(
+        self, query: str, output_path: str, partition_by: Optional[List[str]] = None
+    ):
         """Export query results to Parquet files via DuckDB COPY (short-lived conn)."""
         self._ensure_dir()
         options = ["FORMAT PARQUET"]
         if partition_by:
-            parts = ', '.join(partition_by)
+            parts = ", ".join(partition_by)
             options.append(f"PARTITION_BY ({parts})")
 
-        options_clause = ', '.join(options)
+        options_clause = ", ".join(options)
         copy_sql = f"COPY ({query}) TO '{output_path}' ({options_clause})"
         with closing(duckdb.connect(self.db_path)) as conn:
             conn.execute(copy_sql)

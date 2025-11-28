@@ -10,12 +10,15 @@ NY_TZ = ZoneInfo("America/New_York")
 
 router = APIRouter()
 
+
 @router.get("/gex", response_model=List[GEXSnapshot])
 async def get_gex_data(
     symbol: str = Query(..., description="Symbol, e.g., NQ_NDX"),
     start: Optional[datetime] = Query(None, description="Start timestamp"),
     end: Optional[datetime] = Query(None, description="End timestamp"),
-    limit: Optional[int] = Query(1000, description="Maximum number of records to return", ge=1, le=10000)
+    limit: Optional[int] = Query(
+        1000, description="Maximum number of records to return", ge=1, le=10000
+    ),
 ):
     """Query GEX snapshots."""
     try:
@@ -41,14 +44,18 @@ async def get_gex_data(
             for row in results:
                 data = dict(row)
                 # Parse strike_data JSON
-                if 'strike_data' in data and data['strike_data']:
-                    data['strike_data'] = json.loads(data['strike_data'])
+                if "strike_data" in data and data["strike_data"]:
+                    data["strike_data"] = json.loads(data["strike_data"])
                 # Parse max_priors JSON if present
-                if 'max_priors' in data and data['max_priors'] and isinstance(data['max_priors'], str):
-                    data['max_priors'] = json.loads(data['max_priors'])
-                ts_value = data.get('timestamp')
+                if (
+                    "max_priors" in data
+                    and data["max_priors"]
+                    and isinstance(data["max_priors"], str)
+                ):
+                    data["max_priors"] = json.loads(data["max_priors"])
+                ts_value = data.get("timestamp")
                 if isinstance(ts_value, int):
-                    data['timestamp'] = _format_epoch_ms(ts_value)
+                    data["timestamp"] = _format_epoch_ms(ts_value)
                 snapshots.append(GEXSnapshot.from_dict(data))
 
             return snapshots

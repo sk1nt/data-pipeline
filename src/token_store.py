@@ -71,7 +71,9 @@ class TokenStore:
         token_payload = self._extract_token_payload(data)
         if not token_payload:
             return None
-        creation_ts = int(data.get("creation_timestamp") or data.get("updated_at") or time.time())
+        creation_ts = int(
+            data.get("creation_timestamp") or data.get("updated_at") or time.time()
+        )
         upgraded = {
             "creation_timestamp": creation_ts,
             "token": token_payload,
@@ -80,11 +82,15 @@ class TokenStore:
         LOG.info("Upgraded Schwab token file to metadata format expected by schwab-py.")
         return upgraded
 
-    def persist_snapshots(self, token_payload: Dict[str, Any], issued_at: datetime | None = None) -> None:
+    def persist_snapshots(
+        self, token_payload: Dict[str, Any], issued_at: datetime | None = None
+    ) -> None:
         """Write convenience JSON snapshots for access/refresh tokens."""
         token_payload = self._extract_token_payload(token_payload) or token_payload
         issued_at = issued_at or datetime.now(timezone.utc)
-        expires_at = issued_at + timedelta(seconds=int(token_payload.get("expires_in") or 0))
+        expires_at = issued_at + timedelta(
+            seconds=int(token_payload.get("expires_in") or 0)
+        )
         access_snapshot = {
             "token": token_payload.get("access_token"),
             "token_type": token_payload.get("token_type", "Bearer"),
@@ -98,14 +104,24 @@ class TokenStore:
         }
         self._atomic_write(self.access_snapshot_path, access_snapshot)
         self._atomic_write(self.refresh_snapshot_path, refresh_snapshot)
-        LOG.debug("Wrote snapshots: %s, %s", self.access_snapshot_path, self.refresh_snapshot_path)
+        LOG.debug(
+            "Wrote snapshots: %s, %s",
+            self.access_snapshot_path,
+            self.refresh_snapshot_path,
+        )
 
-    def write_token_payload(self, token_payload: Dict[str, Any], issued_at: datetime | None = None) -> dict:
+    def write_token_payload(
+        self, token_payload: Dict[str, Any], issued_at: datetime | None = None
+    ) -> dict:
         """Persist the canonical Schwab token file in metadata format."""
         token_payload = self._extract_token_payload(token_payload) or token_payload
         issued_at = issued_at or datetime.now(timezone.utc)
         metadata = self._load_tokens_file() or {}
-        creation_ts = int(metadata.get("creation_timestamp") or metadata.get("updated_at") or time.time())
+        creation_ts = int(
+            metadata.get("creation_timestamp")
+            or metadata.get("updated_at")
+            or time.time()
+        )
         wrapped = {
             "creation_timestamp": creation_ts,
             "token": token_payload,
@@ -198,7 +214,9 @@ def refresh_and_cache_tokens(
         raise TokenRefreshError(f"Schwab refresh_token call failed: {exc}") from exc
 
     store.write_token_payload(token_payload, issued_at=issued_at)
-    expires_at = issued_at + timedelta(seconds=int(token_payload.get("expires_in") or 0))
+    expires_at = issued_at + timedelta(
+        seconds=int(token_payload.get("expires_in") or 0)
+    )
 
     return TokenRefreshResult(
         access_token_path=store.access_snapshot_path,

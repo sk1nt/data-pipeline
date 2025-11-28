@@ -86,7 +86,7 @@ class GEXHistoryImporter:
             response = requests.get(url, timeout=120)
             response.raise_for_status()
 
-            with open(local_path, 'wb') as f:
+            with open(local_path, "wb") as f:
                 f.write(response.content)
 
         try:
@@ -119,15 +119,23 @@ class GEXHistoryImporter:
     def _safe_name(value: str) -> str:
         return (value or "unknown").replace("/", "_").replace(" ", "_")
 
-    def _import_data(self, file_path: Path, ticker: str, endpoint: str, trade_day: dt.date) -> int:
+    def _import_data(
+        self, file_path: Path, ticker: str, endpoint: str, trade_day: dt.date
+    ) -> int:
         """Import data from downloaded file."""
         logger.info(f"Importing data from {file_path}")
 
-        staging_table = f"staging_raw_{ticker.lower()}_{int(datetime.utcnow().timestamp())}"
+        staging_table = (
+            f"staging_raw_{ticker.lower()}_{int(datetime.utcnow().timestamp())}"
+        )
         try:
             self._load_into_staging(file_path, staging_table)
-            inserted = self._insert_snapshots_from_staging(staging_table, ticker, trade_day)
-            strike_rows = self._insert_strikes_from_staging(staging_table, ticker, trade_day)
+            inserted = self._insert_snapshots_from_staging(
+                staging_table, ticker, trade_day
+            )
+            strike_rows = self._insert_strikes_from_staging(
+                staging_table, ticker, trade_day
+            )
             self._export_strikes_to_parquet(staging_table, ticker, endpoint, trade_day)
             logger.info("Inserted %s snapshots and %s strikes", inserted, strike_rows)
         finally:
@@ -145,18 +153,21 @@ class GEXHistoryImporter:
                 """
             )
 
-
     def _drop_staging(self, table_name: str) -> None:
         with gex_db.gex_data_connection() as conn:
             conn.execute(f"DROP TABLE IF EXISTS {table_name}")
 
-    def _insert_snapshots_from_staging(self, table_name: str, ticker: str, trade_day: dt.date) -> int:
+    def _insert_snapshots_from_staging(
+        self, table_name: str, ticker: str, trade_day: dt.date
+    ) -> int:
         ticker_sql = (ticker or "UNKNOWN").upper()
         day_str = trade_day.isoformat()
         with gex_db.gex_data_connection() as conn:
             # Ensure new columns exist
             try:
-                conn.execute("ALTER TABLE gex_snapshots ADD COLUMN IF NOT EXISTS strikes VARCHAR")
+                conn.execute(
+                    "ALTER TABLE gex_snapshots ADD COLUMN IF NOT EXISTS strikes VARCHAR"
+                )
             except Exception:
                 pass
             conn.execute(
@@ -197,7 +208,9 @@ class GEXHistoryImporter:
             inserted = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
         return inserted
 
-    def _insert_strikes_from_staging(self, table_name: str, ticker: str, trade_day: dt.date) -> int:
+    def _insert_strikes_from_staging(
+        self, table_name: str, ticker: str, trade_day: dt.date
+    ) -> int:
         ticker_sql = (ticker or "UNKNOWN").upper()
         day_str = trade_day.isoformat()
         with gex_db.gex_data_connection() as conn:
@@ -262,6 +275,7 @@ class GEXHistoryImporter:
             conn.execute(
                 f"COPY ({select_sql}) TO '{parquet_file.as_posix()}' (FORMAT 'parquet', COMPRESSION 'zstd')"
             )
+
 
 def process_historical_imports():
     """Main function to process historical import queue."""

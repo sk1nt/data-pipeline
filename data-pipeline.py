@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Data pipeline orchestration entrypoint.
 
 This module wires together the FastAPI surface area, background streamers,
@@ -15,12 +16,14 @@ following mental model in mind:
 3. Anything that touches Redis time-series should reuse ``RedisTimeSeriesClient``
    so history, lookup and monitoring endpoints continue to behave consistently.
 """
+
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import sys
 import threading
 import time
@@ -45,7 +48,11 @@ from src.config import settings  # noqa: E402
 from src.import_gex_history import process_historical_imports  # noqa: E402
 from src.lib.gex_history_queue import gex_history_queue  # noqa: E402
 from src.lib.redis_client import RedisClient  # noqa: E402
-from src.services.gexbot_poller import GEXBotPoller, GEXBotPollerSettings, SNAPSHOT_KEY_PREFIX  # noqa: E402
+from src.services.gexbot_poller import (
+    GEXBotPoller,
+    GEXBotPollerSettings,
+    SNAPSHOT_KEY_PREFIX,
+)  # noqa: E402
 from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreamer  # noqa: E402
 from src.services.redis_timeseries import RedisTimeSeriesClient  # noqa: E402
 from src.services.redis_flush_worker import FlushWorkerSettings, RedisFlushWorker  # noqa: E402
@@ -75,6 +82,7 @@ class HistoryPayload(BaseModel):
 
 class MLTradePayload(BaseModel):
     """Schema for machine learning driven trade signals."""
+
     symbol: str
     action: str
     direction: str
@@ -87,7 +95,7 @@ class MLTradePayload(BaseModel):
     total_trades: int
     timestamp: datetime
     simulated: bool = True
-    
+
 
 MLTradePayload.model_rebuild()
 
@@ -112,7 +120,9 @@ class SchwabStreamingService:
             LOGGER.warning("Schwab streaming disabled (set SCHWAB_ENABLED=true)")
             return
         if settings.schwab_stream_paused:
-            LOGGER.warning("Schwab streaming paused (set SCHWAB_STREAM_PAUSED=false to resume)")
+            LOGGER.warning(
+                "Schwab streaming paused (set SCHWAB_STREAM_PAUSED=false to resume)"
+            )
             return
         if self.is_running:
             LOGGER.info("Schwab streamer already running")
@@ -132,7 +142,9 @@ class SchwabStreamingService:
             LOGGER.error("Failed to build Schwab streamer: %s", exc)
             return
         self._stop_event.clear()
-        self.thread = threading.Thread(target=self._run_streamer, daemon=True, name="schwab-streamer")
+        self.thread = threading.Thread(
+            target=self._run_streamer, daemon=True, name="schwab-streamer"
+        )
         self.thread.start()
         LOGGER.info("Schwab streamer thread started")
 
@@ -153,7 +165,9 @@ class SchwabStreamingService:
         except Exception as exc:  # pragma: no cover - defensive
             LOGGER.error("Schwab streamer failed to start: %s", exc)
             return
-        LOGGER.info("Schwab streamer running for symbols: %s", ",".join(self.streamer.symbols))
+        LOGGER.info(
+            "Schwab streamer running for symbols: %s", ",".join(self.streamer.symbols)
+        )
         while not self._stop_event.wait(timeout=1):
             if not self.streamer.is_running:
                 LOGGER.warning("Schwab streamer stopped unexpectedly")
@@ -213,7 +227,9 @@ class ServiceManager:
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
-            LOGGER.warning("No running asyncio loop detected; Schwab callbacks may be disabled")
+            LOGGER.warning(
+                "No running asyncio loop detected; Schwab callbacks may be disabled"
+            )
 
     @property
     def loop(self) -> Optional[asyncio.AbstractEventLoop]:
@@ -224,12 +240,26 @@ class ServiceManager:
         self._ensure_event_loop()
         self._ensure_redis_clients()
         self._silence_streamer_logs()
-        for service in ("tastytrade", "schwab", "gex_poller", "gex_nq_poller", "redis_flush", "discord_bot"):
+        for service in (
+            "tastytrade",
+            "schwab",
+            "gex_poller",
+            "gex_nq_poller",
+            "redis_flush",
+            "discord_bot",
+        ):
             self.start_service(service)
 
     async def stop(self) -> None:
         """Stop all managed services in a best-effort fashion."""
-        for service in ("tastytrade", "schwab", "gex_poller", "gex_nq_poller", "redis_flush", "discord_bot"):
+        for service in (
+            "tastytrade",
+            "schwab",
+            "gex_poller",
+            "gex_nq_poller",
+            "redis_flush",
+            "discord_bot",
+        ):
             await self.stop_service(service)
 
     def status(self) -> Dict[str, Any]:
@@ -237,9 +267,13 @@ class ServiceManager:
         tasty_status = {
             "running": bool(self.tastytrade and self.tastytrade.is_running),
             "trade_samples": self.trade_counts.get("tastytrade", self.trade_count),
-            "last_trade_ts": self.last_trade_timestamps.get("tastytrade", self.last_trade_ts),
+            "last_trade_ts": self.last_trade_timestamps.get(
+                "tastytrade", self.last_trade_ts
+            ),
             "depth_samples": self.depth_counts.get("tastytrade", self.depth_count),
-            "last_depth_ts": self.last_depth_timestamps.get("tastytrade", self.last_depth_ts),
+            "last_depth_ts": self.last_depth_timestamps.get(
+                "tastytrade", self.last_depth_ts
+            ),
         }
         schwab_status = {
             "running": self.schwab_service.is_running,
@@ -258,7 +292,9 @@ class ServiceManager:
             "gex_nq_poller": getattr(self.gex_nq_poller, "status", lambda: {})(),
             "redis_flush_worker": getattr(self.flush_worker, "status", lambda: {})(),
             "discord_bot": getattr(
-                self.discord_bot, "status", lambda: {"running": False, "enabled": settings.discord_bot_enabled}
+                self.discord_bot,
+                "status",
+                lambda: {"running": False, "enabled": settings.discord_bot_enabled},
             )(),
             "lookup_service": {
                 "ready": bool(self.lookup_service),
@@ -295,7 +331,7 @@ class ServiceManager:
                     refresh_token=settings.tastytrade_refresh_token or "",
                     symbols=settings.tastytrade_symbol_list,
                     depth_levels=settings.tastytrade_depth_cap,
-                    enable_depth=getattr(settings, 'tastytrade_enable_depth', False),
+                    enable_depth=getattr(settings, "tastytrade_enable_depth", False),
                 ),
                 on_trade=self._handle_trade_event,
                 on_depth=self._handle_depth_event,
@@ -304,7 +340,11 @@ class ServiceManager:
             LOGGER.info("TastyTrade streamer started")
         elif name == "schwab":
             self.schwab_service.start()
-        elif name == "gex_poller" and settings.gex_polling_enabled and settings.gexbot_api_key:
+        elif (
+            name == "gex_poller"
+            and settings.gex_polling_enabled
+            and settings.gexbot_api_key
+        ):
             if self.gex_poller:
                 return
             self.gex_poller = GEXBotPoller(
@@ -325,7 +365,11 @@ class ServiceManager:
             )
             self.gex_poller.start()
             LOGGER.info("GEXBot poller started")
-        elif name == "gex_nq_poller" and settings.gex_nq_polling_enabled and settings.gexbot_api_key:
+        elif (
+            name == "gex_nq_poller"
+            and settings.gex_nq_polling_enabled
+            and settings.gexbot_api_key
+        ):
             if self.gex_nq_poller:
                 return
             symbols = settings.gex_nq_poll_symbol_list
@@ -353,7 +397,9 @@ class ServiceManager:
             if self.flush_worker:
                 return
             flush_settings = FlushWorkerSettings()
-            self.flush_worker = RedisFlushWorker(self.redis_client, self.rts, flush_settings)
+            self.flush_worker = RedisFlushWorker(
+                self.redis_client, self.rts, flush_settings
+            )
             self.flush_worker.start()
             LOGGER.info("Redis flush worker started")
         elif name == "discord_bot" and settings.discord_bot_enabled:
@@ -399,13 +445,17 @@ class ServiceManager:
         for logger_name in NOISY_STREAM_LOGGERS:
             logging.getLogger(logger_name).setLevel(logging.WARNING)
 
-    async def _handle_trade_event(self, payload: Dict[str, Any], source: str = "tastytrade") -> None:
+    async def _handle_trade_event(
+        self, payload: Dict[str, Any], source: str = "tastytrade"
+    ) -> None:
         """Persist trade ticks to RedisTimeSeries in a thread so I/O stays async friendly."""
         if not self.rts:
             return
         await asyncio.to_thread(self._write_trade_timeseries, payload, source)
 
-    async def _handle_depth_event(self, payload: Dict[str, Any], source: str = "tastytrade") -> None:
+    async def _handle_depth_event(
+        self, payload: Dict[str, Any], source: str = "tastytrade"
+    ) -> None:
         """Persist depth updates and compute cross-feed comparisons."""
         if not self.rts:
             return
@@ -423,13 +473,23 @@ class ServiceManager:
                 f"ts:trade:price:{symbol}:{normalized_source}",
                 timestamp_ms,
                 price,
-                {"symbol": symbol, "type": "trade", "field": "price", "source": normalized_source},
+                {
+                    "symbol": symbol,
+                    "type": "trade",
+                    "field": "price",
+                    "source": normalized_source,
+                },
             ),
             (
                 f"ts:trade:size:{symbol}:{normalized_source}",
                 timestamp_ms,
                 size,
-                {"symbol": symbol, "type": "trade", "field": "size", "source": normalized_source},
+                {
+                    "symbol": symbol,
+                    "type": "trade",
+                    "field": "size",
+                    "source": normalized_source,
+                },
             ),
         ]
         if self.rts:
@@ -437,9 +497,13 @@ class ServiceManager:
         if normalized_source == "tastytrade":
             self._publish_tastytrade_trade(symbol, price, size, timestamp_ms, payload)
         self.trade_count += 1
-        self.trade_counts[normalized_source] = self.trade_counts.get(normalized_source, 0) + 1
+        self.trade_counts[normalized_source] = (
+            self.trade_counts.get(normalized_source, 0) + 1
+        )
         symbol_trade_counts = self.trade_counts_by_symbol.setdefault(symbol, {})
-        symbol_trade_counts[normalized_source] = symbol_trade_counts.get(normalized_source, 0) + 1
+        symbol_trade_counts[normalized_source] = (
+            symbol_trade_counts.get(normalized_source, 0) + 1
+        )
         self.last_trade_ts = payload.get("timestamp") or datetime.utcnow().isoformat()
         self.last_trade_timestamps[normalized_source] = self.last_trade_ts
         self._maybe_persist_metrics()
@@ -524,10 +588,16 @@ class ServiceManager:
         if samples and self.rts:
             self.rts.multi_add(samples)
             self.depth_count += 1
-            self.depth_counts[normalized_source] = self.depth_counts.get(normalized_source, 0) + 1
+            self.depth_counts[normalized_source] = (
+                self.depth_counts.get(normalized_source, 0) + 1
+            )
             symbol_depth_counts = self.depth_counts_by_symbol.setdefault(symbol, {})
-            symbol_depth_counts[normalized_source] = symbol_depth_counts.get(normalized_source, 0) + 1
-            self.last_depth_ts = payload.get("timestamp") or datetime.utcnow().isoformat()
+            symbol_depth_counts[normalized_source] = (
+                symbol_depth_counts.get(normalized_source, 0) + 1
+            )
+            self.last_depth_ts = (
+                payload.get("timestamp") or datetime.utcnow().isoformat()
+            )
             self.last_depth_timestamps[normalized_source] = self.last_depth_ts
         self._record_depth_snapshot(symbol, normalized_source, payload)
         self._maybe_persist_metrics()
@@ -561,11 +631,15 @@ class ServiceManager:
             if key in payload:
                 message[key] = payload[key]
         try:
-            self.redis_client.client.publish(TASTYTRADE_TRADE_CHANNEL, json.dumps(message, default=str))
+            self.redis_client.client.publish(
+                TASTYTRADE_TRADE_CHANNEL, json.dumps(message, default=str)
+            )
         except Exception:
             LOGGER.debug("Failed to publish tastytrade trade", exc_info=True)
 
-    def _record_depth_snapshot(self, symbol: str, source: str, payload: Dict[str, Any]) -> None:
+    def _record_depth_snapshot(
+        self, symbol: str, source: str, payload: Dict[str, Any]
+    ) -> None:
         """Store the latest book for each feed and push comparisons into LookupService."""
         normalized_symbol = symbol.upper()
         symbol_snapshots = self.depth_snapshots.setdefault(normalized_symbol, {})
@@ -573,29 +647,43 @@ class ServiceManager:
         if "tastytrade" not in symbol_snapshots or "schwab" not in symbol_snapshots:
             return
         summary = self._build_depth_comparison(
-            normalized_symbol, symbol_snapshots["tastytrade"], symbol_snapshots["schwab"]
+            normalized_symbol,
+            symbol_snapshots["tastytrade"],
+            symbol_snapshots["schwab"],
         )
         self.last_depth_comparison[normalized_symbol] = summary
         if self.lookup_service:
             self.lookup_service.store_depth_comparison(normalized_symbol, summary)
 
     @staticmethod
-    def _build_depth_comparison(symbol: str, tasty: Dict[str, Any], schwab: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_depth_comparison(
+        symbol: str, tasty: Dict[str, Any], schwab: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """Summarize spread/bbo variance between the two live sources."""
         tasty_best_bid = tasty.get("bids", [])[:1]
         tasty_best_ask = tasty.get("asks", [])[:1]
         schwab_best_bid = schwab.get("bids", [])[:1]
         schwab_best_ask = schwab.get("asks", [])[:1]
+
         def _best(entry):
             if entry:
                 return entry[0].get("price"), entry[0].get("size")
             return None, None
+
         tasty_bid_price, tasty_bid_size = _best(tasty_best_bid)
         tasty_ask_price, tasty_ask_size = _best(tasty_best_ask)
         schwab_bid_price, schwab_bid_size = _best(schwab_best_bid)
         schwab_ask_price, schwab_ask_size = _best(schwab_best_ask)
-        bid_levels = min(len(tasty.get("bids", [])), len(schwab.get("bids", [])), settings.tastytrade_depth_cap)
-        ask_levels = min(len(tasty.get("asks", [])), len(schwab.get("asks", [])), settings.tastytrade_depth_cap)
+        bid_levels = min(
+            len(tasty.get("bids", [])),
+            len(schwab.get("bids", [])),
+            settings.tastytrade_depth_cap,
+        )
+        ask_levels = min(
+            len(tasty.get("asks", [])),
+            len(schwab.get("asks", [])),
+            settings.tastytrade_depth_cap,
+        )
         return {
             "symbol": symbol,
             "timestamp": datetime.utcnow().isoformat(),
@@ -604,8 +692,12 @@ class ServiceManager:
                 "schwab_price": schwab_bid_price,
                 "tasty_size": tasty_bid_size,
                 "schwab_size": schwab_bid_size,
-                "best_diff": None if tasty_bid_price is None or schwab_bid_price is None else tasty_bid_price - schwab_bid_price,
-                "avg_diff": ServiceManager._avg_price_diff(tasty.get("bids", []), schwab.get("bids", []), bid_levels),
+                "best_diff": None
+                if tasty_bid_price is None or schwab_bid_price is None
+                else tasty_bid_price - schwab_bid_price,
+                "avg_diff": ServiceManager._avg_price_diff(
+                    tasty.get("bids", []), schwab.get("bids", []), bid_levels
+                ),
                 "compared_levels": bid_levels,
             },
             "ask": {
@@ -613,8 +705,12 @@ class ServiceManager:
                 "schwab_price": schwab_ask_price,
                 "tasty_size": tasty_ask_size,
                 "schwab_size": schwab_ask_size,
-                "best_diff": None if tasty_ask_price is None or schwab_ask_price is None else tasty_ask_price - schwab_ask_price,
-                "avg_diff": ServiceManager._avg_price_diff(tasty.get("asks", []), schwab.get("asks", []), ask_levels),
+                "best_diff": None
+                if tasty_ask_price is None or schwab_ask_price is None
+                else tasty_ask_price - schwab_ask_price,
+                "avg_diff": ServiceManager._avg_price_diff(
+                    tasty.get("asks", []), schwab.get("asks", []), ask_levels
+                ),
                 "compared_levels": ask_levels,
             },
         }
@@ -624,10 +720,14 @@ class ServiceManager:
         return {
             "total_trades": self.trade_count,
             "trades_by_source": dict(self.trade_counts),
-            "trades_by_symbol": {k: dict(v) for k, v in self.trade_counts_by_symbol.items()},
+            "trades_by_symbol": {
+                k: dict(v) for k, v in self.trade_counts_by_symbol.items()
+            },
             "total_level2_samples": self.depth_count,
             "level2_by_source": dict(self.depth_counts),
-            "level2_by_symbol": {k: dict(v) for k, v in self.depth_counts_by_symbol.items()},
+            "level2_by_symbol": {
+                k: dict(v) for k, v in self.depth_counts_by_symbol.items()
+            },
             "last_trade_timestamps": dict(self.last_trade_timestamps),
             "last_depth_timestamps": dict(self.last_depth_timestamps),
             "redis_key": MARKET_DATA_METRICS_KEY,
@@ -649,7 +749,9 @@ class ServiceManager:
             LOGGER.debug("Unable to persist market metrics to Redis", exc_info=True)
 
     @staticmethod
-    def _avg_price_diff(a: List[Dict[str, Any]], b: List[Dict[str, Any]], levels: int) -> Optional[float]:
+    def _avg_price_diff(
+        a: List[Dict[str, Any]], b: List[Dict[str, Any]], levels: int
+    ) -> Optional[float]:
         """Return the mean price delta for overlapping depth levels."""
         total = 0.0
         count = 0
@@ -720,8 +822,12 @@ async def health() -> Dict[str, str]:
 
 
 @app.get("/status")
-async def status() -> Dict[str, Any]:
+async def status(request: Request) -> Dict[str, Any]:
     """Expose the aggregated ServiceManager telemetry."""
+    # Log status access via dedicated status logger
+    logging.getLogger("data_pipeline.status").info(
+        "Status endpoint requested from %s", getattr(request.client, 'host', 'unknown')
+    )
     return service_manager.status()
 
 
@@ -760,8 +866,8 @@ async def control_status(service_name: str) -> Dict[str, Any]:
     """Return a service-specific status snapshot (no auth)."""
     try:
         svc = getattr(service_manager, service_name, None)
-        if svc and hasattr(svc, 'status'):
-            return getattr(svc, 'status')()
+        if svc and hasattr(svc, "status"):
+            return getattr(svc, "status")()
         raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
     except HTTPException:
         raise
@@ -783,7 +889,11 @@ async def ingest_ml_trade(trade: MLTradePayload) -> Dict[str, Any]:
     payload["symbol"] = payload.get("symbol", "").upper()
     payload["action"] = (payload.get("action") or "").lower()
     payload["direction"] = (payload.get("direction") or "").lower()
-    trade_ts = trade.timestamp if isinstance(trade.timestamp, datetime) else datetime.now(timezone.utc)
+    trade_ts = (
+        trade.timestamp
+        if isinstance(trade.timestamp, datetime)
+        else datetime.now(timezone.utc)
+    )
     payload["timestamp"] = trade_ts.astimezone(timezone.utc).isoformat()
     payload["received_at"] = datetime.now(timezone.utc).isoformat()
     _cache_ml_trade(redis_conn, payload)
@@ -860,8 +970,11 @@ STATUS_PAGE = """
 
 
 @app.get("/status.html", response_class=HTMLResponse)
-async def status_page() -> str:
+async def status_page(request: Request) -> str:
     """Serve a lightweight HTML dashboard for ops users."""
+    logging.getLogger("data_pipeline.status").info(
+        "Status page requested from %s", getattr(request.client, 'host', 'unknown')
+    )
     return STATUS_PAGE
 
 
@@ -883,15 +996,20 @@ async def gex_history_endpoint(request: Request, background_tasks: BackgroundTas
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Invalid payload format")
 
-    url = (body.get('url') or '').strip()
+    url = (body.get("url") or "").strip()
     if not url:
         raise HTTPException(status_code=422, detail="Missing url field")
     if not url.startswith("https://hist.gex.bot/"):
-        raise HTTPException(status_code=422, detail="URL must start with https://hist.gex.bot/")
+        raise HTTPException(
+            status_code=422, detail="URL must start with https://hist.gex.bot/"
+        )
 
     # Surface payloads in logs (with large values sanitized) to mirror caller schema.
     try:
-        log_snapshot = {k: (v if isinstance(v, (str, int, float, bool)) else type(v).__name__) for k, v in body.items()}
+        log_snapshot = {
+            k: (v if isinstance(v, (str, int, float, bool)) else type(v).__name__)
+            for k, v in body.items()
+        }
         LOGGER.debug("/gex_history_url payload: %s", log_snapshot)
     except Exception:
         LOGGER.debug("/gex_history_url payload logging failed")
@@ -906,7 +1024,7 @@ async def gex_history_endpoint(request: Request, background_tasks: BackgroundTas
                 break
     if endpoint is None:
         inferred = _infer_endpoint(url)
-        endpoint = inferred or 'gex_zero'
+        endpoint = inferred or "gex_zero"
 
     ticker = None
     preferred_keys = ("ticker", "symbol", "underlying")
@@ -919,7 +1037,7 @@ async def gex_history_endpoint(request: Request, background_tasks: BackgroundTas
                 break
     if not ticker:
         for key, value in body.items():
-            if key == 'url':
+            if key == "url":
                 continue
             if isinstance(value, str):
                 candidate = value.strip()
@@ -940,7 +1058,7 @@ async def gex_history_endpoint(request: Request, background_tasks: BackgroundTas
 
     # Accept metadata under several possible keys
     metadata = None
-    for k in ('metadata', 'payload', 'data'):
+    for k in ("metadata", "payload", "data"):
         v = body.get(k)
         if isinstance(v, dict):
             metadata = v
@@ -949,7 +1067,7 @@ async def gex_history_endpoint(request: Request, background_tasks: BackgroundTas
         metadata = {}
 
     # Normalize endpoint default
-    endpoint = endpoint or _infer_endpoint(url) or 'gex_zero'
+    endpoint = endpoint or _infer_endpoint(url) or "gex_zero"
 
     try:
         queue_id = gex_history_queue.enqueue_request(
@@ -973,7 +1091,9 @@ async def gex_history_endpoint(request: Request, background_tasks: BackgroundTas
     }
 
 
-@app.api_route("/uw", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
+@app.api_route(
+    "/uw", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
+)
 async def universal_webhook(request: Request):
     """Temporarily accept all webhook payloads for review before tightening validation."""
     raw_body = await request.body()
@@ -1028,7 +1148,9 @@ async def universal_webhook(request: Request):
 
 
 @app.get("/lookup/trades")
-async def lookup_trades(symbol: str, source: str = "tastytrade", limit: int = 100) -> Dict[str, Any]:
+async def lookup_trades(
+    symbol: str, source: str = "tastytrade", limit: int = 100
+) -> Dict[str, Any]:
     """Return recent trades for a given symbol/source pair."""
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
@@ -1039,8 +1161,15 @@ async def lookup_trades(symbol: str, source: str = "tastytrade", limit: int = 10
     if normalized_source not in {"tastytrade", "schwab"}:
         raise HTTPException(status_code=400, detail="Unsupported source")
     capped_limit = max(1, min(limit, 500))
-    history = lookup.trade_history(symbol.upper(), normalized_source, limit=capped_limit)
-    return {"symbol": symbol.upper(), "source": normalized_source, "count": len(history), "history": history}
+    history = lookup.trade_history(
+        symbol.upper(), normalized_source, limit=capped_limit
+    )
+    return {
+        "symbol": symbol.upper(),
+        "source": normalized_source,
+        "count": len(history),
+        "history": history,
+    }
 
 
 @app.get("/lookup/history")
@@ -1057,7 +1186,9 @@ async def lookup_history(
     if not lookup:
         raise HTTPException(status_code=503, detail="Lookup service unavailable")
     capped_limit = max(1, min(limit, 1000))
-    history = lookup.lookup_history(symbol.upper(), limit=capped_limit, start_time=start_time, end_time=end_time)
+    history = lookup.lookup_history(
+        symbol.upper(), limit=capped_limit, start_time=start_time, end_time=end_time
+    )
     return {
         "symbol": symbol.upper(),
         "count": len(history),
@@ -1075,7 +1206,9 @@ async def lookup_depth_diff(symbol: str) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail="Lookup service unavailable")
     summary = lookup.get_depth_comparison(symbol.upper())
     if not summary:
-        raise HTTPException(status_code=404, detail="Depth comparison not available for symbol")
+        raise HTTPException(
+            status_code=404, detail="Depth comparison not available for symbol"
+        )
     return summary
 
 
@@ -1098,7 +1231,9 @@ async def lookup_gex_snapshot(symbol: str) -> Dict[str, Any]:
             snapshot = {"raw": raw.decode("utf-8", errors="replace")}
     return {
         "symbol": symbol.upper(),
-        "sum_gex_vol": snapshot.get("sum_gex_vol") if isinstance(snapshot, dict) else None,
+        "sum_gex_vol": snapshot.get("sum_gex_vol")
+        if isinstance(snapshot, dict)
+        else None,
         "snapshot": snapshot,
     }
 
@@ -1111,7 +1246,9 @@ async def sierra_chart_bridge(symbol: str = "NQ_NDX") -> Dict[str, Any]:
     key = f"{SNAPSHOT_KEY_PREFIX}{normalized}"
     raw = redis_conn.get(key)
     if not raw:
-        raise HTTPException(status_code=404, detail=f"Snapshot not available for {normalized}")
+        raise HTTPException(
+            status_code=404, detail=f"Snapshot not available for {normalized}"
+        )
     try:
         snapshot = json.loads(raw)
     except Exception:
@@ -1123,7 +1260,9 @@ async def sierra_chart_bridge(symbol: str = "NQ_NDX") -> Dict[str, Any]:
         raise HTTPException(status_code=502, detail="Snapshot payload malformed")
     value = snapshot.get("sum_gex_vol")
     if value is None:
-        raise HTTPException(status_code=404, detail=f"sum_gex_vol missing for {normalized}")
+        raise HTTPException(
+            status_code=404, detail=f"sum_gex_vol missing for {normalized}"
+        )
     return {
         "symbol": normalized,
         "sum_gex_vol": value,
@@ -1156,7 +1295,7 @@ def _extract_webhook_topic(payload: Dict[str, Any]) -> Optional[str]:
         if isinstance(value, str) and value.strip():
             return value.strip()
 
-    nested = payload.get('payload') or payload.get('data')
+    nested = payload.get("payload") or payload.get("data")
     if isinstance(nested, dict):
         for field in candidate_fields:
             value = nested.get(field)
@@ -1229,6 +1368,7 @@ def _infer_endpoint(url: str) -> str:
 def _extract_ticker_from_url(url: str) -> str:
     """Parse a ticker symbol from classic history URLs."""
     import re
+
     # Match DATE_TICKER_classic where ticker may contain underscores/digits
     match = re.search(r"/(\d{4}-\d{2}-\d{2})_([A-Z0-9_]+)_classic", url)
     if match:
@@ -1262,10 +1402,62 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def configure_logging(log_level: int = logging.INFO, log_dir: str = "/logs") -> None:
+    """Set up basic logging configuration for the data pipeline.
+
+    - Ensure the log directory exists
+    - Create a rotating file handler for the main process
+    - Create a rotating file handler for the status page
+    - Keep stream handler for console
+    """
+    # Ensure directory exists
+    try:
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"Failed to create log directory {log_dir}: {exc}")
+
+    fmt = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s [%(threadName)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    root = logging.getLogger()
+    root.setLevel(log_level)
+    # Keep any existing handlers (console) but enforce level
+    if not any(isinstance(h, RotatingFileHandler) and getattr(h, 'baseFilename', '')
+               .endswith('data-pipeline.log') for h in root.handlers):
+        file_path = Path(log_dir) / "data-pipeline.log"
+        fh = RotatingFileHandler(str(file_path), maxBytes=10 * 1024 * 1024, backupCount=5)
+        fh.setLevel(log_level)
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+
+    # Console handler
+    if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setLevel(log_level)
+        ch.setFormatter(fmt)
+        root.addHandler(ch)
+
+    # Configure a separate logger for status page
+    status_logger = logging.getLogger("data_pipeline.status")
+    status_logger.setLevel(logging.INFO)
+    try:
+        status_fh = RotatingFileHandler(str(Path(log_dir) / "status.log"), maxBytes=5 * 1024 * 1024, backupCount=3)
+        status_fh.setLevel(logging.INFO)
+        status_fh.setFormatter(fmt)
+        status_logger.addHandler(status_fh)
+    except Exception:
+        # Don't fail startup if status handler cannot be created
+        LOGGER.warning("Could not create status.log handler; continuing without it")
+
+
+
 def main() -> None:
     """Entry point used both by ``python data-pipeline.py`` and packaging."""
     args = parse_args()
-    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
+    # Configure logging early so any modules started by this process inherit the config
+    configure_logging(log_level=getattr(logging, args.log_level.upper(), logging.INFO))
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level.lower())
 
 

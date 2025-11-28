@@ -1,4 +1,5 @@
 """Manage the Discord bot lifecyle as a subprocess."""
+
 from __future__ import annotations
 
 import asyncio

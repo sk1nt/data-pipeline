@@ -2,14 +2,15 @@ import os
 from pathlib import Path
 from typing import Dict, List
 
+
 class DataScanner:
     def __init__(self, base_path: str = "data/legacy_source"):
         self.base_path = Path(base_path)
         self.file_types = {
-            'gex_json': '**/*.json',
-            'tick_csv': '**/*.csv',
-            'depth_jsonl': '**/*.jsonl',
-            'sqlite_db': '**/*.db'
+            "gex_json": "**/*.json",
+            "tick_csv": "**/*.csv",
+            "depth_jsonl": "**/*.jsonl",
+            "sqlite_db": "**/*.db",
         }
 
     def scan_directory(self) -> Dict[str, List[Path]]:
@@ -18,10 +19,10 @@ class DataScanner:
             raise FileNotFoundError(f"Base path {self.base_path} does not exist")
 
         categorized_files = {
-            'gex_json': [],
-            'tick_csv': [],
-            'depth_jsonl': [],
-            'sqlite_db': []
+            "gex_json": [],
+            "tick_csv": [],
+            "depth_jsonl": [],
+            "sqlite_db": [],
         }
 
         for file_type, pattern in self.file_types.items():
@@ -45,7 +46,9 @@ class DataScanner:
                     errors.append(f"{file_type} file {file_path} is not readable")
         return errors
 
-    def get_sample_files(self, files: Dict[str, List[Path]], sample_size: int = 5) -> Dict[str, List[Path]]:
+    def get_sample_files(
+        self, files: Dict[str, List[Path]], sample_size: int = 5
+    ) -> Dict[str, List[Path]]:
         """Get sample files for each type for testing."""
         samples = {}
         for file_type, file_list in files.items():

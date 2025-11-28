@@ -6,6 +6,7 @@ from src.db.duckdb_utils import DuckDBUtils
 from src.validation.data_validator import DataValidator
 from src.lineage.lineage_tracker import LineageTracker
 
+
 class DepthImporter:
     def __init__(self, db_utils: DuckDBUtils, lineage_tracker: LineageTracker):
         self.db_utils = db_utils
@@ -29,17 +30,17 @@ class DepthImporter:
             valid_records = []
             errors = []
 
-            with open(file_path, 'r') as f:
+            with open(file_path, "r") as f:
                 for line_num, line in enumerate(f, 1):
                     try:
                         data = json.loads(line.strip())
 
                         # Map JSON fields to model
                         record_data = {
-                            'timestamp': data.get('timestamp'),
-                            'symbol': data.get('ticker', 'MNQ'),  # Assume MNQ
-                            'bids': data.get('bids', []),
-                            'asks': data.get('asks', [])
+                            "timestamp": data.get("timestamp"),
+                            "symbol": data.get("ticker", "MNQ"),  # Assume MNQ
+                            "bids": data.get("bids", []),
+                            "asks": data.get("asks", []),
                         }
 
                         record = MarketDepth.from_dict(record_data)
@@ -68,25 +69,23 @@ class DepthImporter:
 
                 # Record lineage
                 self.lineage_tracker.record_import(
-                    str(file_path), len(valid_records), 'depth'
+                    str(file_path), len(valid_records), "depth"
                 )
 
             return {
-                'file': str(file_path),
-                'total_lines': line_num,
-                'valid_records': len(valid_records),
-                'errors': errors,
-                'dry_run': dry_run
+                "file": str(file_path),
+                "total_lines": line_num,
+                "valid_records": len(valid_records),
+                "errors": errors,
+                "dry_run": dry_run,
             }
 
         except Exception as e:
-            return {
-                'file': str(file_path),
-                'error': str(e),
-                'dry_run': dry_run
-            }
+            return {"file": str(file_path), "error": str(e), "dry_run": dry_run}
 
-    def import_files(self, file_paths: List[Path], dry_run: bool = False) -> List[Dict[str, Any]]:
+    def import_files(
+        self, file_paths: List[Path], dry_run: bool = False
+    ) -> List[Dict[str, Any]]:
         """Import multiple depth files."""
         self.create_table()
         results = []

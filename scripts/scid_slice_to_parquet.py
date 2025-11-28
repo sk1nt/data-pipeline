@@ -22,14 +22,22 @@ RECORD_SIZE = 40
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract SCID ticks into Parquet.")
     parser.add_argument("--scid-file", required=True, help="Path to .scid file")
-    parser.add_argument("--start", required=False, help="Start timestamp (YYYY-MM-DD or ISO).")
-    parser.add_argument("--end", required=False, help="End timestamp (YYYY-MM-DD or ISO).")
-    parser.add_argument("--symbol", required=True, help="Symbol label to embed in output.")
+    parser.add_argument(
+        "--start", required=False, help="Start timestamp (YYYY-MM-DD or ISO)."
+    )
+    parser.add_argument(
+        "--end", required=False, help="End timestamp (YYYY-MM-DD or ISO)."
+    )
+    parser.add_argument(
+        "--symbol", required=True, help="Symbol label to embed in output."
+    )
     parser.add_argument("--output", required=True, help="Parquet file to write.")
     return parser.parse_args()
 
 
-def parse_timestamp(value: Optional[str], default: Optional[dt.datetime]) -> Optional[dt.datetime]:
+def parse_timestamp(
+    value: Optional[str], default: Optional[dt.datetime]
+) -> Optional[dt.datetime]:
     if value is None:
         return default
     try:
@@ -92,7 +100,9 @@ def locate_index(f, total_records: int, target: dt.datetime, find_first: bool) -
     return max(0, min(result, total_records - 1))
 
 
-def load_slice(path: Path, start_ts: Optional[dt.datetime], end_ts: Optional[dt.datetime]) -> pl.DataFrame:
+def load_slice(
+    path: Path, start_ts: Optional[dt.datetime], end_ts: Optional[dt.datetime]
+) -> pl.DataFrame:
     with open(path, "rb") as f:
         f.seek(0, 2)
         file_size = f.tell()

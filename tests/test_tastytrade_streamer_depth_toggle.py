@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 import asyncio
 import sys
 from pathlib import Path
@@ -15,6 +16,7 @@ from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreame
 
 class FakeDXLinkStreamer:
     instances = []
+
     def __init__(self, session):
         self.session = session
         self.subscribed = []
@@ -40,6 +42,7 @@ async def test_enable_depth_false(monkeypatch):
     monkeypatch.setenv("TASTYTRADE_ENABLE_DEPTH", "false")
     # Patch the DXLinkStreamer class used in the module
     import importlib
+
     mod = importlib.import_module("src.services.tastytrade_streamer")
     monkeypatch.setattr(mod, "DXLinkStreamer", FakeDXLinkStreamer)
     monkeypatch.setattr(mod, "Session", lambda **kwargs: object())
@@ -61,13 +64,16 @@ async def test_enable_depth_false(monkeypatch):
     assert len(FakeDXLinkStreamer.instances) == 1
     subs = FakeDXLinkStreamer.instances[0].subscribed
     # only trades should be subscribed when enable_depth=False
-    assert len([s for s in subs if 'Quote' in str(s[0]) or s[0].__name__ == 'Quote']) == 0
+    assert (
+        len([s for s in subs if "Quote" in str(s[0]) or s[0].__name__ == "Quote"]) == 0
+    )
 
 
 @pytest.mark.asyncio
 async def test_enable_depth_true(monkeypatch):
     monkeypatch.setenv("TASTYTRADE_ENABLE_DEPTH", "true")
     import importlib
+
     mod = importlib.import_module("src.services.tastytrade_streamer")
     monkeypatch.setattr(mod, "DXLinkStreamer", FakeDXLinkStreamer)
     monkeypatch.setattr(mod, "Session", lambda **kwargs: object())
@@ -89,4 +95,6 @@ async def test_enable_depth_true(monkeypatch):
     assert len(FakeDXLinkStreamer.instances) == 1
     subs = FakeDXLinkStreamer.instances[0].subscribed
     # Quote should be subscribed when enable_depth=True
-    assert len([s for s in subs if 'Quote' in str(s[0]) or s[0].__name__ == 'Quote']) >= 1
+    assert (
+        len([s for s in subs if "Quote" in str(s[0]) or s[0].__name__ == "Quote"]) >= 1
+    )

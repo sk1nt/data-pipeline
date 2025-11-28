@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  tastytrade-ordering:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - TASTYTRADE_CLIENT_SECRET=${TASTYTRADE_CLIENT_SECRET}
+      - TASTYTRADE_REFRESH_TOKEN=${TASTYTRADE_REFRESH_TOKEN}
+      - TASTYTRADE_USE_SANDBOX=true
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=duckdb:///data/orders.db
+    depends_on:
+      - redis
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  redis_data:

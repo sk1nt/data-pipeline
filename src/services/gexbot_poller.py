@@ -1,4 +1,5 @@
 """Background service for polling GEXBot API at fixed intervals."""
+
 from __future__ import annotations
 
 import asyncio
@@ -9,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import date, datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
+import threading
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -25,7 +27,9 @@ if os.getenv("GEXBOT_POLLER_DEBUG", "").lower() == "true":
     LOGGER.setLevel(logging.DEBUG)
     _handler = logging.StreamHandler()
     _handler.setLevel(logging.DEBUG)
-    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    _handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
     LOGGER.addHandler(_handler)
     LOGGER.propagate = False
 SNAPSHOT_KEY_PREFIX = "gex:snapshot:"
@@ -34,7 +38,9 @@ SNAPSHOT_KEY_PREFIX = "gex:snapshot:"
 @dataclass
 class GEXBotPollerSettings:
     api_key: str
-    symbols: List[str] = field(default_factory=lambda: ["NQ_NDX", "ES_SPX", "SPY", "QQQ", "SPX", "NDX"])
+    symbols: List[str] = field(
+        default_factory=lambda: ["NQ_NDX", "ES_SPX", "SPY", "QQQ", "SPX", "NDX"]
+    )
     interval_seconds: float = 60.0
     aggregation_period: str = "zero"
     rth_interval_seconds: float = 1.0
@@ -72,8 +78,13 @@ class GEXBotPoller:
         self._last_supported_refresh: Optional[date] = None
         self.snapshot_count = 0
         self.last_snapshot_ts: Optional[str] = None
+        # Track last written timestamp per symbol (ms) to ensure monotonic writes
+        self._last_snapshot_ms_by_symbol: Dict[str, int] = {}
+        self._snapshot_lock = threading.Lock()
         self._last_interval_setting: Optional[str] = None
-        self._auto_refresh_symbols = getattr(self.settings, "auto_refresh_symbols", True)
+        self._auto_refresh_symbols = getattr(
+            self.settings, "auto_refresh_symbols", True
+        )
 
     def start(self) -> None:
         if self._task and not self._task.done():
@@ -99,7 +110,9 @@ class GEXBotPoller:
         )
         timeout = aiohttp.ClientTimeout(total=12)
         connector = aiohttp.TCPConnector(limit=8, force_close=True)
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        async with aiohttp.ClientSession(
+            connector=connector, timeout=timeout
+        ) as session:
             if self._auto_refresh_symbols:
                 await self._refresh_supported_symbols(session)
             while not self._stop_event.is_set():
@@ -110,11 +123,17 @@ class GEXBotPoller:
                 # Always poll the canonical supported symbols (downloaded list); dynamic adds removed
                 # For NQ poller (base symbols include NQ_NDX), prefer a very fast RTH poll of the
                 # key symbols to reduce load: only ['SPX','NQ_NDX'] during RTH; otherwise poll all.
-                if 'NQ_NDX' in self._base_symbols:
-                    symbols = ['SPX', 'NQ_NDX'] if self._is_rth_now() else sorted(self._supported_symbols or self._base_symbols)
+                if "NQ_NDX" in self._base_symbols:
+                    symbols = (
+                        ["SPX", "NQ_NDX"]
+                        if self._is_rth_now()
+                        else sorted(self._supported_symbols or self._base_symbols)
+                    )
                 else:
                     symbols = sorted(self._supported_symbols or self._base_symbols)
-                LOGGER.debug("poll-loop symbols=%s interval=%.3fs", symbols, interval_seconds)
+                LOGGER.debug(
+                    "poll-loop symbols=%s interval=%.3fs", symbols, interval_seconds
+                )
                 for symbol in symbols:
                     try:
                         fetch_start = asyncio.get_event_loop().time()
@@ -135,7 +154,11 @@ class GEXBotPoller:
                 interval_seconds = self._current_interval_seconds()
                 label = "RTH" if self._is_rth_now() else "off-hours"
                 if label != self._last_interval_setting:
-                    LOGGER.info("GEXBot poller interval set to %ss (%s)", interval_seconds, label)
+                    LOGGER.info(
+                        "GEXBot poller interval set to %ss (%s)",
+                        interval_seconds,
+                        label,
+                    )
                     self._last_interval_setting = label
                 # compensate for work time so we don't drift and miss ticks
                 elapsed = asyncio.get_event_loop().time() - loop_start
@@ -148,6 +171,7 @@ class GEXBotPoller:
 
     def _current_interval_seconds(self) -> float:
         """Return the effective poll interval (seconds), clamped to >0."""
+
         def _clamp(value: float) -> float:
             return max(0.1, float(value))
 
@@ -176,7 +200,9 @@ class GEXBotPoller:
             return None
         timeout = aiohttp.ClientTimeout(total=12)
         connector = aiohttp.TCPConnector(limit=2, force_close=True)
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        async with aiohttp.ClientSession(
+            connector=connector, timeout=timeout
+        ) as session:
             snapshot = await self._fetch_symbol(session, normalized)
         if snapshot:
             self.latest[normalized] = snapshot
@@ -224,7 +250,9 @@ class GEXBotPoller:
             # Even without a timeseries sink, persist the snapshot for downstream consumers
             self._store_snapshot_blob(snapshot)
             self.snapshot_count += 1
-            self.last_snapshot_ts = snapshot.get("timestamp") or datetime.utcnow().isoformat()
+            self.last_snapshot_ts = (
+                snapshot.get("timestamp") or datetime.utcnow().isoformat()
+            )
 
     def _combine_payloads(
         self,
@@ -240,8 +268,12 @@ class GEXBotPoller:
         zero_payload = zero or {}
         timestamp = _first(zero_payload.get("timestamp"))
         if isinstance(timestamp, (int, float)):
-            timestamp = datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat()
-        maxchange_payload = zero_payload.get("maxchange") if isinstance(zero_payload, dict) else {}
+            timestamp = datetime.fromtimestamp(
+                float(timestamp), tz=timezone.utc
+            ).isoformat()
+        maxchange_payload = (
+            zero_payload.get("maxchange") if isinstance(zero_payload, dict) else {}
+        )
         maxchange_windows: Dict[str, list[float]] = {}
         if isinstance(maxchange_payload, dict):
             for window, data in maxchange_payload.items():
@@ -320,6 +352,13 @@ class GEXBotPoller:
         symbol = snapshot.get("symbol", "UNKNOWN").upper()
         timestamp = snapshot.get("timestamp") or datetime.utcnow().isoformat()
         timestamp_ms = _timestamp_ms(timestamp)
+        symbol = snapshot.get("symbol", "UNKNOWN").upper()
+        # Ensure timestamps are strictly increasing for the symbol to avoid TS.ADD overwrites
+        with self._snapshot_lock:
+            last_ms = self._last_snapshot_ms_by_symbol.get(symbol)
+            if last_ms is not None and timestamp_ms <= last_ms:
+                timestamp_ms = last_ms + 1
+            self._last_snapshot_ms_by_symbol[symbol] = timestamp_ms
         metrics = {
             "spot": snapshot.get("spot"),
             "zero_gamma": snapshot.get("zero_gamma"),
@@ -341,12 +380,14 @@ class GEXBotPoller:
                 numeric = float(value)
             except (TypeError, ValueError):
                 continue
-            samples.append((
-                f"ts:gex:{metric_name}:{symbol}",
-                timestamp_ms,
-                numeric,
-                {"symbol": symbol, "type": "gex", "field": metric_name},
-            ))
+            samples.append(
+                (
+                    f"ts:gex:{metric_name}:{symbol}",
+                    timestamp_ms,
+                    numeric,
+                    {"symbol": symbol, "type": "gex", "field": metric_name},
+                )
+            )
 
         maxchange = snapshot.get("maxchange") or {}
         if isinstance(maxchange, dict):
@@ -354,25 +395,39 @@ class GEXBotPoller:
                 if isinstance(data, (list, tuple)) and len(data) == 2:
                     strike, delta = data
                     try:
-                        samples.append((
-                            f"ts:gex:maxchange:{symbol}:{window}:delta",
-                            timestamp_ms,
-                            float(delta or 0.0),
-                            {"symbol": symbol, "type": "gex", "field": f"maxchange_{window}_delta"},
-                        ))
-                        samples.append((
-                            f"ts:gex:maxchange:{symbol}:{window}:strike",
-                            timestamp_ms,
-                            float(strike or 0.0),
-                            {"symbol": symbol, "type": "gex", "field": f"maxchange_{window}_strike"},
-                        ))
+                        samples.append(
+                            (
+                                f"ts:gex:maxchange:{symbol}:{window}:delta",
+                                timestamp_ms,
+                                float(delta or 0.0),
+                                {
+                                    "symbol": symbol,
+                                    "type": "gex",
+                                    "field": f"maxchange_{window}_delta",
+                                },
+                            )
+                        )
+                        samples.append(
+                            (
+                                f"ts:gex:maxchange:{symbol}:{window}:strike",
+                                timestamp_ms,
+                                float(strike or 0.0),
+                                {
+                                    "symbol": symbol,
+                                    "type": "gex",
+                                    "field": f"maxchange_{window}_strike",
+                                },
+                            )
+                        )
                     except (TypeError, ValueError):
                         continue
         if samples:
             ts_client.multi_add(samples)
         self._store_snapshot_blob(snapshot)
         self.snapshot_count += 1
-        self.last_snapshot_ts = snapshot.get("timestamp") or datetime.utcnow().isoformat()
+        self.last_snapshot_ts = (
+            snapshot.get("timestamp") or datetime.utcnow().isoformat()
+        )
 
     def _store_snapshot_blob(self, snapshot: Dict[str, Any]) -> None:
         symbol = snapshot.get("symbol") or snapshot.get("ticker")
@@ -384,7 +439,9 @@ class GEXBotPoller:
                 payload = json.dumps(snapshot)
                 self.redis.client.set(key, payload)
             except Exception:
-                LOGGER.warning("Failed to cache GEX snapshot for %s", symbol, exc_info=True)
+                LOGGER.warning(
+                    "Failed to cache GEX snapshot for %s", symbol, exc_info=True
+                )
         self._write_sierra_chart_bridge(snapshot)
 
     def _write_sierra_chart_bridge(self, snapshot: Dict[str, Any]) -> None:
@@ -401,7 +458,9 @@ class GEXBotPoller:
         try:
             numeric = float(value)
         except (TypeError, ValueError):
-            LOGGER.debug("Skipping Sierra Chart write; sum_gex_vol not numeric: %s", value)
+            LOGGER.debug(
+                "Skipping Sierra Chart write; sum_gex_vol not numeric: %s", value
+            )
             return
         payload = {"sum_gex_vol": numeric}
         try:
@@ -410,7 +469,9 @@ class GEXBotPoller:
             with target.open("w", encoding="utf-8") as f:
                 json.dump(payload, f)
         except Exception:
-            LOGGER.warning("Failed to write Sierra Chart bridge file at %s", path, exc_info=True)
+            LOGGER.warning(
+                "Failed to write Sierra Chart bridge file at %s", path, exc_info=True
+            )
 
     # dynamic symbol helpers removed
 
@@ -431,7 +492,9 @@ class GEXBotPoller:
             return dt
         return None
 
-    async def _sync_dynamic_symbols(self, session: Optional[aiohttp.ClientSession]) -> None:
+    async def _sync_dynamic_symbols(
+        self, session: Optional[aiohttp.ClientSession]
+    ) -> None:
         """Detect dynamic symbols added externally and fetch snapshots for newly added ones.
 
         This method reads the dynamic symbols list from Redis, computes any newly
@@ -448,7 +511,9 @@ class GEXBotPoller:
 
     def _seconds_until_midnight(self) -> int:
         now = datetime.utcnow()
-        tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow = (now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         return int((tomorrow - now).total_seconds())
 
     def _needs_supported_refresh(self) -> bool:
@@ -461,30 +526,43 @@ class GEXBotPoller:
             self._supported_symbols = set(self._base_symbols)
             self._dynamic_symbols = {}
             self._last_supported_refresh = datetime.utcnow().date()
-            LOGGER.info("Auto-refresh disabled; using configured symbols: %s", sorted(self._supported_symbols))
+            LOGGER.info(
+                "Auto-refresh disabled; using configured symbols: %s",
+                sorted(self._supported_symbols),
+            )
             return
         symbols = await self._fetch_supported_symbol_list(session)
         if symbols:
             self._supported_symbols = {s.upper() for s in symbols}
             # Apply any configured exclusions (e.g., exclude NQ_NDX from main poller)
-            if getattr(self.settings, 'exclude_symbols', None):
+            if getattr(self.settings, "exclude_symbols", None):
                 excluded = {s.upper() for s in self.settings.exclude_symbols}
-                self._supported_symbols = {s for s in self._supported_symbols if s not in excluded}
+                self._supported_symbols = {
+                    s for s in self._supported_symbols if s not in excluded
+                }
             if self.redis:
                 ttl = self._seconds_until_midnight()
-                self.redis.set_cached(self.supported_key, sorted(self._supported_symbols), ttl_seconds=ttl)
+                self.redis.set_cached(
+                    self.supported_key, sorted(self._supported_symbols), ttl_seconds=ttl
+                )
         else:
             self._supported_symbols = {s.upper() for s in self.settings.symbols}
             # Apply configured exclusions even when falling back to base symbols
-            if getattr(self.settings, 'exclude_symbols', None):
+            if getattr(self.settings, "exclude_symbols", None):
                 excluded = {s.upper() for s in self.settings.exclude_symbols}
-                self._supported_symbols = {s for s in self._supported_symbols if s not in excluded}
+                self._supported_symbols = {
+                    s for s in self._supported_symbols if s not in excluded
+                }
         # No dynamic symbols: clear any in-memory map (dynamic enrollment removed)
         self._dynamic_symbols = {}
         self._last_supported_refresh = datetime.utcnow().date()
-        LOGGER.info("Updated supported GEX symbols: %s", sorted(self._supported_symbols))
+        LOGGER.info(
+            "Updated supported GEX symbols: %s", sorted(self._supported_symbols)
+        )
 
-    async def _fetch_supported_symbol_list(self, session: aiohttp.ClientSession) -> Optional[List[str]]:
+    async def _fetch_supported_symbol_list(
+        self, session: aiohttp.ClientSession
+    ) -> Optional[List[str]]:
         if not self.settings.api_key:
             return None
         url = "https://api.gexbot.com/tickers"
@@ -500,7 +578,7 @@ class GEXBotPoller:
 
         if isinstance(data, dict):
             all_symbols = []
-            for key in ['stocks', 'indexes', 'futures']:
+            for key in ["stocks", "indexes", "futures"]:
                 symbols = data.get(key)
                 if isinstance(symbols, list):
                     all_symbols.extend(str(item) for item in symbols)

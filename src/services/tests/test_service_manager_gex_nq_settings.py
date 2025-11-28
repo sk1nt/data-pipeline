@@ -1,11 +1,10 @@
 import os
 import sys
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
 from src.config import settings
 from src.data_pipeline import ServiceManager
-import importlib
 
 
 def test_gex_nq_poller_uses_env_rth_interval(monkeypatch):
@@ -14,9 +13,9 @@ def test_gex_nq_poller_uses_env_rth_interval(monkeypatch):
     old_enabled = settings.gex_nq_polling_enabled
     old_rth = settings.gex_nq_poll_rth_interval_seconds
     try:
-        settings.gexbot_api_key = 'fake'
+        settings.gexbot_api_key = "fake"
         settings.gex_nq_polling_enabled = True
-        settings.gex_nq_poll_symbols = 'NQ_NDX'
+        settings.gex_nq_poll_symbols = "NQ_NDX"
         settings.gex_nq_poll_rth_interval_seconds = 0.8
 
         manager = ServiceManager()
@@ -32,13 +31,13 @@ def test_gex_nq_poller_uses_env_rth_interval(monkeypatch):
 
         # Patch the entrypoint module's GEXBotPoller symbol so ServiceManager
         # instantiates our fake. Use ServiceManager.__module__ to find module.
-        entry_mod = sys.modules.get(ServiceManager.__module__)
-        if entry_mod is None:
-            entry_mod = importlib.import_module(ServiceManager.__module__)
-        monkeypatch.setattr(entry_mod, 'GEXBotPoller', FakeGEXBotPoller)
+        # Since the module is dynamically loaded, patch the loaded module
+        import src.data_pipeline
+
+        monkeypatch.setattr(src.data_pipeline._module, "GEXBotPoller", FakeGEXBotPoller)
 
         # Start NQ poller
-        manager.start_service('gex_nq_poller')
+        manager.start_service("gex_nq_poller")
         assert manager.gex_nq_poller is not None
         assert manager.gex_nq_poller.settings.rth_interval_seconds == 0.8
     finally:

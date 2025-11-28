@@ -3,12 +3,13 @@ import os
 import json
 from typing import Optional, Dict, Any
 
+
 class RedisManager:
     def __init__(self):
-        self.host = os.getenv('REDIS_HOST', 'localhost')
-        self.port = int(os.getenv('REDIS_PORT', 6379))
-        self.db = int(os.getenv('REDIS_DB', 0))
-        self.password = os.getenv('REDIS_PASSWORD')
+        self.host = os.getenv("REDIS_HOST", "localhost")
+        self.port = int(os.getenv("REDIS_PORT", 6379))
+        self.db = int(os.getenv("REDIS_DB", 0))
+        self.password = os.getenv("REDIS_PASSWORD")
         self._connection: Optional[redis.Redis] = None
 
     @property
@@ -19,7 +20,7 @@ class RedisManager:
                 port=self.port,
                 db=self.db,
                 password=self.password,
-                decode_responses=True
+                decode_responses=True,
             )
         return self._connection
 
@@ -55,5 +56,6 @@ class RedisManager:
             # Fallback to a simple dict with the raw payload
             return {"value": raw}
         return None
+
 
 redis_manager = RedisManager()

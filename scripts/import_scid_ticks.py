@@ -28,7 +28,9 @@ from src.lib.scid_parser import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Import SCID ticks into tick_data.db")
-    parser.add_argument("--scid-dir", required=True, help="Directory containing *.scid files")
+    parser.add_argument(
+        "--scid-dir", required=True, help="Directory containing *.scid files"
+    )
     parser.add_argument(
         "--start-date",
         required=True,
@@ -104,13 +106,19 @@ def main() -> None:
         raise SystemExit(f"SCID directory not found: {scid_dir}")
 
     start_dt = dt.datetime.strptime(args.start_date, "%Y-%m-%d")
-    end_dt = dt.datetime.strptime(args.end_date, "%Y-%m-%d") + dt.timedelta(days=1) - dt.timedelta(microseconds=1)
+    end_dt = (
+        dt.datetime.strptime(args.end_date, "%Y-%m-%d")
+        + dt.timedelta(days=1)
+        - dt.timedelta(microseconds=1)
+    )
     max_records = args.max_records if args.max_records > 0 else None
 
     conn = duckdb.connect(args.db_path)
     conn.execute("PRAGMA threads=4")
 
-    next_id = int(conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM tick_data").fetchone()[0])
+    next_id = int(
+        conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM tick_data").fetchone()[0]
+    )
 
     for symbol in args.symbols:
         symbol = symbol.upper()
@@ -168,7 +176,9 @@ def import_file(
     next_id: int,
 ) -> tuple[int, int]:
     inserted = 0
-    for record in parse_scid_file_backwards_generator(str(scid_path), max_records=max_records):
+    for record in parse_scid_file_backwards_generator(
+        str(scid_path), max_records=max_records
+    ):
         ts: dt.datetime = record["timestamp"]
         if ts > end_dt:
             continue

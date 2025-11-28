@@ -6,6 +6,7 @@ from src.db.duckdb_utils import DuckDBUtils
 from src.validation.data_validator import DataValidator
 from src.lineage.lineage_tracker import LineageTracker
 
+
 class TickImporter:
     def __init__(self, db_utils: DuckDBUtils, lineage_tracker: LineageTracker):
         self.db_utils = db_utils
@@ -38,12 +39,12 @@ class TickImporter:
                 try:
                     # Map CSV columns to model fields
                     record_data = {
-                        'timestamp': row.get('timestamp'),
-                        'symbol': row.get('symbol'),
-                        'bid': row.get('bid'),
-                        'ask': row.get('ask'),
-                        'last': row.get('last'),
-                        'volume': row.get('last_size') or row.get('volume', 0)
+                        "timestamp": row.get("timestamp"),
+                        "symbol": row.get("symbol"),
+                        "bid": row.get("bid"),
+                        "ask": row.get("ask"),
+                        "last": row.get("last"),
+                        "volume": row.get("last_size") or row.get("volume", 0),
                     }
 
                     record = TickRecord.from_dict(record_data)
@@ -70,25 +71,23 @@ class TickImporter:
 
                 # Record lineage
                 self.lineage_tracker.record_import(
-                    str(file_path), len(valid_records), 'tick'
+                    str(file_path), len(valid_records), "tick"
                 )
 
             return {
-                'file': str(file_path),
-                'total_rows': len(df),
-                'valid_records': len(valid_records),
-                'errors': errors,
-                'dry_run': dry_run
+                "file": str(file_path),
+                "total_rows": len(df),
+                "valid_records": len(valid_records),
+                "errors": errors,
+                "dry_run": dry_run,
             }
 
         except Exception as e:
-            return {
-                'file': str(file_path),
-                'error': str(e),
-                'dry_run': dry_run
-            }
+            return {"file": str(file_path), "error": str(e), "dry_run": dry_run}
 
-    def import_files(self, file_paths: List[Path], dry_run: bool = False) -> List[Dict[str, Any]]:
+    def import_files(
+        self, file_paths: List[Path], dry_run: bool = False
+    ) -> List[Dict[str, Any]]:
         """Import multiple tick files."""
         self.create_table()
         results = []

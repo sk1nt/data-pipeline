@@ -23,6 +23,7 @@ router = APIRouter(prefix="/api/v1", tags=["priority"])
 # Pydantic models for API requests/responses
 class PriorityRequestCreate(BaseModel):
     """Request model for creating a priority request."""
+
     data_type: GEXDataType
     priority_level: PriorityLevel
     source_id: UUID
@@ -35,6 +36,7 @@ class PriorityRequestCreate(BaseModel):
 
 class PriorityRequestResponse(BaseModel):
     """Response model for priority requests."""
+
     request_id: UUID
     data_type: str
     priority_level: str
@@ -51,6 +53,7 @@ class PriorityRequestResponse(BaseModel):
 
 class DataSourceResponse(BaseModel):
     """Response model for data sources."""
+
     source_id: UUID
     base_url: str
     name: str
@@ -68,6 +71,7 @@ class DataSourceResponse(BaseModel):
 
 class DataSourceCreate(BaseModel):
     """Request model for creating a data source."""
+
     base_url: str
     name: str
 
@@ -89,7 +93,7 @@ def get_priority_service() -> PriorityService:
 async def submit_priority_request(
     request_data: PriorityRequestCreate,
     background_tasks: BackgroundTasks,
-    service: PriorityService = Depends(get_priority_service)
+    service: PriorityService = Depends(get_priority_service),
 ) -> PriorityRequestResponse:
     """
     Submit a new priority data ingestion request.
@@ -104,13 +108,13 @@ async def submit_priority_request(
         if not data_source:
             raise HTTPException(
                 status_code=404,
-                detail=f"Data source {request_data.source_id} not found"
+                detail=f"Data source {request_data.source_id} not found",
             )
 
         if not data_source.is_active:
             raise HTTPException(
                 status_code=400,
-                detail=f"Data source {request_data.source_id} is not active"
+                detail=f"Data source {request_data.source_id} is not active",
             )
 
         # Create priority request
@@ -119,13 +123,12 @@ async def submit_priority_request(
             priority_level=request_data.priority_level,
             source_id=request_data.source_id,
             deadline=request_data.deadline,
-            metadata=request_data.metadata
+            metadata=request_data.metadata,
         )
 
         # Submit the request
         submitted_request = await service.submit_priority_request(
-            priority_request,
-            data_source
+            priority_request, data_source
         )
 
         # Add background task to check for overdue requests
@@ -142,7 +145,7 @@ async def submit_priority_request(
             submitted_at=submitted_request.submitted_at,
             deadline=submitted_request.deadline,
             completed_at=submitted_request.completed_at,
-            error_message=submitted_request.error_message
+            error_message=submitted_request.error_message,
         )
 
     except ValidationError as e:
@@ -158,7 +161,7 @@ async def submit_priority_request(
 
 @router.get("/sources", response_model=List[DataSourceResponse])
 async def get_data_sources(
-    service: PriorityService = Depends(get_priority_service)
+    service: PriorityService = Depends(get_priority_service),
 ) -> List[DataSourceResponse]:
     """
     Get all registered data sources.
@@ -180,7 +183,7 @@ async def get_data_sources(
                 successful_requests=source.successful_requests,
                 is_active=source.is_active,
                 last_successful_fetch=source.last_successful_fetch,
-                created_at=source.created_at
+                created_at=source.created_at,
             )
             for source in sources
         ]
@@ -193,7 +196,7 @@ async def get_data_sources(
 @router.post("/sources", response_model=DataSourceResponse)
 async def register_data_source(
     source_data: DataSourceCreate,
-    service: PriorityService = Depends(get_priority_service)
+    service: PriorityService = Depends(get_priority_service),
 ) -> DataSourceResponse:
     """
     Register a new data source.
@@ -203,10 +206,7 @@ async def register_data_source(
     """
     try:
         # Create data source
-        data_source = DataSource(
-            base_url=source_data.base_url,
-            name=source_data.name
-        )
+        data_source = DataSource(base_url=source_data.base_url, name=source_data.name)
 
         # Register the source
         registered_source = await service.register_data_source(data_source)
@@ -223,7 +223,7 @@ async def register_data_source(
             successful_requests=registered_source.successful_requests,
             is_active=registered_source.is_active,
             last_successful_fetch=registered_source.last_successful_fetch,
-            created_at=registered_source.created_at
+            created_at=registered_source.created_at,
         )
 
     except ValidationError as e:
@@ -236,8 +236,7 @@ async def register_data_source(
 
 @router.get("/requests/pending", response_model=List[PriorityRequestResponse])
 async def get_pending_requests(
-    limit: int = 100,
-    service: PriorityService = Depends(get_priority_service)
+    limit: int = 100, service: PriorityService = Depends(get_priority_service)
 ) -> List[PriorityRequestResponse]:
     """
     Get pending priority requests.
@@ -257,7 +256,7 @@ async def get_pending_requests(
                 submitted_at=request.submitted_at,
                 deadline=request.deadline,
                 completed_at=request.completed_at,
-                error_message=request.error_message
+                error_message=request.error_message,
             )
             for request in requests
         ]

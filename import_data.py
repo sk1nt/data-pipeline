@@ -26,7 +26,7 @@ import shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOG = logging.getLogger(__name__)
 
 # Import project modules
@@ -39,10 +39,12 @@ except ImportError:
 try:
     from src.db.duckdb_utils import DuckDBUtils
     from src.lineage.lineage_tracker import LineageTracker
+
     NEW_MODULES_AVAILABLE = True
 except ImportError:
     LOG.warning("New modules not available, falling back to legacy import")
     NEW_MODULES_AVAILABLE = False
+
 
 class DataImporter:
     """Handles importing data from legacy exports."""
@@ -50,34 +52,36 @@ class DataImporter:
     def __init__(self, legacy_source_path: str, dry_run: bool = False):
         self.legacy_source_path = Path(legacy_source_path)
         self.dry_run = dry_run
-        self.db_utils = DuckDBUtils(db_path="data/gex_data.db") if NEW_MODULES_AVAILABLE else None
+        self.db_utils = (
+            DuckDBUtils(db_path="data/gex_data.db") if NEW_MODULES_AVAILABLE else None
+        )
         self.lineage_tracker = LineageTracker() if NEW_MODULES_AVAILABLE else None
         self.parquet_output_dir = Path("data/parquet/gexbot")
         self.stats = {
-            'gex_files_processed': 0,
-            'gex_records_imported': 0,
-            'parquet_partitions_written': 0,
-            'errors': []
+            "gex_files_processed": 0,
+            "gex_records_imported": 0,
+            "parquet_partitions_written": 0,
+            "errors": [],
         }
 
     def scan_data_sources(self) -> Dict[str, Any]:
         """Scan available GEX data sources only."""
         sources = {
-            'gex_data': {
-                'path': self.legacy_source_path / 'gex_bridge/history',
-                'files': [],
-                'description': 'GEX snapshots for NQ_NDX from gex_bridge/history'
+            "gex_data": {
+                "path": self.legacy_source_path / "gex_bridge/history",
+                "files": [],
+                "description": "GEX snapshots for NQ_NDX from gex_bridge/history",
             }
         }
 
         # Scan for GEX files
-        gex_path = sources['gex_data']['path']
+        gex_path = sources["gex_data"]["path"]
         if gex_path.exists():
-            json_files = list(gex_path.glob('**/*.json'))
-            sources['gex_data']['files'] = json_files
-            sources['gex_data']['count'] = len(json_files)
+            json_files = list(gex_path.glob("**/*.json"))
+            sources["gex_data"]["files"] = json_files
+            sources["gex_data"]["count"] = len(json_files)
         else:
-            sources['gex_data']['count'] = 0
+            sources["gex_data"]["count"] = 0
             LOG.warning(f"GEX path not found: {gex_path}")
 
         return sources
@@ -86,7 +90,7 @@ class DataImporter:
         """Import GEX data for NQ_NDX from gex_bridge/history only."""
         LOG.info("Starting GEX data import for NQ_NDX from gex_bridge/history...")
 
-        gex_path = self.legacy_source_path / 'gex_bridge/history'
+        gex_path = self.legacy_source_path / "gex_bridge/history"
         if not gex_path.exists():
             LOG.warning(f"GEX path not found: {gex_path}")
             return
@@ -95,9 +99,9 @@ class DataImporter:
             LOG.error("Required modules unavailable; cannot perform GEX import")
             return
 
-        json_files = sorted(gex_path.glob('*.json'))
+        json_files = sorted(gex_path.glob("*.json"))
         LOG.info(f"Found {len(json_files)} GEX JSON files")
-        self.stats['gex_files_processed'] = len(json_files)
+        self.stats["gex_files_processed"] = len(json_files)
 
         snapshot_schema = """
         timestamp BIGINT,
@@ -142,8 +146,10 @@ class DataImporter:
                     snapshot_total += snap_cnt
                     strike_total += strike_cnt
 
-            LOG.info(f"Dry run: {snapshot_total} snapshots, {strike_total} strike rows detected")
-            self.stats['gex_records_imported'] = snapshot_total
+            LOG.info(
+                f"Dry run: {snapshot_total} snapshots, {strike_total} strike rows detected"
+            )
+            self.stats["gex_records_imported"] = snapshot_total
             return
 
         with self.db_utils:
@@ -151,7 +157,9 @@ class DataImporter:
             conn.execute("BEGIN TRANSACTION")
             # Ensure new fields present in schema
             try:
-                conn.execute("ALTER TABLE gex_snapshots ADD COLUMN IF NOT EXISTS strikes VARCHAR")
+                conn.execute(
+                    "ALTER TABLE gex_snapshots ADD COLUMN IF NOT EXISTS strikes VARCHAR"
+                )
             except Exception:
                 pass
             conn.execute("DELETE FROM gex_snapshots")
@@ -214,14 +222,16 @@ class DataImporter:
 
         snapshot_count = self.db_utils.execute_query(
             "SELECT COUNT(*) AS cnt FROM gex_snapshots"
-        )[0]['cnt']
+        )[0]["cnt"]
         strike_count = self.db_utils.execute_query(
             "SELECT COUNT(*) AS cnt FROM gex_strikes"
-        )[0]['cnt']
+        )[0]["cnt"]
 
-        self.lineage_tracker.record_import("gex_duckdb_bulk_import", snapshot_count, 'gex')
+        self.lineage_tracker.record_import(
+            "gex_duckdb_bulk_import", snapshot_count, "gex"
+        )
 
-        self.stats['gex_records_imported'] = snapshot_count
+        self.stats["gex_records_imported"] = snapshot_count
         LOG.info(
             f"GEX import complete via DuckDB: {snapshot_count} snapshots, "
             f"{strike_count} strike rows"
@@ -229,7 +239,9 @@ class DataImporter:
 
     def run_import(self) -> Dict[str, Any]:
         """Run the complete import process."""
-        LOG.info(f"Starting data import from {self.legacy_source_path} (dry_run={self.dry_run})")
+        LOG.info(
+            f"Starting data import from {self.legacy_source_path} (dry_run={self.dry_run})"
+        )
 
         # Scan data sources
         sources = self.scan_data_sources()
@@ -249,10 +261,10 @@ class DataImporter:
         LOG.info(f"Stats: {self.stats}")
 
         return {
-            'sources_scanned': sources,
-            'import_stats': self.stats,
-            'dry_run': self.dry_run,
-            'timestamp': datetime.now().isoformat()
+            "sources_scanned": sources,
+            "import_stats": self.stats,
+            "dry_run": self.dry_run,
+            "timestamp": datetime.now().isoformat(),
         }
 
     def export_gex_strikes_to_parquet(self) -> None:
@@ -291,13 +303,15 @@ class DataImporter:
             self.db_utils.export_query_to_parquet(
                 export_query,
                 str(self.parquet_output_dir),
-                partition_by=["year", "month"]
+                partition_by=["year", "month"],
             )
 
-            count_result = self.db_utils.execute_query("SELECT COUNT(*) AS cnt FROM gex_strikes")
+            count_result = self.db_utils.execute_query(
+                "SELECT COUNT(*) AS cnt FROM gex_strikes"
+            )
 
-        total_rows = count_result[0]['cnt'] if count_result else 0
-        self.stats['parquet_partitions_written'] = total_rows
+        total_rows = count_result[0]["cnt"] if count_result else 0
+        self.stats["parquet_partitions_written"] = total_rows
         LOG.info(
             f"Exported {total_rows} strike rows to Parquet under {self.parquet_output_dir} "
             "partitioned by year/month"
@@ -311,13 +325,20 @@ class DataImporter:
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description='Import data from legacy exports')
-    parser.add_argument('--legacy-path', default='data/legacy_source',
-                       help='Path to legacy export directory')
-    parser.add_argument('--dry-run', action='store_true',
-                       help='Preview import without actually storing data')
-    parser.add_argument('--perform-import', action='store_true',
-                       help='Perform actual data import')
+    parser = argparse.ArgumentParser(description="Import data from legacy exports")
+    parser.add_argument(
+        "--legacy-path",
+        default="data/legacy_source",
+        help="Path to legacy export directory",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview import without actually storing data",
+    )
+    parser.add_argument(
+        "--perform-import", action="store_true", help="Perform actual data import"
+    )
 
     args = parser.parse_args()
 
@@ -337,11 +358,13 @@ def main():
 
     # Save results
     output_file = f"import_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    with open(output_file, 'w') as f:
+    with open(output_file, "w") as f:
         json.dump(results, f, indent=2, default=str)
 
     print(f"\nResults saved to: {output_file}")
-    print(f"Total records processed: {sum(v for k, v in results['import_stats'].items() if k != 'errors') - len(results['import_stats']['errors'])}")
+    print(
+        f"Total records processed: {sum(v for k, v in results['import_stats'].items() if k != 'errors') - len(results['import_stats']['errors'])}"
+    )
 
 
 if __name__ == "__main__":

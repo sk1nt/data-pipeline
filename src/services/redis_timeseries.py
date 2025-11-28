@@ -1,4 +1,5 @@
 """Helpers for interacting with RedisTimeSeries."""
+
 from __future__ import annotations
 
 import logging
@@ -17,7 +18,9 @@ class RedisTimeSeriesClient:
     def __init__(self, client: redis.Redis) -> None:
         self.client = client
 
-    def add_sample(self, key: str, timestamp_ms: int, value: float, labels: Dict[str, str]) -> None:
+    def add_sample(
+        self, key: str, timestamp_ms: int, value: float, labels: Dict[str, str]
+    ) -> None:
         try:
             self.client.execute_command(
                 "TS.ADD", key, timestamp_ms, value, "ON_DUPLICATE", "LAST"
@@ -30,7 +33,9 @@ class RedisTimeSeriesClient:
                 "TS.ADD", key, timestamp_ms, value, "ON_DUPLICATE", "LAST"
             )
 
-    def multi_add(self, samples: Iterable[Tuple[str, int, float, Dict[str, str]]]) -> None:
+    def multi_add(
+        self, samples: Iterable[Tuple[str, int, float, Dict[str, str]]]
+    ) -> None:
         records = list(samples)
         if not records:
             return

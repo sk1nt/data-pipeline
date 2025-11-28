@@ -13,6 +13,7 @@ Notes:
   - Designed to be fast and low-variance; falls back to LogisticRegression if LightGBM is unavailable.
   - Uses cost-aware thresholding on the regime classifier (defaults to 0.5 but expose --threshold to sweep).
 """
+
 import argparse
 from pathlib import Path
 import joblib
@@ -45,7 +46,9 @@ def make_features(df: pd.DataFrame) -> pd.DataFrame:
     return feats
 
 
-def make_labels(df: pd.DataFrame, pos_thresh: float = 0.0, neg_thresh: float = 0.0) -> np.ndarray:
+def make_labels(
+    df: pd.DataFrame, pos_thresh: float = 0.0, neg_thresh: float = 0.0
+) -> np.ndarray:
     """Label +1 for strong positive GEX, 0 for negative/neutral."""
     net = df.get("net_gex", pd.Series(0, index=df.index)).fillna(0.0)
     labels = (net > pos_thresh).astype(int)
@@ -74,7 +77,12 @@ def train_regime_classifier(X: pd.DataFrame, y: np.ndarray):
     return model
 
 
-def route_predictions(regime_probs: np.ndarray, preds_pos: np.ndarray, preds_neg: np.ndarray, threshold: float = 0.5) -> np.ndarray:
+def route_predictions(
+    regime_probs: np.ndarray,
+    preds_pos: np.ndarray,
+    preds_neg: np.ndarray,
+    threshold: float = 0.5,
+) -> np.ndarray:
     """Select prediction from pos-model when regime prob > threshold else neg-model."""
     mask = regime_probs > threshold
     return np.where(mask, preds_pos, preds_neg)
@@ -82,9 +90,15 @@ def route_predictions(regime_probs: np.ndarray, preds_pos: np.ndarray, preds_neg
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--parquet", required=True, help="Input parquet with net_gex and price columns.")
-    p.add_argument("--out", default="models/gex_regime.joblib", help="Output path for classifier.")
-    p.add_argument("--threshold", type=float, default=0.5, help="Decision threshold for routing.")
+    p.add_argument(
+        "--parquet", required=True, help="Input parquet with net_gex and price columns."
+    )
+    p.add_argument(
+        "--out", default="models/gex_regime.joblib", help="Output path for classifier."
+    )
+    p.add_argument(
+        "--threshold", type=float, default=0.5, help="Decision threshold for routing."
+    )
     args = p.parse_args()
 
     df = load_parquet(Path(args.parquet))
@@ -93,7 +107,10 @@ def main():
     model = train_regime_classifier(X, y)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump({"model": model, "features": list(X.columns), "threshold": args.threshold}, out_path)
+    joblib.dump(
+        {"model": model, "features": list(X.columns), "threshold": args.threshold},
+        out_path,
+    )
     print(f"Saved regime classifier to {out_path} (features={len(X.columns)})")
 
 

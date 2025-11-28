@@ -17,16 +17,16 @@ import duckdb
 
 def find_parquet_files(ticks_dir):
     p = Path(ticks_dir)
-    files = list(p.rglob('*.parquet'))
+    files = list(p.rglob("*.parquet"))
     files.sort()
     return files
 
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--ticks-dir', required=True)
-    p.add_argument('--db', default='data/tick_mbo_data.db')
-    p.add_argument('--table', default='mnq_ticks')
+    p.add_argument("--ticks-dir", required=True)
+    p.add_argument("--db", default="data/tick_mbo_data.db")
+    p.add_argument("--table", default="mnq_ticks")
     return p.parse_args()
 
 
@@ -34,22 +34,25 @@ def main():
     args = parse_args()
     files = find_parquet_files(args.ticks_dir)
     if not files:
-        print('No parquet files found in', args.ticks_dir)
+        print("No parquet files found in", args.ticks_dir)
         return
 
-    print(f'Found {len(files)} parquet files. Loading into {args.db} table {args.table}')
+    print(
+        f"Found {len(files)} parquet files. Loading into {args.db} table {args.table}"
+    )
     con = duckdb.connect(args.db)
     # We'll use a single transaction / writer
     try:
         for f in files:
-            print('Loading', f)
+            print("Loading", f)
             con.execute("BEGIN TRANSACTION")
             # Use DuckDB's efficient parquet scan + insert
             con.execute(f"INSERT INTO {args.table} SELECT * FROM read_parquet('{f}')")
             con.execute("COMMIT")
-        print('All files loaded')
+        print("All files loaded")
     finally:
         con.close()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

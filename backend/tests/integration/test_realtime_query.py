@@ -4,12 +4,14 @@ from backend.src.api.main import app
 
 client = TestClient(app)
 
+
 @pytest.fixture
 def api_key():
     """Fixture to create a test API key."""
     # In real implementation, this would register a test AI model
     # For now, return a mock key
     return "test-api-key"
+
 
 def test_realtime_query_integration(api_key):
     """Integration test for real-time query user journey."""
@@ -18,7 +20,9 @@ def test_realtime_query_integration(api_key):
     headers = {"Authorization": f"Bearer {api_key}"}
 
     # Query realtime data
-    response = client.get("/api/v1/ticks/realtime?symbols=AAPL&limit=10", headers=headers)
+    response = client.get(
+        "/api/v1/ticks/realtime?symbols=AAPL&limit=10", headers=headers
+    )
 
     # In full implementation, this would succeed
     # For now, test the structure

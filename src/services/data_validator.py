@@ -20,7 +20,9 @@ class DataValidator:
         """Initialize validator."""
         pass
 
-    def validate_timestamp(self, timestamp: datetime, start_date: datetime, end_date: datetime) -> bool:
+    def validate_timestamp(
+        self, timestamp: datetime, start_date: datetime, end_date: datetime
+    ) -> bool:
         """
         Validate timestamp is within date range.
 
@@ -32,7 +34,11 @@ class DataValidator:
         Returns:
             True if valid
         """
-        return start_date <= timestamp.replace(hour=0, minute=0, second=0, microsecond=0) <= end_date
+        return (
+            start_date
+            <= timestamp.replace(hour=0, minute=0, second=0, microsecond=0)
+            <= end_date
+        )
 
     def check_completeness(self, stats: Dict[str, Any]) -> bool:
         """
@@ -44,9 +50,9 @@ class DataValidator:
         Returns:
             True if complete enough
         """
-        ticks = stats.get('ticks', 0)
-        expected_days = stats.get('expected_days', 1)
-        actual_days = stats.get('actual_days', 0)
+        ticks = stats.get("ticks", 0)
+        expected_days = stats.get("expected_days", 1)
+        actual_days = stats.get("actual_days", 0)
 
         # Basic heuristics
         min_ticks_per_day = 100  # Very conservative minimum
@@ -77,11 +83,7 @@ class DataValidator:
 
         for key, count in seen.items():
             if count > 1:
-                duplicates.append({
-                    'key': key,
-                    'count': count,
-                    'fields': key_fields
-                })
+                duplicates.append({"key": key, "count": count, "fields": key_fields})
 
         return duplicates
 
@@ -95,8 +97,8 @@ class DataValidator:
         Returns:
             True if consistent
         """
-        tick_timestamps = data.get('tick_timestamps', [])
-        depth_timestamps = data.get('depth_timestamps', [])
+        tick_timestamps = data.get("tick_timestamps", [])
+        depth_timestamps = data.get("depth_timestamps", [])
 
         if not tick_timestamps or not depth_timestamps:
             return False
@@ -110,11 +112,13 @@ class DataValidator:
         # Allow some tolerance (1 hour)
         tolerance = timedelta(hours=1)
 
-        return (tick_start - tolerance <= depth_end and
-                depth_start - tolerance <= tick_end)
+        return (
+            tick_start - tolerance <= depth_end and depth_start - tolerance <= tick_end
+        )
 
-    def validate_dataset(self, db_path: str, parquet_dir: str,
-                        start_date: datetime, end_date: datetime) -> Dict[str, Any]:
+    def validate_dataset(
+        self, db_path: str, parquet_dir: str, start_date: datetime, end_date: datetime
+    ) -> Dict[str, Any]:
         """
         Validate complete dataset.
 
@@ -128,11 +132,11 @@ class DataValidator:
             Validation results
         """
         results = {
-            'total_ticks': 0,
-            'total_depth_records': 0,
-            'duplicate_ticks': 0,
-            'completeness_score': 0.0,
-            'validation_errors': []
+            "total_ticks": 0,
+            "total_depth_records": 0,
+            "duplicate_ticks": 0,
+            "completeness_score": 0.0,
+            "validation_errors": [],
         }
 
         try:
@@ -146,59 +150,66 @@ class DataValidator:
 
             # Calculate completeness
             expected_days = (end_date - start_date).days + 1
-            tick_days = results.get('tick_days', 0)
+            tick_days = results.get("tick_days", 0)
             if tick_days == 0:
-                results['completeness_score'] = 0.0
+                results["completeness_score"] = 0.0
             else:
                 actual_days = min(expected_days, tick_days)
-                results['completeness_score'] = actual_days / expected_days
+                results["completeness_score"] = actual_days / expected_days
 
             logger.info(f"Validation completed: {results}")
 
         except Exception as e:
             logger.error(f"Validation failed: {e}")
-            results['validation_errors'].append(str(e))
+            results["validation_errors"].append(str(e))
 
         return results
 
-    def _validate_tick_data(self, db_path: str, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
+    def _validate_tick_data(
+        self, db_path: str, start_date: datetime, end_date: datetime
+    ) -> Dict[str, Any]:
         """Validate tick data in DuckDB."""
-        stats = {'tick_days': 0}
+        stats = {"tick_days": 0}
 
         try:
             conn = duckdb.connect(db_path)
 
             # Count total ticks
             result = conn.execute("SELECT COUNT(*) FROM mnq_ticks").fetchone()
-            stats['total_ticks'] = result[0] if result else 0
+            stats["total_ticks"] = result[0] if result else 0
 
             # Check date range
             end_date_next = end_date + timedelta(days=1)
-            result = conn.execute("""
+            result = conn.execute(
+                """
                 SELECT COUNT(DISTINCT DATE(timestamp)) as days
                 FROM mnq_ticks
                 WHERE timestamp >= ? AND timestamp < ?
-            """, [str(start_date), str(end_date_next)]).fetchone()
-            stats['tick_days'] = result[0] if result else 0
+            """,
+                [str(start_date), str(end_date_next)],
+            ).fetchone()
+            stats["tick_days"] = result[0] if result else 0
 
             # Check for duplicates
             result = conn.execute("""
                 SELECT COUNT(*) - COUNT(DISTINCT CAST(timestamp AS VARCHAR) || '_' || CAST(price AS VARCHAR)) as duplicates
                 FROM mnq_ticks
             """).fetchone()
-            stats['duplicate_ticks'] = result[0] if result else 0
+            stats["duplicate_ticks"] = result[0] if result else 0
 
             conn.close()
 
         except Exception as e:
             logger.error(f"Tick data validation failed: {e}")
-            stats['tick_validation_error'] = str(e)
+            stats["tick_validation_error"] = str(e)
 
         return stats
 
-    def _validate_depth_data(self, parquet_dir: str, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
+    def _validate_depth_data(
+        self, parquet_dir: str, start_date: datetime, end_date: datetime
+    ) -> Dict[str, Any]:
         """Validate depth data in Parquet files."""
-        stats = {'depth_files': 0}
+        stats = {"depth_files": 0}
 
         try:
             parquet_path = Path(parquet_dir)
@@ -214,11 +225,11 @@ class DataValidator:
                 except Exception as e:
                     logger.warning(f"Failed to read {parquet_file}: {e}")
 
-            stats['total_depth_records'] = total_records
-            stats['depth_files'] = file_count
+            stats["total_depth_records"] = total_records
+            stats["depth_files"] = file_count
 
         except Exception as e:
             logger.error(f"Depth data validation failed: {e}")
-            stats['depth_validation_error'] = str(e)
+            stats["depth_validation_error"] = str(e)
 
         return stats

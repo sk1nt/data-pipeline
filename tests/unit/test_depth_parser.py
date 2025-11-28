@@ -17,7 +17,7 @@ class TestDepthParsing:
             bid_price_1=4500.00,
             bid_size_1=100,
             ask_price_1=4500.25,
-            ask_size_1=150
+            ask_size_1=150,
         )
 
         assert snapshot.timestamp == datetime(2024, 1, 1, 12, 0, 0)
@@ -34,7 +34,7 @@ class TestDepthParsing:
             bid_price_1=4500.00,
             bid_size_1=100,
             ask_price_1=4500.25,
-            ask_size_1=150
+            ask_size_1=150,
         )
 
         # Invalid: bid >= ask
@@ -44,7 +44,7 @@ class TestDepthParsing:
                 bid_price_1=4500.50,
                 bid_size_1=100,
                 ask_price_1=4500.25,
-                ask_size_1=150
+                ask_size_1=150,
             )
 
         # Invalid: negative size
@@ -54,7 +54,7 @@ class TestDepthParsing:
                 bid_price_1=4500.00,
                 bid_size_1=-100,
                 ask_price_1=4500.25,
-                ask_size_1=150
+                ask_size_1=150,
             )
 
     def test_depth_with_additional_levels(self):
@@ -68,7 +68,7 @@ class TestDepthParsing:
             bid_price_2=4499.75,
             bid_size_2=200,
             ask_price_2=4500.50,
-            ask_size_2=175
+            ask_size_2=175,
         )
 
         assert snapshot.bid_price_2 == 4499.75
