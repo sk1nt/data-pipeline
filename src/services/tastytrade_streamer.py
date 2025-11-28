@@ -29,6 +29,7 @@ class StreamerSettings:
     refresh_token: str
     symbols: List[str]
     depth_levels: int = 40
+    enable_depth: bool = False
 
 
 class TastyTradeStreamer:
@@ -81,8 +82,11 @@ class TastyTradeStreamer:
             async with DXLinkStreamer(session) as streamer:
                 formatted_symbols = [self._format_symbol(sym) for sym in self.settings.symbols]
                 await streamer.subscribe(Trade, formatted_symbols)
-                await streamer.subscribe(Quote, formatted_symbols)
-                LOGGER.info("Subscribed to DXLink trades + quotes for %s", formatted_symbols)
+                if getattr(self.settings, 'enable_depth', False):
+                    await streamer.subscribe(Quote, formatted_symbols)
+                    LOGGER.info("Subscribed to DXLink trades + quotes for %s", formatted_symbols)
+                else:
+                    LOGGER.info("Subscribed to DXLink trades for %s (quotes disabled)", formatted_symbols)
 
                 while not self._stop_event.is_set():
                     try:
@@ -93,13 +97,17 @@ class TastyTradeStreamer:
                     except Exception:  # pragma: no cover - defensive logging
                         LOGGER.exception("Error processing trade event")
 
-                    try:
-                        quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=0.1)
-                        await self._handle_quote(quote)
-                    except asyncio.TimeoutError:
-                        continue
-                    except Exception:
-                        LOGGER.exception("Error processing quote event")
+                    if getattr(self.settings, 'enable_depth', False):
+                        try:
+                            quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=0.1)
+                            await self._handle_quote(quote)
+                        except asyncio.TimeoutError:
+                            continue
+                        except Exception:
+                            LOGGER.exception("Error processing quote event")
+                    else:
+                        # If depth disabled, yield briefly to avoid spinning tight loop
+                        await asyncio.sleep(0.05)
         finally:
             LOGGER.info("TastyTrade DXLink streamer stopped")
 

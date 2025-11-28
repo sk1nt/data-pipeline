@@ -75,7 +75,6 @@ class HistoryPayload(BaseModel):
 
 class MLTradePayload(BaseModel):
     """Schema for machine learning driven trade signals."""
-
     symbol: str
     action: str
     direction: str
@@ -88,7 +87,7 @@ class MLTradePayload(BaseModel):
     total_trades: int
     timestamp: datetime
     simulated: bool = True
-
+    
 
 MLTradePayload.model_rebuild()
 
@@ -296,6 +295,7 @@ class ServiceManager:
                     refresh_token=settings.tastytrade_refresh_token or "",
                     symbols=settings.tastytrade_symbol_list,
                     depth_levels=settings.tastytrade_depth_cap,
+                    enable_depth=getattr(settings, 'tastytrade_enable_depth', False),
                 ),
                 on_trade=self._handle_trade_event,
                 on_depth=self._handle_depth_event,
@@ -808,7 +808,7 @@ STATUS_PAGE = """
 </head>
 <body>
   <h1>Data Pipeline Status</h1>
-  <p class=\"warning\">Dashboard auto-refreshes every 0.3 seconds.</p>
+    <p class=\"warning\">Dashboard auto-refreshes every 1 second.</p>
   <pre id=\"status\">Loading...</pre>
   <script>
     async function refresh() {
@@ -820,8 +820,39 @@ STATUS_PAGE = """
         document.getElementById('status').textContent = 'Error: ' + err;
       }
     }
-    refresh();
-    setInterval(refresh, 300);
+        refresh();
+        setInterval(refresh, 1000);
+
+        // service control helpers
+        async function restartService(service) {
+            try {
+                const res = await fetch(`/control/${service}/restart`, { method: 'POST' });
+                if (!res.ok) {
+                    const text = await res.text();
+                    alert(`Failed to restart ${service}: ${res.status} ${text}`);
+                    return;
+                }
+                const data = await res.json();
+                alert(`Restarted ${service}: ${JSON.stringify(data)}`);
+            } catch (err) {
+                alert(`Error restarting ${service}: ${err}`);
+            }
+        }
+
+        function renderControls() {
+            const services = ['tastytrade', 'schwab', 'gex_poller', 'gex_nq_poller', 'redis_flush', 'discord_bot'];
+            const div = document.createElement('div');
+            div.style.marginTop = '1rem';
+            services.forEach(s => {
+                const btn = document.createElement('button');
+                btn.textContent = `Restart ${s}`;
+                btn.style.marginRight = '0.5rem';
+                btn.onclick = () => restartService(s);
+                div.appendChild(btn);
+            });
+            document.body.insertBefore(div, document.getElementById('status'));
+        }
+        renderControls();
   </script>
 </body>
 </html>

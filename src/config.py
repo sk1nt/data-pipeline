@@ -80,6 +80,8 @@ class Settings(BaseSettings):
         default="MES,MNQ,NQ,SPY,QQQ,VIX",
     )
     tastytrade_depth_levels: int = env_field("TASTYTRADE_DEPTH_LEVELS", default=40)
+    # Toggle for subscribing to level-2 quote/depth events on DXLink
+    tastytrade_enable_depth: bool = env_field("TASTYTRADE_ENABLE_DEPTH", default=False)
     tastytrade_client_id: Optional[str] = env_field("TASTYTRADE_CLIENT_ID")
     tastytrade_client_secret: Optional[str] = env_field("TASTYTRADE_CLIENT_SECRET")
     tastytrade_refresh_token: Optional[str] = env_field("TASTYTRADE_REFRESH_TOKEN")

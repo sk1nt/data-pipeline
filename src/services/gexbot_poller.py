@@ -108,7 +108,12 @@ class GEXBotPoller:
                 if self._auto_refresh_symbols and self._needs_supported_refresh():
                     await self._refresh_supported_symbols(session)
                 # Always poll the canonical supported symbols (downloaded list); dynamic adds removed
-                symbols = sorted(self._supported_symbols or self._base_symbols)
+                # For NQ poller (base symbols include NQ_NDX), prefer a very fast RTH poll of the
+                # key symbols to reduce load: only ['SPX','NQ_NDX'] during RTH; otherwise poll all.
+                if 'NQ_NDX' in self._base_symbols:
+                    symbols = ['SPX', 'NQ_NDX'] if self._is_rth_now() else sorted(self._supported_symbols or self._base_symbols)
+                else:
+                    symbols = sorted(self._supported_symbols or self._base_symbols)
                 LOGGER.debug("poll-loop symbols=%s interval=%.3fs", symbols, interval_seconds)
                 for symbol in symbols:
                     try:
