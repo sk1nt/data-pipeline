@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 import os
 
 
@@ -44,6 +44,8 @@ class BotConfig:
     gex_feed_enabled: bool = False
     gex_feed_channel_ids: Optional[Tuple[int, ...]] = None
     gex_feed_symbol: str = "NQ_NDX"
+    gex_feed_symbols: Optional[Tuple[str, ...]] = None
+    gex_feed_channel_map: Dict[str, Tuple[int, ...]] = field(default_factory=dict)
     # Faster default cadence; can be overridden via env
     gex_feed_update_seconds: float = 0.5
     gex_feed_refresh_minutes: int = 5
@@ -61,6 +63,39 @@ def _parse_channel_ids(value: Optional[str]) -> Optional[List[int]]:
     if not value:
         return None
     return [int(cid.strip()) for cid in value.split(",") if cid.strip()]
+
+
+def _parse_symbol_list(value: Optional[str]) -> Optional[Tuple[str, ...]]:
+    if not value:
+        return None
+    symbols = [token.strip().upper() for token in value.split(",") if token.strip()]
+    return tuple(symbols) if symbols else None
+
+
+def _parse_channel_map(raw: Optional[str]) -> Dict[str, Tuple[int, ...]]:
+    """Parse mapping like 'NQ_NDX:123|456,ES_SPX:789,SPX:111|222'."""
+    mapping: Dict[str, Tuple[int, ...]] = {}
+    if not raw:
+        return mapping
+    for token in raw.split(","):
+        if ":" not in token:
+            continue
+        sym, ids_raw = token.split(":", 1)
+        sym = sym.strip().upper()
+        if not sym:
+            continue
+        ids: List[int] = []
+        for part in ids_raw.split("|"):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                ids.append(int(part))
+            except ValueError:
+                continue
+        if ids:
+            mapping[sym] = tuple(ids)
+    return mapping
 
 
 def _parse_account_list(value: Optional[str]) -> Tuple[str, ...]:
@@ -137,6 +172,8 @@ def create_config_from_env() -> BotConfig:
     uw_channel_ids = _parse_channel_ids(os.getenv("DISCORD_UW_CHANNEL_IDS"))
     status_channel_id = int(os.getenv("DISCORD_STATUS_CHANNEL_ID", "0")) or None
     gex_feed_channel_ids = _parse_channel_ids(os.getenv("DISCORD_GEX_FEED_CHANNEL_IDS"))
+    gex_feed_symbol_list = _parse_symbol_list(os.getenv("GEX_FEED_SYMBOLS"))
+    gex_feed_channel_map = _parse_channel_map(os.getenv("GEX_FEED_CHANNEL_MAP"))
 
     gex_feed_enabled = os.getenv("GEX_FEED_ENABLED", "false").lower() == "true"
     gex_feed_symbol = os.getenv("GEX_FEED_SYMBOL", "NQ_NDX")
@@ -177,6 +214,8 @@ def create_config_from_env() -> BotConfig:
         if gex_feed_channel_ids
         else None,
         gex_feed_symbol=gex_feed_symbol,
+        gex_feed_symbols=gex_feed_symbol_list,
+        gex_feed_channel_map=gex_feed_channel_map,
         gex_feed_update_seconds=gex_feed_update_seconds,
         gex_feed_refresh_minutes=gex_feed_refresh_minutes,
         gex_feed_window_seconds=gex_feed_window_seconds,

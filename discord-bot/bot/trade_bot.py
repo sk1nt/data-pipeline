@@ -58,6 +58,9 @@ class TradeBot(commands.Bot):
         }
         self.display_zone = ZoneInfo(os.getenv("DISPLAY_TIMEZONE", "America/New_York"))
         self.redis_snapshot_prefix = os.getenv("GEX_SNAPSHOT_PREFIX", "gex:snapshot:")
+        self.gex_snapshot_channel = os.getenv(
+            "GEX_SNAPSHOT_CHANNEL", "gex:snapshot:stream"
+        )
         self.allowed_channel_ids = tuple(
             getattr(config, "allowed_channel_ids", ()) or ()
         )
@@ -73,6 +76,14 @@ class TradeBot(commands.Bot):
         self.gex_feed_symbol = (
             getattr(config, "gex_feed_symbol", "NQ_NDX") or "NQ_NDX"
         ).upper()
+        self.gex_feed_symbols = tuple(
+            (getattr(config, "gex_feed_symbols", None) or ()) or (self.gex_feed_symbol,)
+        )
+        self.gex_feed_channel_map = {
+            (k or "").upper(): tuple(v)
+            for k, v in (getattr(config, "gex_feed_channel_map", {}) or {}).items()
+            if k and v
+        }
         # Slightly faster default cadence; allow overrides down to 250ms
         self.gex_feed_update_seconds = max(
             0.25, float(getattr(config, "gex_feed_update_seconds", 0.5) or 0.5)
@@ -904,7 +915,7 @@ class TradeBot(commands.Bot):
     def _should_run_gex_feed(self) -> bool:
         if not self.gex_feed_enabled:
             return False
-        if not self.gex_feed_channel_ids:
+        if not self.gex_feed_channel_ids and not self.gex_feed_channel_map:
             return False
         return True
 
@@ -1020,11 +1031,22 @@ class TradeBot(commands.Bot):
                     if now < start:
                         await self._sleep_with_stop((start - now).total_seconds())
                         continue
-                channels = await self._resolve_feed_channels()
-                if not channels:
+                symbols = self.gex_feed_symbols or (self.gex_feed_symbol,)
+                tasks = []
+                for sym in symbols:
+                    sym_norm = (sym or self.gex_feed_symbol).upper()
+                    channels = await self._resolve_feed_channels(sym_norm)
+                    if not channels:
+                        continue
+                    tasks.append(
+                        asyncio.create_task(
+                            self._run_gex_feed_session(sym_norm, channels, session_end)
+                        )
+                    )
+                if not tasks:
                     await asyncio.sleep(120)
                     continue
-                await self._run_gex_feed_session(channels, session_end)
+                await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -1037,9 +1059,13 @@ class TradeBot(commands.Bot):
             await asyncio.sleep(chunk)
             remaining -= chunk
 
-    async def _resolve_feed_channels(self) -> List[discord.abc.Messageable]:
+    async def _resolve_feed_channels(self, symbol: Optional[str] = None) -> List[discord.abc.Messageable]:
         channels = []
-        ids = self.gex_feed_channel_ids or ()
+        ids = ()
+        if symbol:
+            ids = self.gex_feed_channel_map.get(symbol.upper(), ())
+        if not ids:
+            ids = self.gex_feed_channel_ids or ()
         for cid in ids:
             channel = self.get_channel(cid)
             if channel is None:
@@ -1051,11 +1077,11 @@ class TradeBot(commands.Bot):
             if hasattr(channel, "send"):
                 channels.append(channel)
         if not channels:
-            print(f"GEX feed: no channels resolved from IDs {ids}")
+            print(f"GEX feed: no channels resolved from IDs {ids} for {symbol or 'default'}")
         return channels
 
     async def _run_gex_feed_session(
-        self, channels: List[discord.abc.Messageable], session_end: datetime
+        self, symbol: str, channels: List[discord.abc.Messageable], session_end: datetime
     ) -> None:
         tracker = RollingWindowTracker(window_seconds=self.gex_feed_window_seconds)
         messages: Dict[int, discord.Message] = {}
@@ -1064,6 +1090,7 @@ class TradeBot(commands.Bot):
         pending_content: Optional[str] = None
         pending_delta_map: Optional[Dict[str, "MetricSnapshot"]] = None
         pending_first_ts: Optional[datetime] = None
+        pubsub = await self._create_gex_pubsub()
         while not self._gex_feed_stop.is_set():
             now = datetime.now(self.display_zone)
             if now >= session_end:
@@ -1071,8 +1098,12 @@ class TradeBot(commands.Bot):
             if self._is_feed_blocked():
                 await self._sleep_between_feed_updates()
                 continue
+            data = None
+            if pubsub:
+                data = await self._next_pubsub_snapshot(pubsub, symbol)
             # Prefer polling canonical Redis snapshot keys for the feed to avoid stale cache race conditions
-            data = await self.get_gex_snapshot(self.gex_feed_symbol)
+            if not data:
+                data = await self.get_gex_snapshot(symbol)
             if not data:
                 await self._gex_feed_metrics.record_error(now, reason="no_data")
                 await self._sleep_between_feed_updates()
@@ -1132,6 +1163,11 @@ class TradeBot(commands.Bot):
                 await self._gex_feed_metrics.record_update(now, delta_map, refresh=True)
                 next_refresh = self._next_refresh_boundary(now)
             await self._sleep_between_feed_updates()
+        if pubsub:
+            try:
+                await asyncio.to_thread(pubsub.close)
+            except Exception:
+                pass
 
     def _next_refresh_boundary(self, current: datetime) -> datetime:
         minute_block = (
@@ -1143,6 +1179,65 @@ class TradeBot(commands.Bot):
         if boundary <= current:
             boundary += timedelta(minutes=self.gex_feed_refresh_minutes)
         return boundary
+
+    async def _create_gex_pubsub(self):
+        try:
+            pubsub = self.redis_client.pubsub(ignore_subscribe_messages=True)
+            pubsub.subscribe(self.gex_snapshot_channel)
+            return pubsub
+        except Exception as exc:
+            print(
+                f"GEX feed: failed to subscribe to {self.gex_snapshot_channel}: {exc}"
+            )
+            return None
+
+    async def _next_pubsub_snapshot(self, pubsub, symbol: str):
+        if not pubsub:
+            return None
+        try:
+            message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
+        except Exception as exc:
+            print(f"GEX feed pubsub error: {exc}")
+            return None
+        if not message or message.get("type") != "message":
+            return None
+        raw = message.get("data")
+        if raw is None:
+            return None
+        try:
+            payload = (
+                json.loads(raw.decode())
+                if isinstance(raw, (bytes, bytearray))
+                else json.loads(raw)
+                if isinstance(raw, str)
+                else raw
+            )
+        except Exception:
+            return None
+        normalized_symbol = (symbol or "NQ_NDX").upper()
+        ticker = self.ticker_aliases.get(normalized_symbol, normalized_symbol)
+        if (payload.get("symbol") or "").upper() != ticker:
+            return None
+        normalized = self._normalize_snapshot_payload(payload, ticker)
+        if not normalized:
+            return None
+        now = datetime.now(timezone.utc)
+        ts = normalized.get("timestamp") or now
+        if isinstance(ts, datetime):
+            age = (
+                now - (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc))
+            ).total_seconds()
+        else:
+            age = 9999
+        normalized["display_symbol"] = normalized_symbol
+        normalized["_source"] = "redis-pubsub"
+        if age <= 5:
+            normalized["_freshness"] = "current"
+        elif age <= 30:
+            normalized["_freshness"] = "stale"
+        else:
+            normalized["_freshness"] = "incomplete"
+        return normalized
 
     async def _post_feed_messages(
         self, channels: List[discord.abc.Messageable], content: str

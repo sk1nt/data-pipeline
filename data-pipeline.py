@@ -33,7 +33,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket
+from fastapi.websockets import WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -52,6 +53,7 @@ from src.services.gexbot_poller import (
     GEXBotPoller,
     GEXBotPollerSettings,
     SNAPSHOT_KEY_PREFIX,
+    SNAPSHOT_PUBSUB_CHANNEL,
 )  # noqa: E402
 from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreamer  # noqa: E402
 from src.services.redis_timeseries import RedisTimeSeriesClient  # noqa: E402
@@ -1269,6 +1271,78 @@ async def sierra_chart_bridge(symbol: str = "NQ_NDX") -> Dict[str, Any]:
         "timestamp": snapshot.get("timestamp"),
     }
 
+@app.websocket("/ws/sc")
+async def sierra_chart_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") -> None:
+    """Stream sum_gex_vol updates via Redis pubsub; filters to the requested symbol."""
+    await websocket.accept()
+    normalized = (symbol or "NQ_NDX").upper()
+    redis_conn = _get_redis_client()
+    pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
+    pubsub.subscribe(SNAPSHOT_PUBSUB_CHANNEL)
+
+    async def _send_snapshot(payload: Dict[str, Any]) -> None:
+        value = payload.get("sum_gex_vol")
+        if value is None:
+            return
+        await websocket.send_json(
+            {
+                "symbol": normalized,
+                "sum_gex_vol": value,
+                "timestamp": payload.get("timestamp"),
+            }
+        )
+
+    # Send the latest cached value immediately (matches /sc behavior)
+    try:
+        key = f"{SNAPSHOT_KEY_PREFIX}{normalized}"
+        raw = redis_conn.get(key)
+        if raw:
+            try:
+                snapshot = json.loads(raw)
+            except Exception:
+                try:
+                    snapshot = json.loads(raw.decode("utf-8"))
+                except Exception:
+                    snapshot = {"raw": raw.decode("utf-8", errors="replace")}
+            if isinstance(snapshot, dict) and snapshot.get("sum_gex_vol") is not None:
+                await _send_snapshot(snapshot)
+    except Exception:
+        LOGGER.debug("Failed to send initial /ws/sc snapshot", exc_info=True)
+
+    try:
+        while True:
+            try:
+                message = await asyncio.to_thread(pubsub.get_message, timeout=1.5)
+            except Exception:
+                message = None
+            if not message or message.get("type") != "message":
+                await asyncio.sleep(0.1)
+                continue
+            payload_raw = message.get("data")
+            payload: Dict[str, Any]
+            try:
+                if isinstance(payload_raw, (bytes, bytearray)):
+                    payload = json.loads(payload_raw.decode("utf-8"))
+                elif isinstance(payload_raw, str):
+                    payload = json.loads(payload_raw)
+                elif isinstance(payload_raw, dict):
+                    payload = payload_raw
+                else:
+                    continue
+            except Exception:
+                LOGGER.debug("Skipping malformed pubsub payload for /ws/sc", exc_info=True)
+                continue
+            if (payload.get("symbol") or "").upper() != normalized:
+                continue
+            await _send_snapshot(payload)
+    except WebSocketDisconnect:
+        return
+    finally:
+        try:
+            pubsub.close()
+        except Exception:
+            pass
+
 
 async def _trigger_queue_processing() -> None:
     """Kick processing of any queued historical imports on a worker thread."""
@@ -1399,10 +1473,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8877)
     parser.add_argument("--log-level", default="info")
+    parser.add_argument("--log-dir", default="logs")
+    parser.add_argument("--timeout-keep-alive", type=int, default=30)
     return parser.parse_args()
 
 
-def configure_logging(log_level: int = logging.INFO, log_dir: str = "/logs") -> None:
+def configure_logging(log_level: int = logging.INFO, log_dir: str = "logs") -> None:
     """Set up basic logging configuration for the data pipeline.
 
     - Ensure the log directory exists
@@ -1421,19 +1497,31 @@ def configure_logging(log_level: int = logging.INFO, log_dir: str = "/logs") -> 
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    def _has_file_handler(logger: logging.Logger) -> bool:
+        return any(
+            isinstance(h, RotatingFileHandler)
+            and getattr(h, "baseFilename", "").endswith("data-pipeline.log")
+            for h in logger.handlers
+        )
+
     root = logging.getLogger()
     root.setLevel(log_level)
-    # Keep any existing handlers (console) but enforce level
-    if not any(isinstance(h, RotatingFileHandler) and getattr(h, 'baseFilename', '')
-               .endswith('data-pipeline.log') for h in root.handlers):
+    # Attach file handler if missing
+    if not _has_file_handler(root):
         file_path = Path(log_dir) / "data-pipeline.log"
-        fh = RotatingFileHandler(str(file_path), maxBytes=10 * 1024 * 1024, backupCount=5)
+        fh = RotatingFileHandler(
+            str(file_path), maxBytes=10 * 1024 * 1024, backupCount=5
+        )
         fh.setLevel(log_level)
         fh.setFormatter(fmt)
         root.addHandler(fh)
 
-    # Console handler
-    if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+    # Disable console logging when file logging is active; otherwise keep a console handler
+    if _has_file_handler(root):
+        for handler in list(root.handlers):
+            if isinstance(handler, logging.StreamHandler):
+                root.removeHandler(handler)
+    elif not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
         ch = logging.StreamHandler(sys.stdout)
         ch.setLevel(log_level)
         ch.setFormatter(fmt)
@@ -1457,8 +1545,17 @@ def main() -> None:
     """Entry point used both by ``python data-pipeline.py`` and packaging."""
     args = parse_args()
     # Configure logging early so any modules started by this process inherit the config
-    configure_logging(log_level=getattr(logging, args.log_level.upper(), logging.INFO))
-    uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level.lower())
+    configure_logging(
+        log_level=getattr(logging, args.log_level.upper(), logging.INFO),
+        log_dir=args.log_dir,
+    )
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level=args.log_level.lower(),
+        timeout_keep_alive=args.timeout_keep_alive,
+    )
 
 
 if __name__ == "__main__":

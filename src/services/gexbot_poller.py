@@ -33,6 +33,7 @@ if os.getenv("GEXBOT_POLLER_DEBUG", "").lower() == "true":
     LOGGER.addHandler(_handler)
     LOGGER.propagate = False
 SNAPSHOT_KEY_PREFIX = "gex:snapshot:"
+SNAPSHOT_PUBSUB_CHANNEL = "gex:snapshot:stream"
 
 
 @dataclass
@@ -438,6 +439,11 @@ class GEXBotPoller:
             try:
                 payload = json.dumps(snapshot)
                 self.redis.client.set(key, payload)
+                try:
+                    # Publish full snapshot for downstream consumers (Discord feed, websocket, etc.)
+                    self.redis.client.publish(SNAPSHOT_PUBSUB_CHANNEL, payload)
+                except Exception:
+                    LOGGER.debug("Failed to publish snapshot for %s", symbol, exc_info=True)
             except Exception:
                 LOGGER.warning(
                     "Failed to cache GEX snapshot for %s", symbol, exc_info=True
