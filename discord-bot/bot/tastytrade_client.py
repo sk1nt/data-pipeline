@@ -6,7 +6,7 @@ import json
 import threading
 from decimal import Decimal
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
 import logging
 import hashlib
@@ -67,6 +67,7 @@ class TastyTradeClient:
         self._use_sandbox = use_sandbox
         self._dry_run = dry_run
         self._session: Optional[Session] = None
+        self._session_expiration: Optional[datetime] = None
         self._lock = threading.Lock()
         self._accounts: Dict[str, Account] = {}
         self._active_account = default_account
@@ -250,13 +251,13 @@ class TastyTradeClient:
                 refresh_token=self._refresh_token,
                 is_test=self._use_sandbox,
             )
+            self._session_expiration = self._derive_expiration(self._session)
         else:
             # refresh if token expired
             try:
-                if datetime.now(timezone.utc) >= getattr(
-                    self._session, "session_expiration", datetime.now(timezone.utc)
-                ):
+                if self._session_expiration and datetime.now(timezone.utc) >= self._session_expiration:
                     self._session.refresh()
+                    self._session_expiration = self._derive_expiration(self._session)
             except Exception as exc:  # pragma: no cover - handle invalid grant
                 msg = str(exc).lower()
                 if (
@@ -283,7 +284,7 @@ class TastyTradeClient:
             # fast-path: if we have a session and it hasn't expired
             try:
                 if self._session and not self._needs_reauth:
-                    exp = getattr(self._session, "session_expiration", None)
+                    exp = self._session_expiration
                     if exp and datetime.now(timezone.utc) < exp:
                         return True
                 # fall-back to creating or refreshing session via _ensure_session
@@ -301,26 +302,24 @@ class TastyTradeClient:
         refresh_token = (refresh_token or "").strip()
         if not refresh_token:
             raise ValueError("refresh_token must be provided")
-        self._refresh_token = refresh_token
-        # recreate session using new refresh token
-        self._session = Session(
-            provider_secret=self._client_secret,
-            refresh_token=self._refresh_token,
-            is_test=self._use_sandbox,
-        )
-        # clear cached symbols to avoid possible stale mappings
-        self._symbol_cache.clear()
-        self._needs_reauth = False
-        # Attempt to create a new session immediately
-        try:
-            self._session = Session(
-                provider_secret=self._client_secret,
-                refresh_token=self._refresh_token,
-                is_test=self._use_sandbox,
-            )
-        except Exception:
-            # If immediate creation fails, mark for reauth attempts
-            self._needs_reauth = True
+        with self._lock:
+            self._refresh_token = refresh_token
+            # recreate session using new refresh token
+            try:
+                self._session = Session(
+                    provider_secret=self._client_secret,
+                    refresh_token=self._refresh_token,
+                    is_test=self._use_sandbox,
+                )
+                self._session_expiration = self._derive_expiration(self._session)
+                self._needs_reauth = False
+            except Exception:
+                # If immediate creation fails, mark for reauth attempts
+                self._session = None
+                self._session_expiration = None
+                self._needs_reauth = True
+            # clear cached symbols to avoid possible stale mappings
+            self._symbol_cache.clear()
 
     def set_dry_run(self, flag: bool) -> None:
         """Turn on/off dry-run (prevent actual order execution)."""
@@ -340,22 +339,27 @@ class TastyTradeClient:
         """
         self._use_sandbox = bool(flag)
         # Clear session so the next call reinitializes using the updated flag
-        self._session = None
-        try:
-            self._session = Session(
-                provider_secret=self._client_secret,
-                refresh_token=self._refresh_token,
-                is_test=self._use_sandbox,
-            )
-            self._needs_reauth = False
-        except Exception:
+        with self._lock:
             self._session = None
-            self._needs_reauth = True
+            self._session_expiration = None
+            try:
+                self._session = Session(
+                    provider_secret=self._client_secret,
+                    refresh_token=self._refresh_token,
+                    is_test=self._use_sandbox,
+                )
+                self._session_expiration = self._derive_expiration(self._session)
+                self._needs_reauth = False
+            except Exception:
+                self._session = None
+                self._session_expiration = None
+                self._needs_reauth = True
 
     def _mark_needs_reauth(self) -> None:
         """Mark that the session needs reauthorization and clear current session."""
         self._needs_reauth = True
         self._session = None
+        self._session_expiration = None
 
     def get_auth_status(self) -> Dict[str, any]:
         """Return authentication/session/account status."""
@@ -374,7 +378,9 @@ class TastyTradeClient:
             status["accounts"] = list(self._accounts.keys())
             status["active_account"] = self._active_account
             status["session_valid"] = True
-            status["session_expiration"] = getattr(session, "session_expiration", None)
+            status["session_expiration"] = self._session_expiration or getattr(
+                session, "session_expiration", None
+            )
         except Exception as exc:
             status["error"] = str(exc)
             # If it's an auth issue, mark for reauth
@@ -434,6 +440,7 @@ class TastyTradeClient:
                             refresh_token=self._refresh_token,
                             is_test=self._use_sandbox,
                         )
+                        self._session_expiration = self._derive_expiration(self._session)
                         self._needs_reauth = False
                         # keep symbol cache fresh
                         self._symbol_cache.clear()
@@ -767,6 +774,17 @@ class TastyTradeClient:
         except Exception:
             pass
         return None
+
+    def _derive_expiration(self, session: Session) -> datetime:
+        """Return a best-effort expiration for the session.
+
+        The SDK may not expose a real expiry; fallback to a conservative window to
+        avoid refreshing on every call while still renewing periodically.
+        """
+        exp = getattr(session, "session_expiration", None)
+        if isinstance(exp, datetime):
+            return exp
+        return datetime.now(timezone.utc) + timedelta(minutes=20)
 
     def place_market_order_with_tp(
         self,

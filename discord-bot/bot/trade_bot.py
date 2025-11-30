@@ -184,9 +184,10 @@ class TradeBot(commands.Bot):
                     # attempting a live trade when refresh token is invalid.
                     # Ensure authorized before attempting to fetch positions/close.
                     try:
-                        await asyncio.to_thread(
-                            self.tastytrade_client.ensure_authorized
-                        )
+                        if self.tastytrade_client:
+                            await asyncio.to_thread(
+                                self.tastytrade_client.ensure_authorized
+                            )
                     except TastytradeAuthError as exc:
                         await self._send_dm_or_warn(
                             ctx,
@@ -195,9 +196,10 @@ class TradeBot(commands.Bot):
                         return
 
                     try:
-                        await asyncio.to_thread(
-                            self.tastytrade_client.ensure_authorized
-                        )
+                        if self.tastytrade_client:
+                            await asyncio.to_thread(
+                                self.tastytrade_client.ensure_authorized
+                            )
                     except TastytradeAuthError as exc:
                         await self._send_dm_or_warn(
                             ctx,
@@ -917,7 +919,15 @@ class TradeBot(commands.Bot):
             return
 
         print(f"Alert processed successfully: {result}")
-        await message.channel.send(f"Automated order placed: {result}")
+        # Result may be a dict with order info: order_id, quantity, entry_price
+        if isinstance(result, dict):
+            order_id = result.get("order_id")
+            qty = result.get("quantity")
+            price = result.get("entry_price")
+            msg = f"Automated order placed: id={order_id}, qty={qty}, entry_price={price}"
+        else:
+            msg = f"Automated order placed: {result}"
+        await message.channel.send(msg)
 
     async def get_context(self, origin, *, cls=commands.Context):
         ctx = await super().get_context(origin, cls=cls)

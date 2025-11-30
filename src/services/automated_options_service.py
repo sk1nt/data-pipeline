@@ -1,14 +1,21 @@
+import json
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional
 
 # Import via absolute paths so the module works when `src` is on sys.path
 from services.alert_parser import AlertParser
 from services.options_fill_service import OptionsFillService
 from services.tastytrade_client import tastytrade_client, TastytradeAuthError
+from ..lib.logging import get_logger
+from ..lib.redis_client import get_redis_client
 
 try:
     from tastytrade.account import Account  # type: ignore
 except Exception:  # pragma: no cover - optional dependency path
     Account = None  # type: ignore
+
+logger = get_logger(__name__)
 
 
 class AutomatedOptionsService:
@@ -19,7 +26,7 @@ class AutomatedOptionsService:
 
     async def process_alert(
         self, message: str, channel_id: str, user_id: str
-    ) -> Optional[str]:
+    ) -> Optional[dict]:
         """Process an alert message and place automated order."""
 
         # Parse alert
@@ -49,12 +56,47 @@ class AutomatedOptionsService:
                 action=alert_data["action"],
                 user_id=user_id,
                 channel_id=channel_id,
+                initial_price=Decimal(str(alert_data.get("price") or 0.0)),
             )
-            return result
         except TastytradeAuthError as exc:
             msg = f"TastyTrade authentication invalid while placing order: {exc}. Please update your refresh token."
             print(msg)
             raise TastytradeAuthError(msg) from exc
+
+        if not result:
+            return None
+
+        # Always return structured info: order_id, quantity, entry_price
+        order_id = result.get("order_id") if isinstance(result, dict) else result
+        entry_price = result.get("entry_price") if isinstance(result, dict) else None
+
+        # Audit log to Redis for compliance and debugging
+        try:
+            redis_client = get_redis_client()
+            redis_conn = redis_client.client
+            audit_key = "audit:automated_alerts"
+            payload = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "user_id": user_id,
+                "channel_id": channel_id,
+                "alert_message": message,
+                "parsed_alert": alert_data,
+                "computed_quantity": int(quantity),
+                "entry_price": float(entry_price) if entry_price is not None else None,
+                "order_id": order_id,
+            }
+            redis_conn.lpush(audit_key, json.dumps(payload, default=str))
+            logger.info(
+                "Audit logged automated alert: order_id=%s qty=%s entry_price=%s",
+                order_id,
+                int(quantity),
+                entry_price,
+            )
+        except Exception:
+            # Non-fatal; we still return success, but log for the operator
+            print("Failed to write audit log to Redis for automated alert")
+
+        return {"order_id": order_id, "quantity": int(quantity), "entry_price": entry_price}
 
     def _compute_quantity(self, alert_data: dict, channel_id: str) -> int:
         """Compute contract quantity using allocation, price, and account balances."""

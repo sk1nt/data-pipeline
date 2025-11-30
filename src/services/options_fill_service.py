@@ -123,7 +123,8 @@ class OptionsFillService:
         action: str,
         user_id: str,
         channel_id: str,
-    ) -> Optional[str]:
+        initial_price: Optional[Decimal] = None,
+    ) -> Optional[dict]:
         """Attempt to fill an options order with retries and price adjustments."""
 
         # Ensure auth is valid before initiating any trade-related calls
@@ -160,11 +161,29 @@ class OptionsFillService:
         # Get initial mid-price
         mid_price = await self.get_mid_price(option.symbol)
         if not mid_price:
-            return None
+            # If there's no mid price and we have an initial price, allow proceeding
+            if initial_price is None:
+                return None
 
-        current_price = mid_price
+        # Use the provided initial_price (from alert) if present; otherwise default to mid price
+        if initial_price is not None:
+            try:
+                if not isinstance(initial_price, Decimal):
+                    current_price = Decimal(str(initial_price))
+                else:
+                    current_price = initial_price
+            except Exception:
+                # fallback to mid_price if parsing fails
+                current_price = mid_price
+        else:
+            current_price = mid_price
         for attempt in range(self.max_retries + 1):
             print(f"Attempt {attempt + 1}: Placing order at {current_price}")
+            try:
+                logger = __import__('logging').getLogger(__name__)
+                logger.info("Attempt %s: placing order at %s", attempt + 1, current_price)
+            except Exception:
+                pass
             order_id = await self.place_limit_order(
                 option, Decimal(str(quantity)), order_action, current_price
             )
@@ -182,9 +201,8 @@ class OptionsFillService:
                         option, Decimal(str(quantity)), order_id
                     )
 
-                return order_id
-
-            # Adjust price
+                # Return both the order id and price used for the filled entry
+                return {"order_id": order_id, "entry_price": str(current_price)}
             if attempt < self.max_retries:
                 await self.cancel_order(order_id)
                 if order_action in [OrderAction.BUY_TO_OPEN]:
@@ -197,7 +215,7 @@ class OptionsFillService:
 
         # Leave as DAY order
         print("Order not filled, leaving as DAY order")
-        return order_id
+        return {"order_id": order_id, "entry_price": str(current_price)}
 
     def _normalize_expiry(self, expiry: str) -> date:
         """Normalize expiry like '12/05' to a date object using the nearest future year."""
@@ -260,9 +278,56 @@ class OptionsFillService:
         self, option: Option, quantity: Decimal, entry_order_id: str
     ):
         """Create a limit exit order at 100% profit."""
-        # Simplified: assume entry price known, create exit at 2x
-        # TODO: Implement proper profit calculation
-        exit_price = Decimal("1.00")  # Placeholder
-        await self.place_limit_order(
-            option, quantity, OrderAction.SELL_TO_CLOSE, exit_price
-        )
+        # Try to determine entry price from the existing order
+        try:
+            self.tastytrade_client.ensure_authorized()
+            session = self.tastytrade_client.get_session()
+            accounts = Account.get(session)
+            if not accounts:
+                return None
+            account = accounts[0]
+            orders = account.get_live_orders(session)
+            entry_order = None
+            for o in orders:
+                if str(getattr(o, "id", "")) == str(entry_order_id):
+                    entry_order = o
+                    break
+            entry_price = None
+            if entry_order:
+                # Prefer actual fill price from leg fills if present (most accurate)
+                try:
+                    legs = getattr(entry_order, "legs", []) or []
+                    if legs and getattr(legs[0], "fills", None):
+                        fills = getattr(legs[0], "fills") or []
+                        if fills and getattr(fills[0], "fill_price", None) is not None:
+                            entry_price = Decimal(str(fills[0].fill_price))
+                except Exception:
+                    entry_price = None
+                # Fallback to order.price if no fill price available
+                if entry_price is None:
+                    try:
+                        if getattr(entry_order, "price", None) is not None:
+                            entry_price = Decimal(str(entry_order.price))
+                    except Exception:
+                        entry_price = None
+                # Fallback: try to use leg price
+                if entry_price is None:
+                    try:
+                        if legs and getattr(legs[0], "price", None) is not None:
+                            entry_price = Decimal(str(legs[0].price))
+                    except Exception:
+                        entry_price = None
+            if entry_price is None:
+                # Could not find the entry price; abort gracefully
+                return None
+            # Compute exit at 100% profit (2x) and round to tick increment/0.01
+            profit_multiplier = Decimal("2.0")
+            exit_price = (entry_price * profit_multiplier).quantize(
+                self.tick_increment, rounding=ROUND_HALF_UP
+            )
+            return await self.place_limit_order(
+                option, quantity, OrderAction.SELL_TO_CLOSE, exit_price
+            )
+        except Exception as exc:
+            print(f"Error creating profit exit {exc}")
+            return None
