@@ -43,7 +43,9 @@ class TastyTradeClient:
             except TastytradeError as exc:
                 # If the refresh token is invalid or auth failed, clear session
                 self._session = None
-                raise TastytradeAuthError(f"TastyTrade authentication failed: {exc}") from exc
+                raise TastytradeAuthError(
+                    f"TastyTrade authentication failed: {exc}"
+                ) from exc
             # Assume session has expiration, or set a default
             self._session_expiration = datetime.now(
                 timezone.utc

@@ -4,6 +4,7 @@ from typing import Optional
 from services.alert_parser import AlertParser
 from services.options_fill_service import OptionsFillService
 from services.tastytrade_client import tastytrade_client, TastytradeAuthError
+
 try:
     from tastytrade.account import Account  # type: ignore
 except Exception:  # pragma: no cover - optional dependency path
@@ -40,14 +41,14 @@ class AutomatedOptionsService:
         # Place order
         try:
             result = await self.fill_service.fill_options_order(
-            symbol=alert_data["symbol"],
-            strike=alert_data["strike"],
-            option_type=alert_data["option_type"],
-            expiry=alert_data["expiry"],
-            quantity=int(quantity),
-            action=alert_data["action"],
-            user_id=user_id,
-            channel_id=channel_id,
+                symbol=alert_data["symbol"],
+                strike=alert_data["strike"],
+                option_type=alert_data["option_type"],
+                expiry=alert_data["expiry"],
+                quantity=int(quantity),
+                action=alert_data["action"],
+                user_id=user_id,
+                channel_id=channel_id,
             )
             return result
         except TastytradeAuthError as exc:

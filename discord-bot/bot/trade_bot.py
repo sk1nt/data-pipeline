@@ -168,26 +168,41 @@ class TradeBot(commands.Bot):
                     # Verify TastyTrade auth/session is valid before attempting order
                     if self.tastytrade_client:
                         try:
-                            tt_status = await asyncio.to_thread(self.tastytrade_client.get_auth_status)
+                            tt_status = await asyncio.to_thread(
+                                self.tastytrade_client.get_auth_status
+                            )
                         except Exception:
                             tt_status = None
-                        if tt_status and not tt_status.get('session_valid'):
-                            await self._send_dm_or_warn(ctx, 'TastyTrade authentication invalid or expired. Update the refresh token or run `!tt auth refresh <token>`.')
+                        if tt_status and not tt_status.get("session_valid"):
+                            await self._send_dm_or_warn(
+                                ctx,
+                                "TastyTrade authentication invalid or expired. Update the refresh token or run `!tt auth refresh <token>`.",
+                            )
                             return
 
                     # Preflight: ensure the TastyTrade session is authorized to avoid
                     # attempting a live trade when refresh token is invalid.
                     # Ensure authorized before attempting to fetch positions/close.
                     try:
-                        await asyncio.to_thread(self.tastytrade_client.ensure_authorized)
+                        await asyncio.to_thread(
+                            self.tastytrade_client.ensure_authorized
+                        )
                     except TastytradeAuthError as exc:
-                        await self._send_dm_or_warn(ctx, f'TastyTrade authentication invalid: {exc}. Update the refresh token or run `!tt auth refresh <token>`.')
+                        await self._send_dm_or_warn(
+                            ctx,
+                            f"TastyTrade authentication invalid: {exc}. Update the refresh token or run `!tt auth refresh <token>`.",
+                        )
                         return
 
                     try:
-                        await asyncio.to_thread(self.tastytrade_client.ensure_authorized)
+                        await asyncio.to_thread(
+                            self.tastytrade_client.ensure_authorized
+                        )
                     except TastytradeAuthError as exc:
-                        await self._send_dm_or_warn(ctx, f'TastyTrade authentication invalid: {exc}. Update the refresh token or run `!tt auth refresh <token>`.')
+                        await self._send_dm_or_warn(
+                            ctx,
+                            f"TastyTrade authentication invalid: {exc}. Update the refresh token or run `!tt auth refresh <token>`.",
+                        )
                         return
 
                     try:
@@ -473,7 +488,10 @@ class TradeBot(commands.Bot):
                         )
                         await self._send_dm_or_warn(ctx, result)
                     except TastytradeAuthError as e:
-                        await self._send_dm_or_warn(ctx, f"TastyTrade auth invalid: {e}. Update the refresh token or run `!tt auth refresh <token>`.")
+                        await self._send_dm_or_warn(
+                            ctx,
+                            f"TastyTrade auth invalid: {e}. Update the refresh token or run `!tt auth refresh <token>`.",
+                        )
                     except Exception as e:
                         await self._send_dm_or_warn(ctx, f"Order failed: {e}")
                     return
@@ -487,7 +505,9 @@ class TradeBot(commands.Bot):
                         )
                         await self._send_dm_or_warn(ctx, f"Cancel successful: {resp}")
                     except TastytradeAuthError as exc:
-                        await self._send_dm_or_warn(ctx, f"TastyTrade auth invalid: {exc}")
+                        await self._send_dm_or_warn(
+                            ctx, f"TastyTrade auth invalid: {exc}"
+                        )
                     except Exception as exc:
                         await self._send_dm_or_warn(ctx, f"Failed to cancel: {exc}")
                     return
@@ -506,7 +526,9 @@ class TradeBot(commands.Bot):
                         )
                         await self._send_dm_or_warn(ctx, f"Replaced order: {result}")
                     except TastytradeAuthError as exc:
-                        await self._send_dm_or_warn(ctx, f"TastyTrade auth invalid: {exc}")
+                        await self._send_dm_or_warn(
+                            ctx, f"TastyTrade auth invalid: {exc}"
+                        )
                     except Exception as exc:
                         await self._send_dm_or_warn(
                             ctx, f"Failed to replace order: {exc}"
@@ -520,7 +542,9 @@ class TradeBot(commands.Bot):
                         )
                         await self._send_dm_or_warn(ctx, f"Order {order_id}: {data}")
                     except TastytradeAuthError as exc:
-                        await self._send_dm_or_warn(ctx, f"TastyTrade auth invalid: {exc}")
+                        await self._send_dm_or_warn(
+                            ctx, f"TastyTrade auth invalid: {exc}"
+                        )
                     except Exception as exc:
                         await self._send_dm_or_warn(
                             ctx, f"Failed to fetch order: {exc}"
@@ -572,9 +596,14 @@ class TradeBot(commands.Bot):
                             )
                             await self._send_dm_or_warn(ctx, result)
                         except TastytradeAuthError as exc:
-                            await self._send_dm_or_warn(ctx, f"TastyTrade auth invalid: {exc}. Update the refresh token or run `!tt auth refresh <token>`.")
+                            await self._send_dm_or_warn(
+                                ctx,
+                                f"TastyTrade auth invalid: {exc}. Update the refresh token or run `!tt auth refresh <token>`.",
+                            )
                         except Exception as exc:
-                            await self._send_dm_or_warn(ctx, f"Failed to close position: {exc}")
+                            await self._send_dm_or_warn(
+                                ctx, f"Failed to close position: {exc}"
+                            )
                     except Exception as exc:
                         await self._send_dm_or_warn(
                             ctx, f"Failed to close position: {exc}"
@@ -766,7 +795,9 @@ class TradeBot(commands.Bot):
 
                             svc_tastytrade_client.set_refresh_token(new_token)
                         except Exception as sync_exc:
-                            print(f"Warning: failed to sync service tastytrade_client token: {sync_exc}")
+                            print(
+                                f"Warning: failed to sync service tastytrade_client token: {sync_exc}"
+                            )
                         await self._send_dm_or_warn(
                             ctx,
                             "TastyTrade refresh token updated; session reinitialized.",
@@ -869,7 +900,9 @@ class TradeBot(commands.Bot):
         from services.automated_options_service import AutomatedOptionsService
 
         try:
-            result = await AutomatedOptionsService(self.tastytrade_client).process_alert(
+            result = await AutomatedOptionsService(
+                self.tastytrade_client
+            ).process_alert(
                 message.content, str(message.channel.id), str(message.author.id)
             )
         except TastytradeAuthError as exc:
@@ -1059,7 +1092,9 @@ class TradeBot(commands.Bot):
             await asyncio.sleep(chunk)
             remaining -= chunk
 
-    async def _resolve_feed_channels(self, symbol: Optional[str] = None) -> List[discord.abc.Messageable]:
+    async def _resolve_feed_channels(
+        self, symbol: Optional[str] = None
+    ) -> List[discord.abc.Messageable]:
         channels = []
         ids = ()
         if symbol:
@@ -1077,11 +1112,16 @@ class TradeBot(commands.Bot):
             if hasattr(channel, "send"):
                 channels.append(channel)
         if not channels:
-            print(f"GEX feed: no channels resolved from IDs {ids} for {symbol or 'default'}")
+            print(
+                f"GEX feed: no channels resolved from IDs {ids} for {symbol or 'default'}"
+            )
         return channels
 
     async def _run_gex_feed_session(
-        self, symbol: str, channels: List[discord.abc.Messageable], session_end: datetime
+        self,
+        symbol: str,
+        channels: List[discord.abc.Messageable],
+        session_end: datetime,
     ) -> None:
         tracker = RollingWindowTracker(window_seconds=self.gex_feed_window_seconds)
         messages: Dict[int, discord.Message] = {}

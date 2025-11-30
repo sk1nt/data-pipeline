@@ -828,7 +828,7 @@ async def status(request: Request) -> Dict[str, Any]:
     """Expose the aggregated ServiceManager telemetry."""
     # Log status access via dedicated status logger
     logging.getLogger("data_pipeline.status").info(
-        "Status endpoint requested from %s", getattr(request.client, 'host', 'unknown')
+        "Status endpoint requested from %s", getattr(request.client, "host", "unknown")
     )
     return service_manager.status()
 
@@ -975,7 +975,7 @@ STATUS_PAGE = """
 async def status_page(request: Request) -> str:
     """Serve a lightweight HTML dashboard for ops users."""
     logging.getLogger("data_pipeline.status").info(
-        "Status page requested from %s", getattr(request.client, 'host', 'unknown')
+        "Status page requested from %s", getattr(request.client, "host", "unknown")
     )
     return STATUS_PAGE
 
@@ -1271,6 +1271,7 @@ async def sierra_chart_bridge(symbol: str = "NQ_NDX") -> Dict[str, Any]:
         "timestamp": snapshot.get("timestamp"),
     }
 
+
 @app.websocket("/ws/sc")
 async def sierra_chart_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") -> None:
     """Stream sum_gex_vol updates via Redis pubsub; filters to the requested symbol."""
@@ -1330,7 +1331,9 @@ async def sierra_chart_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") -
                 else:
                     continue
             except Exception:
-                LOGGER.debug("Skipping malformed pubsub payload for /ws/sc", exc_info=True)
+                LOGGER.debug(
+                    "Skipping malformed pubsub payload for /ws/sc", exc_info=True
+                )
                 continue
             if (payload.get("symbol") or "").upper() != normalized:
                 continue
@@ -1531,14 +1534,15 @@ def configure_logging(log_level: int = logging.INFO, log_dir: str = "logs") -> N
     status_logger = logging.getLogger("data_pipeline.status")
     status_logger.setLevel(logging.INFO)
     try:
-        status_fh = RotatingFileHandler(str(Path(log_dir) / "status.log"), maxBytes=5 * 1024 * 1024, backupCount=3)
+        status_fh = RotatingFileHandler(
+            str(Path(log_dir) / "status.log"), maxBytes=5 * 1024 * 1024, backupCount=3
+        )
         status_fh.setLevel(logging.INFO)
         status_fh.setFormatter(fmt)
         status_logger.addHandler(status_fh)
     except Exception:
         # Don't fail startup if status handler cannot be created
         LOGGER.warning("Could not create status.log handler; continuing without it")
-
 
 
 def main() -> None:

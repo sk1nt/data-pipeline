@@ -1,4 +1,5 @@
 """Helper for interacting with TastyTrade accounts via OAuthSession."""
+
 from __future__ import annotations
 
 import json
@@ -10,8 +11,15 @@ from typing import Dict, Optional
 import logging
 import hashlib
 import time
-from tastytrade.order import NewOrder, Leg, OrderType, OrderTimeInForce, OrderAction, InstrumentType, PriceEffect
-from tastytrade.instruments import Future, FutureProduct
+from tastytrade.order import (
+    NewOrder,
+    Leg,
+    OrderType,
+    OrderTimeInForce,
+    OrderAction,
+    InstrumentType,
+)
+from tastytrade.instruments import Future
 
 try:  # pragma: no cover - optional dependency
     from tastytrade.session import Session
@@ -38,7 +46,6 @@ LOGGER = logging.getLogger(__name__)
 
 class TastytradeAuthError(RuntimeError):
     """Raised when the refresh token is invalid, revoked, or session requires reauth."""
-
 
 
 class TastyTradeClient:
@@ -71,8 +78,9 @@ class TastyTradeClient:
         try:
             self._start_reauth_worker()
         except Exception:
-            LOGGER.warning("_start_reauth_worker failed during init; continuing without background reauth worker")
-
+            LOGGER.warning(
+                "_start_reauth_worker failed during init; continuing without background reauth worker"
+            )
 
     @property
     def active_account(self) -> Optional[str]:
@@ -92,7 +100,13 @@ class TastyTradeClient:
         with self._lock:
             session = self._ensure_session()
             self._refresh_accounts(session)
-            return [{'account-number': acc.account_number, 'description': acc.nickname or 'N/A'} for acc in self._accounts.values()]
+            return [
+                {
+                    "account-number": acc.account_number,
+                    "description": acc.nickname or "N/A",
+                }
+                for acc in self._accounts.values()
+            ]
 
     def get_account_summary(self) -> AccountSummary:
         with self._lock:
@@ -102,7 +116,11 @@ class TastyTradeClient:
             except Exception as exc:
                 msg = str(exc)
                 LOGGER.warning("TastyTrade session/account init failed: %s", msg)
-                if 'invalid_grant' in msg or 'Grant revoked' in msg or 'invalid_token' in msg:
+                if (
+                    "invalid_grant" in msg
+                    or "Grant revoked" in msg
+                    or "invalid_token" in msg
+                ):
                     self._mark_needs_reauth()
                     raise TastytradeAuthError(
                         "TastyTrade authentication failed (refresh token invalid or revoked). "
@@ -128,14 +146,22 @@ class TastyTradeClient:
             balances = account.get_balances(session)
             overview = {
                 "account_number": account.account_number,
-                "available_trading_funds": self._to_float(balances.available_trading_funds),
+                "available_trading_funds": self._to_float(
+                    balances.available_trading_funds
+                ),
                 "equity_buying_power": self._to_float(balances.equity_buying_power),
-                "derivative_buying_power": self._to_float(balances.derivative_buying_power),
-                "day_trading_buying_power": self._to_float(balances.day_trading_buying_power),
+                "derivative_buying_power": self._to_float(
+                    balances.derivative_buying_power
+                ),
+                "day_trading_buying_power": self._to_float(
+                    balances.day_trading_buying_power
+                ),
                 "net_liquidating_value": self._to_float(balances.net_liquidating_value),
                 "cash_balance": self._to_float(balances.cash_balance),
                 "margin_equity": self._to_float(balances.margin_equity),
-                "maintenance_requirement": self._to_float(balances.maintenance_requirement),
+                "maintenance_requirement": self._to_float(
+                    balances.maintenance_requirement
+                ),
                 "day_trade_excess": self._to_float(balances.day_trade_excess),
                 "pending_cash": self._to_float(balances.pending_cash),
             }
@@ -146,7 +172,7 @@ class TastyTradeClient:
             session = self._ensure_session()
             account = self._ensure_active_account(session)
             # Use the session to make API call to trading-status endpoint
-            return session._get(f'/accounts/{account.account_number}/trading-status')
+            return session._get(f"/accounts/{account.account_number}/trading-status")
 
     def get_positions(self) -> list:
         with self._lock:
@@ -163,8 +189,8 @@ class TastyTradeClient:
             try:
                 orders = account.get_live_orders(session)
             except Exception:
-                raw = session._get(f'/accounts/{account.account_number}/orders')
-                orders = raw.get('data', {}).get('items', [])
+                raw = session._get(f"/accounts/{account.account_number}/orders")
+                orders = raw.get("data", {}).get("items", [])
             return [order.__dict__ for order in orders]
 
     def get_futures_list(self) -> list:
@@ -173,12 +199,15 @@ class TastyTradeClient:
             return self.list_futures()
         except Exception:
             return [
-                {'symbol': '/NQ:XCME', 'description': 'E-mini Nasdaq-100 Futures'},
-                {'symbol': '/ES:XCME', 'description': 'E-mini S&P 500 Futures'},
-                {'symbol': '/MNQ:XCME', 'description': 'Micro E-mini Nasdaq-100 Futures'},
-                {'symbol': '/MES:XCME', 'description': 'Micro E-mini S&P 500 Futures'},
-                {'symbol': '/RTY:XCME', 'description': 'E-mini Russell 2000 Futures'},
-                {'symbol': '/YM:XCME', 'description': 'E-mini Dow Futures'},
+                {"symbol": "/NQ:XCME", "description": "E-mini Nasdaq-100 Futures"},
+                {"symbol": "/ES:XCME", "description": "E-mini S&P 500 Futures"},
+                {
+                    "symbol": "/MNQ:XCME",
+                    "description": "Micro E-mini Nasdaq-100 Futures",
+                },
+                {"symbol": "/MES:XCME", "description": "Micro E-mini S&P 500 Futures"},
+                {"symbol": "/RTY:XCME", "description": "E-mini Russell 2000 Futures"},
+                {"symbol": "/YM:XCME", "description": "E-mini Dow Futures"},
             ]
 
     def list_futures(self, product_codes: Optional[list] = None) -> list:
@@ -196,14 +225,16 @@ class TastyTradeClient:
             results = []
             for f in futures:
                 try:
-                    results.append({
-                        'symbol': getattr(f, 'symbol', None),
-                        'streamer_symbol': getattr(f, 'streamer_symbol', None),
-                        'expiration_date': getattr(f, 'expiration_date', None),
-                        'is_tradeable': getattr(f, 'is_tradeable', None),
-                        'product_code': getattr(f, 'product_code', None),
-                        'description': getattr(f, 'description', None),
-                    })
+                    results.append(
+                        {
+                            "symbol": getattr(f, "symbol", None),
+                            "streamer_symbol": getattr(f, "streamer_symbol", None),
+                            "expiration_date": getattr(f, "expiration_date", None),
+                            "is_tradeable": getattr(f, "is_tradeable", None),
+                            "product_code": getattr(f, "product_code", None),
+                            "description": getattr(f, "description", None),
+                        }
+                    )
                 except Exception:
                     continue
             return results
@@ -222,11 +253,17 @@ class TastyTradeClient:
         else:
             # refresh if token expired
             try:
-                if datetime.now(timezone.utc) >= getattr(self._session, "session_expiration", datetime.now(timezone.utc)):
+                if datetime.now(timezone.utc) >= getattr(
+                    self._session, "session_expiration", datetime.now(timezone.utc)
+                ):
                     self._session.refresh()
             except Exception as exc:  # pragma: no cover - handle invalid grant
                 msg = str(exc).lower()
-                if 'invalid_grant' in msg or 'grant revoked' in msg or 'invalid_token' in msg:
+                if (
+                    "invalid_grant" in msg
+                    or "grant revoked" in msg
+                    or "invalid_token" in msg
+                ):
                     self._mark_needs_reauth()
                     raise TastytradeAuthError(
                         "TastyTrade authentication failed (refresh token invalid or revoked). "
@@ -246,7 +283,7 @@ class TastyTradeClient:
             # fast-path: if we have a session and it hasn't expired
             try:
                 if self._session and not self._needs_reauth:
-                    exp = getattr(self._session, 'session_expiration', None)
+                    exp = getattr(self._session, "session_expiration", None)
                     if exp and datetime.now(timezone.utc) < exp:
                         return True
                 # fall-back to creating or refreshing session via _ensure_session
@@ -255,24 +292,32 @@ class TastyTradeClient:
             except TastytradeAuthError:
                 # propagate so callers can handle it specifically
                 raise
-            except Exception as exc:
+            except Exception:
                 # For other errors, wrap or propagate
                 raise
 
     def set_refresh_token(self, refresh_token: str) -> None:
         """Replace stored refresh token and reinitialize session with new token."""
-        refresh_token = (refresh_token or '').strip()
+        refresh_token = (refresh_token or "").strip()
         if not refresh_token:
-            raise ValueError('refresh_token must be provided')
+            raise ValueError("refresh_token must be provided")
         self._refresh_token = refresh_token
         # recreate session using new refresh token
-        self._session = Session(provider_secret=self._client_secret, refresh_token=self._refresh_token, is_test=self._use_sandbox)
+        self._session = Session(
+            provider_secret=self._client_secret,
+            refresh_token=self._refresh_token,
+            is_test=self._use_sandbox,
+        )
         # clear cached symbols to avoid possible stale mappings
         self._symbol_cache.clear()
         self._needs_reauth = False
         # Attempt to create a new session immediately
         try:
-            self._session = Session(provider_secret=self._client_secret, refresh_token=self._refresh_token, is_test=self._use_sandbox)
+            self._session = Session(
+                provider_secret=self._client_secret,
+                refresh_token=self._refresh_token,
+                is_test=self._use_sandbox,
+            )
         except Exception:
             # If immediate creation fails, mark for reauth attempts
             self._needs_reauth = True
@@ -297,7 +342,11 @@ class TastyTradeClient:
         # Clear session so the next call reinitializes using the updated flag
         self._session = None
         try:
-            self._session = Session(provider_secret=self._client_secret, refresh_token=self._refresh_token, is_test=self._use_sandbox)
+            self._session = Session(
+                provider_secret=self._client_secret,
+                refresh_token=self._refresh_token,
+                is_test=self._use_sandbox,
+            )
             self._needs_reauth = False
         except Exception:
             self._session = None
@@ -309,58 +358,70 @@ class TastyTradeClient:
         self._session = None
 
     def get_auth_status(self) -> Dict[str, any]:
-        """Return authentication/session/account status. """
+        """Return authentication/session/account status."""
         status: Dict[str, any] = {
-            'session_valid': False,
-            'active_account': self._active_account,
-            'accounts': [],
-            'use_sandbox': self._use_sandbox,
-            'dry_run': getattr(self, '_dry_run', True),
-            'error': None,
+            "session_valid": False,
+            "active_account": self._active_account,
+            "accounts": [],
+            "use_sandbox": self._use_sandbox,
+            "dry_run": getattr(self, "_dry_run", True),
+            "error": None,
         }
         try:
             session = self._ensure_session()
             # Refresh accounts
             self._refresh_accounts(session)
-            status['accounts'] = list(self._accounts.keys())
-            status['active_account'] = self._active_account
-            status['session_valid'] = True
-            status['session_expiration'] = getattr(session, 'session_expiration', None)
+            status["accounts"] = list(self._accounts.keys())
+            status["active_account"] = self._active_account
+            status["session_valid"] = True
+            status["session_expiration"] = getattr(session, "session_expiration", None)
         except Exception as exc:
-            status['error'] = str(exc)
+            status["error"] = str(exc)
             # If it's an auth issue, mark for reauth
             msg = str(exc).lower()
-            if 'invalid_grant' in msg or 'grant revoked' in msg or 'invalid_token' in msg:
+            if (
+                "invalid_grant" in msg
+                or "grant revoked" in msg
+                or "invalid_token" in msg
+            ):
                 self._mark_needs_reauth()
-        status['needs_reauth'] = getattr(self, '_needs_reauth', False)
-        status['refresh_token_hash'] = self._hash_token(getattr(self, '_refresh_token', ''))
+        status["needs_reauth"] = getattr(self, "_needs_reauth", False)
+        status["refresh_token_hash"] = self._hash_token(
+            getattr(self, "_refresh_token", "")
+        )
         return status
 
     def _hash_token(self, token: str) -> str:
         if not token:
-            return ''
+            return ""
         # Return short SHA256 fingerprint to display safely
-        h = hashlib.sha256(token.encode('utf-8')).hexdigest()
+        h = hashlib.sha256(token.encode("utf-8")).hexdigest()
         return h[:12]
 
     def _start_reauth_worker(self) -> None:
         # Defensive reauth worker start: avoid raising if threading is missing or failed
-        if self._reauth_thread and getattr(self._reauth_thread, 'is_alive', lambda: False)():
+        if (
+            self._reauth_thread
+            and getattr(self._reauth_thread, "is_alive", lambda: False)()
+        ):
             return
         try:
             # If 'threading.Thread' exists, use it; otherwise try to import threading dynamically
-            thread_cls = getattr(threading, 'Thread', None)
+            thread_cls = getattr(threading, "Thread", None)
             if thread_cls is None:
                 import importlib as _importlib
-                threading_mod = _importlib.import_module('threading')
-                thread_cls = getattr(threading_mod, 'Thread', None)
+
+                threading_mod = _importlib.import_module("threading")
+                thread_cls = getattr(threading_mod, "Thread", None)
             if thread_cls is None:
-                LOGGER.warning('threading.Thread is not available; reauth worker will not be started')
+                LOGGER.warning(
+                    "threading.Thread is not available; reauth worker will not be started"
+                )
                 return
             self._reauth_thread = thread_cls(target=self._reauth_worker, daemon=True)
             self._reauth_thread.start()
         except Exception as exc:
-            LOGGER.warning('Failed to start reauth worker thread: %s', exc)
+            LOGGER.warning("Failed to start reauth worker thread: %s", exc)
 
     def _reauth_worker(self) -> None:
         # Background thread that tries to reinitialize session when needed
@@ -368,49 +429,61 @@ class TastyTradeClient:
             try:
                 if self._needs_reauth:
                     try:
-                        self._session = Session(provider_secret=self._client_secret, refresh_token=self._refresh_token, is_test=self._use_sandbox)
+                        self._session = Session(
+                            provider_secret=self._client_secret,
+                            refresh_token=self._refresh_token,
+                            is_test=self._use_sandbox,
+                        )
                         self._needs_reauth = False
                         # keep symbol cache fresh
                         self._symbol_cache.clear()
-                        LOGGER.info('TastyTrade session reinitialized by reauth worker')
+                        LOGGER.info("TastyTrade session reinitialized by reauth worker")
                     except Exception:
-                        LOGGER.debug('TastyTrade reauth attempt failed; will retry')
+                        LOGGER.debug("TastyTrade reauth attempt failed; will retry")
                 time.sleep(self._reauth_backoff_seconds)
             except Exception:
                 time.sleep(self._reauth_backoff_seconds)
 
     def _resolve_front_month_symbol(self, product_code: str) -> Optional[str]:
         """Return front-month TW symbol (like /NQZ5) for a product code like 'NQ'. Caches to avoid repeated API calls."""
-        product_code = product_code.upper().replace('/', '') if product_code else ''
+        product_code = product_code.upper().replace("/", "") if product_code else ""
         if not product_code:
             return None
         cache = self._symbol_cache.get(product_code)
         now = datetime.now(timezone.utc)
-        if cache and (now - cache.get('ts', now)).total_seconds() < 60 * 60:
-            return cache.get('symbol')
+        if cache and (now - cache.get("ts", now)).total_seconds() < 60 * 60:
+            return cache.get("symbol")
         # Fetch futures by product code
         try:
             session = self._ensure_session()
             # Use Future.get with product_codes to enumerate contracts
             futures = Future.get(session, symbols=None, product_codes=[product_code])
-            candidates = [f for f in futures if getattr(f, 'is_tradeable', True)]
+            candidates = [f for f in futures if getattr(f, "is_tradeable", True)]
             # Always select the closest expiration
             selected: Optional[Future] = None
             if candidates:
-                candidates.sort(key=lambda f: getattr(f, 'expiration_date', datetime.max))
+                candidates.sort(
+                    key=lambda f: getattr(f, "expiration_date", datetime.max)
+                )
                 selected = candidates[0]
             if selected:
                 # Use streamer_symbol if available, otherwise symbol
-                sym = getattr(selected, 'streamer_symbol', None) or getattr(selected, 'symbol', None) or ''
-                sym = f"/{sym}" if sym and not sym.startswith('/') else sym
-                self._symbol_cache[product_code] = {'symbol': sym, 'ts': now}
+                sym = (
+                    getattr(selected, "streamer_symbol", None)
+                    or getattr(selected, "symbol", None)
+                    or ""
+                )
+                sym = f"/{sym}" if sym and not sym.startswith("/") else sym
+                self._symbol_cache[product_code] = {"symbol": sym, "ts": now}
                 return sym
         except Exception:
             # if we can't fetch front month, return None and let caller fallback
             return None
         return None
 
-    def _resolve_future_contract_symbol(self, session: Session, symbol: str) -> Optional[str]:
+    def _resolve_future_contract_symbol(
+        self, session: Session, symbol: str
+    ) -> Optional[str]:
         """Resolve a user-provided future symbol to the TastyTrade contract symbol (e.g., '/NQZ5').
 
         Attempts several common normalizations and uses the SDK to find a matching
@@ -422,55 +495,62 @@ class TastyTradeClient:
         raw = symbol.strip().upper()
         # If already present in cache, return it quickly
         if raw in self._symbol_cache:
-            return self._symbol_cache[raw].get('resolved')
+            return self._symbol_cache[raw].get("resolved")
         # Build candidate forms to match against SDK Future.symbol or streamer_symbol
-        cand = raw.lstrip('/')
+        cand = raw.lstrip("/")
         candidates = set()
         candidates.add(cand)
-        candidates.add('/' + cand)
-        if ':' in cand:
-            base = cand.split(':', 1)[0]
+        candidates.add("/" + cand)
+        if ":" in cand:
+            base = cand.split(":", 1)[0]
             candidates.add(base)
-            candidates.add('/' + base)
+            candidates.add("/" + base)
         # If year supplied as 2-digits (e.g., NQZ25), add single-digit variant (NQZ5)
         import re
-        m = re.match(r'^(?P<prod>[A-Z]{1,4})(?P<month>[A-Z])(?P<year>\d{2})$', cand)
+
+        m = re.match(r"^(?P<prod>[A-Z]{1,4})(?P<month>[A-Z])(?P<year>\d{2})$", cand)
         if m:
-            prod = m.group('prod')
-            month = m.group('month')
-            year = m.group('year')
+            prod = m.group("prod")
+            month = m.group("month")
+            year = m.group("year")
             short = f"{prod}{month}{year[-1]}"
             candidates.add(short)
-            candidates.add('/' + short)
+            candidates.add("/" + short)
         # If no explicit month/year provided, try resolving front month for the product
         product_code = None
-        pm = re.match(r'^(?P<prod>NQ|MNQ|ES|MES|RTY|YM)$', cand)
+        pm = re.match(r"^(?P<prod>NQ|MNQ|ES|MES|RTY|YM)$", cand)
         if pm:
-            product_code = pm.group('prod')
+            product_code = pm.group("prod")
         # Fetch SDK futures for the product, if available
         try:
             # If we have a product code, query futures for that product; otherwise
             # query all futures by product_codes inferred from input
             futures = None
             if product_code:
-                futures = Future.get(session, symbols=None, product_codes=[product_code])
+                futures = Future.get(
+                    session, symbols=None, product_codes=[product_code]
+                )
             else:
                 # Try to guess product code from the first alpha characters
-                maybe_prod = re.match(r'^(?P<prod>[A-Z]+)', cand)
+                maybe_prod = re.match(r"^(?P<prod>[A-Z]+)", cand)
                 if maybe_prod:
                     try:
-                        futures = Future.get(session, symbols=None, product_codes=[maybe_prod.group('prod')])
+                        futures = Future.get(
+                            session,
+                            symbols=None,
+                            product_codes=[maybe_prod.group("prod")],
+                        )
                     except Exception:
                         futures = Future.get(session, symbols=None)
                 else:
                     futures = Future.get(session, symbols=None)
             if not futures:
-                raise Exception('no futures returned')
+                raise Exception("no futures returned")
             # search among futures for a match
             matches = []
             for f in futures:
-                f_sym = getattr(f, 'symbol', None)
-                f_stream = getattr(f, 'streamer_symbol', None)
+                f_sym = getattr(f, "symbol", None)
+                f_stream = getattr(f, "streamer_symbol", None)
                 try:
                     # Compare by symbol (e.g., '/NQZ5')
                     if f_sym and any(f_sym.upper() == c.upper() for c in candidates):
@@ -478,9 +558,9 @@ class TastyTradeClient:
                         continue
                     # Compare streamer symbol base (e.g., '/NQZ25:XCME' -> '/NQZ25')
                     if f_stream:
-                        f_stream_base = f_stream.split(':', 1)[0]
+                        f_stream_base = f_stream.split(":", 1)[0]
                         if any(f_stream_base.upper() == c.upper() for c in candidates):
-                            matches.append(getattr(f, 'symbol', f_stream_base))
+                            matches.append(getattr(f, "symbol", f_stream_base))
                             continue
                 except Exception:
                     continue
@@ -488,49 +568,57 @@ class TastyTradeClient:
             if matches:
                 # Prefer single-digit year format if both are present (e.g., '/NQZ5')
                 import re as _re
-                single_digit = [m for m in matches if _re.match(r'^/[A-Z]{1,4}[A-Z]\d$', m)]
+
+                single_digit = [
+                    m for m in matches if _re.match(r"^/[A-Z]{1,4}[A-Z]\d$", m)
+                ]
                 if single_digit:
                     resolved = single_digit[0]
                 else:
                     resolved = matches[0]
                 # If we chose a two-digit year symbol, prefer a single-digit
                 # version if the futures list has one for the same product/month.
-                if resolved and _re.match(r'^/[A-Z]{1,4}[A-Z]\d{2}$', resolved):
+                if resolved and _re.match(r"^/[A-Z]{1,4}[A-Z]\d{2}$", resolved):
                     prod = resolved[1:3]
                     month = resolved[3]
                     # create one-digit variant
                     alt = f"/{prod}{month}{resolved[-1]}"
                     for f in futures:
-                        if getattr(f, 'symbol', None) == alt:
+                        if getattr(f, "symbol", None) == alt:
                             resolved = alt
                             break
             if resolved:
                 # Ensure leading slash
-                if not resolved.startswith('/'):
-                    resolved = '/' + resolved
+                if not resolved.startswith("/"):
+                    resolved = "/" + resolved
                 # Cache
-                self._symbol_cache[raw] = {'resolved': resolved, 'ts': datetime.now(timezone.utc)}
+                self._symbol_cache[raw] = {
+                    "resolved": resolved,
+                    "ts": datetime.now(timezone.utc),
+                }
                 return resolved
         except Exception:
             # ignore and fallback to heuristic below
             pass
         # Heuristic fallback: convert 2-digit year to single-digit and ensure leading '/'
         short = None
-        if ':' in raw:
-            raw_no_ex = raw.split(':', 1)[0]
+        if ":" in raw:
+            raw_no_ex = raw.split(":", 1)[0]
         else:
             raw_no_ex = raw
         # Normalize by removing leading slash so regex checks work consistently
-        raw_no_ex = raw_no_ex.lstrip('/')
-        m2 = re.match(r'^(?P<prod>[A-Z]{1,4})(?P<month>[A-Z])(?P<year>\d{2})$', raw_no_ex)
+        raw_no_ex = raw_no_ex.lstrip("/")
+        m2 = re.match(
+            r"^(?P<prod>[A-Z]{1,4})(?P<month>[A-Z])(?P<year>\d{2})$", raw_no_ex
+        )
         if m2:
-            prod = m2.group('prod')
-            month = m2.group('month')
-            year = m2.group('year')
+            prod = m2.group("prod")
+            month = m2.group("month")
+            year = m2.group("year")
             short = f"/{prod}{month}{year[-1]}"
         else:
-            short = '/' + raw_no_ex.lstrip('/')
-        self._symbol_cache[raw] = {'resolved': short, 'ts': datetime.now(timezone.utc)}
+            short = "/" + raw_no_ex.lstrip("/")
+        self._symbol_cache[raw] = {"resolved": short, "ts": datetime.now(timezone.utc)}
         return short
 
     def _refresh_accounts(self, session: Session) -> None:
@@ -554,12 +642,18 @@ class TastyTradeClient:
             account = self._ensure_active_account(session)
             try:
                 # No SDK helper; call delete endpoint directly
-                resp = session._delete(f"/accounts/{account.account_number}/orders/{order_id}")
+                resp = session._delete(
+                    f"/accounts/{account.account_number}/orders/{order_id}"
+                )
                 return resp
             except Exception as exc:
                 msg = str(exc)
                 LOGGER.warning("Failed to cancel order %s: %s", order_id, msg)
-                if 'invalid_grant' in msg or 'Grant revoked' in msg or 'invalid_token' in msg:
+                if (
+                    "invalid_grant" in msg
+                    or "Grant revoked" in msg
+                    or "invalid_token" in msg
+                ):
                     self._mark_needs_reauth()
                     raise TastytradeAuthError(
                         "TastyTrade authentication failed (refresh token invalid or revoked). "
@@ -576,19 +670,31 @@ class TastyTradeClient:
             try:
                 orders = account.get_orders(session)
                 for o in orders:
-                    if str(getattr(o, 'id', '')) == str(order_id) or getattr(o, 'id', '') == order_id:
+                    if (
+                        str(getattr(o, "id", "")) == str(order_id)
+                        or getattr(o, "id", "") == order_id
+                    ):
                         return o.__dict__
                 # Not found; try fetching directly
-                resp = session._get(f"/accounts/{account.account_number}/orders/{order_id}")
+                resp = session._get(
+                    f"/accounts/{account.account_number}/orders/{order_id}"
+                )
                 return resp
             except Exception as exc:
                 msg = str(exc)
                 LOGGER.warning("Failed to fetch order %s: %s", order_id, msg)
                 raise
 
-    def replace_order(self, order_id: str, *, price: Optional[float] = None, time_in_force: Optional[OrderTimeInForce] = None) -> dict:
+    def replace_order(
+        self,
+        order_id: str,
+        *,
+        price: Optional[float] = None,
+        time_in_force: Optional[OrderTimeInForce] = None,
+    ) -> dict:
         """Replace an existing order (adjust price or TIF)."""
         from tastytrade.order import NewOrder
+
         with self._lock:
             session = self._ensure_session()
             account = self._ensure_active_account(session)
@@ -596,15 +702,17 @@ class TastyTradeClient:
                 # Build new order with provided fields; no legs required for replace
                 new_order = NewOrder(
                     time_in_force=time_in_force or OrderTimeInForce.DAY,
-                    order_type=OrderType.LIMIT if price is not None else OrderType.MARKET,
+                    order_type=OrderType.LIMIT
+                    if price is not None
+                    else OrderType.MARKET,
                     price=price or None,
                     legs=[],
                 )
                 placed = account.replace_order(session, int(order_id), new_order)
-                return getattr(placed, '__dict__', placed)
+                return getattr(placed, "__dict__", placed)
             except Exception as exc:
                 msg = str(exc)
-                LOGGER.warning('Failed to replace order %s: %s', order_id, msg)
+                LOGGER.warning("Failed to replace order %s: %s", order_id, msg)
                 raise
 
     @staticmethod
@@ -625,10 +733,10 @@ class TastyTradeClient:
     def _pick_buying_power(balances) -> float:
         # Prioritize derivative buying power for futures/options
         return (
-            balances.derivative_buying_power or
-            balances.equity_buying_power or
-            balances.day_trading_buying_power or
-            0.0
+            balances.derivative_buying_power
+            or balances.equity_buying_power
+            or balances.day_trading_buying_power
+            or 0.0
         )
 
     def _extract_order_id(self, placed) -> Optional[str]:
@@ -642,7 +750,7 @@ class TastyTradeClient:
             return None
         # If object with attribute 'id'
         try:
-            oid = getattr(placed, 'id', None)
+            oid = getattr(placed, "id", None)
             if oid is not None:
                 return str(oid)
         except Exception:
@@ -651,11 +759,11 @@ class TastyTradeClient:
         try:
             if isinstance(placed, dict):
                 # common shapes: {'data': {'id': 123}} or {'id': 123}
-                data = placed.get('data') if placed.get('data') is not None else placed
-                if isinstance(data, dict) and 'id' in data:
-                    return str(data['id'])
-                if 'id' in placed:
-                    return str(placed['id'])
+                data = placed.get("data") if placed.get("data") is not None else placed
+                if isinstance(data, dict) and "id" in data:
+                    return str(data["id"])
+                if "id" in placed:
+                    return str(placed["id"])
         except Exception:
             pass
         return None
@@ -679,7 +787,11 @@ class TastyTradeClient:
             symbol = self._normalize_symbol(symbol)
 
             # Determine instrument type enum
-            inst_type = InstrumentType.FUTURE if symbol.startswith('/') else InstrumentType.EQUITY
+            inst_type = (
+                InstrumentType.FUTURE
+                if symbol.startswith("/")
+                else InstrumentType.EQUITY
+            )
 
             # For futures, set tick_size to 1 (points), for equities 0.25
             if inst_type == InstrumentType.FUTURE:
@@ -705,32 +817,50 @@ class TastyTradeClient:
 
             # Determine entry action
             if inst_type == InstrumentType.FUTURE:
-                entry_action = OrderAction.BUY_TO_OPEN if action.upper() == 'BUY' else OrderAction.SELL_TO_OPEN
+                entry_action = (
+                    OrderAction.BUY_TO_OPEN
+                    if action.upper() == "BUY"
+                    else OrderAction.SELL_TO_OPEN
+                )
                 # TP is opposite close
-                tp_action = OrderAction.SELL_TO_CLOSE if action.upper() == 'BUY' else OrderAction.BUY_TO_CLOSE
+                tp_action = (
+                    OrderAction.SELL_TO_CLOSE
+                    if action.upper() == "BUY"
+                    else OrderAction.BUY_TO_CLOSE
+                )
             else:
-                entry_action = OrderAction.BUY if action.upper() == 'BUY' else OrderAction.SELL
+                entry_action = (
+                    OrderAction.BUY if action.upper() == "BUY" else OrderAction.SELL
+                )
                 # For equities, reuse entry action but invert for close (simplified; equities don't need _TO_OPEN/CLOSE)
-                tp_action = OrderAction.SELL if action.upper() == 'BUY' else OrderAction.BUY
+                tp_action = (
+                    OrderAction.SELL if action.upper() == "BUY" else OrderAction.BUY
+                )
 
             # Calculate TP price directionally
-            if action.upper() == 'BUY':  # Long: TP above
+            if action.upper() == "BUY":  # Long: TP above
                 tp_price = current_price + (tp_ticks * tick_size)
-                round_dir = 'up'  # Ceiling to ensure profit
+                round_dir = "up"  # Ceiling to ensure profit
             else:  # Short: TP below
                 tp_price = current_price - (tp_ticks * tick_size)
-                round_dir = 'down'  # Floor to ensure profit
+                round_dir = "down"  # Floor to ensure profit
 
             # Determine tick_size from instrument metadata if possible (falls back to provided)
             try:
-                if inst_type == InstrumentType.FUTURE and isinstance(symbol, str) and symbol.startswith('/'):
+                if (
+                    inst_type == InstrumentType.FUTURE
+                    and isinstance(symbol, str)
+                    and symbol.startswith("/")
+                ):
                     # Try to query the SDK for contract-specific tick size
                     # strip leading slash for symbols passed to the SDK
-                    sym_lookup = symbol.lstrip('/')
+                    sym_lookup = symbol.lstrip("/")
                     futs = Future.get(session, symbols=[sym_lookup])
                     if futs:
                         f = futs[0]
-                        tick_meta = getattr(f, 'tick_size', None) or getattr(f, 'min_tick', None)
+                        tick_meta = getattr(f, "tick_size", None) or getattr(
+                            f, "min_tick", None
+                        )
                         if isinstance(tick_meta, (int, float)) and tick_meta > 0:
                             tick_size = float(tick_meta)
             except Exception:
@@ -739,13 +869,14 @@ class TastyTradeClient:
 
             # Round TP price to the instrument's tick size and ensure it is on the correct side
             import math
+
             def _round_to_tick(price: float, tick: float, direction: str) -> float:
                 if tick <= 0 or math.isnan(price):
                     return price
                 n = price / tick
-                if direction == 'down':
+                if direction == "down":
                     n2 = math.floor(n - 1e-9)
-                elif direction == 'up':
+                elif direction == "up":
                     n2 = math.ceil(n + 1e-9)
                 else:
                     n2 = round(n)
@@ -753,25 +884,37 @@ class TastyTradeClient:
 
             tp_price = _round_to_tick(tp_price, tick_size, round_dir)
             # Safety nudge: Ensure TP is strictly profitable
-            if action.upper() == 'BUY':
+            if action.upper() == "BUY":
                 if tp_price <= current_price:
-                    tp_price = _round_to_tick(current_price + tick_size, tick_size, 'up')
+                    tp_price = _round_to_tick(
+                        current_price + tick_size, tick_size, "up"
+                    )
             else:
                 if tp_price >= current_price:
-                    tp_price = _round_to_tick(current_price - tick_size, tick_size, 'down')
+                    tp_price = _round_to_tick(
+                        current_price - tick_size, tick_size, "down"
+                    )
 
             # Clean symbol for leg (strip exchange if present, ensure no leading / for equities)
-            leg_symbol = symbol if inst_type == InstrumentType.FUTURE else (symbol.lstrip('/') if isinstance(symbol, str) else symbol)
-            if isinstance(leg_symbol, str) and ':' in leg_symbol:
-                leg_symbol = leg_symbol.split(':', 1)[0]
+            leg_symbol = (
+                symbol
+                if inst_type == InstrumentType.FUTURE
+                else (symbol.lstrip("/") if isinstance(symbol, str) else symbol)
+            )
+            if isinstance(leg_symbol, str) and ":" in leg_symbol:
+                leg_symbol = leg_symbol.split(":", 1)[0]
 
             # Normalize year for futures (keep as-is, but ensure single-digit if needed)
             import re
-            m = re.match(r'^(?P<prod>NQ|MNQ|ES|MES|RTY|YM)(?P<month>[A-Z])(?P<year>\d{1,2})$', leg_symbol)
+
+            m = re.match(
+                r"^(?P<prod>NQ|MNQ|ES|MES|RTY|YM)(?P<month>[A-Z])(?P<year>\d{1,2})$",
+                leg_symbol,
+            )
             if m:
-                prod = m.group('prod')
-                month = m.group('month')
-                year = m.group('year')
+                prod = m.group("prod")
+                month = m.group("month")
+                year = m.group("year")
                 leg_symbol = f"{prod}{month}{year}"
 
             eff_dry = self._dry_run if dry_run is None else bool(dry_run)
@@ -779,7 +922,12 @@ class TastyTradeClient:
             tp_order_id = None
 
             # Build and send market entry first (single leg)
-            entry_leg = Leg(instrument_type=inst_type, symbol=leg_symbol, action=entry_action, quantity=quantity)
+            entry_leg = Leg(
+                instrument_type=inst_type,
+                symbol=leg_symbol,
+                action=entry_action,
+                quantity=quantity,
+            )
             entry_order = NewOrder(
                 time_in_force=OrderTimeInForce.DAY,
                 order_type=OrderType.MARKET,
@@ -788,17 +936,29 @@ class TastyTradeClient:
 
             LOGGER.info("Sending market entry (dry-run=%s): %s", eff_dry, entry_order)
             try:
-                order_json = entry_order.model_dump_json(exclude_none=True, by_alias=True)
+                order_json = entry_order.model_dump_json(
+                    exclude_none=True, by_alias=True
+                )
                 LOGGER.debug("Market entry JSON: %s", order_json)
-                placed_entry = account.place_order(session, entry_order, dry_run=eff_dry)
+                placed_entry = account.place_order(
+                    session, entry_order, dry_run=eff_dry
+                )
                 market_order_id = self._extract_order_id(placed_entry)
                 if market_order_id is None:
-                    LOGGER.warning('Market entry returned no ID (dry_run=%s): %s', eff_dry, repr(placed_entry))
+                    LOGGER.warning(
+                        "Market entry returned no ID (dry_run=%s): %s",
+                        eff_dry,
+                        repr(placed_entry),
+                    )
                     return "Market entry submitted but no ID returned (check logs)."
             except Exception as exc:
                 msg = str(exc)
                 LOGGER.warning("Market entry failed: %s", msg)
-                if 'invalid_grant' in msg or 'Grant revoked' in msg or 'invalid_token' in msg:
+                if (
+                    "invalid_grant" in msg
+                    or "Grant revoked" in msg
+                    or "invalid_token" in msg
+                ):
                     self._mark_needs_reauth()
                     raise TastytradeAuthError(
                         "TastyTrade authentication failed (refresh token invalid or revoked). "
@@ -809,9 +969,19 @@ class TastyTradeClient:
 
             # Build TP as a separate limit order (legging in to satisfy API rules)
             # Sign the price so the API infers price_effect correctly
-            price_sign = -1 if tp_action in {OrderAction.BUY, OrderAction.BUY_TO_CLOSE, OrderAction.BUY_TO_OPEN} else 1
+            price_sign = (
+                -1
+                if tp_action
+                in {OrderAction.BUY, OrderAction.BUY_TO_CLOSE, OrderAction.BUY_TO_OPEN}
+                else 1
+            )
             tp_price_signed = Decimal(str(tp_price)) * Decimal(price_sign)
-            tp_leg = Leg(instrument_type=inst_type, symbol=leg_symbol, action=tp_action, quantity=quantity)
+            tp_leg = Leg(
+                instrument_type=inst_type,
+                symbol=leg_symbol,
+                action=tp_action,
+                quantity=quantity,
+            )
             tp_order = NewOrder(
                 time_in_force=OrderTimeInForce.GTC,
                 order_type=OrderType.LIMIT,
@@ -819,7 +989,9 @@ class TastyTradeClient:
                 legs=[tp_leg],
             )
 
-            LOGGER.info("Sending TP limit (dry-run=%s): %s @ %s", eff_dry, tp_order, tp_price)
+            LOGGER.info(
+                "Sending TP limit (dry-run=%s): %s @ %s", eff_dry, tp_order, tp_price
+            )
             try:
                 # Attach bracket/OTO reference for TP leg; use raw POST to include bracket-order-id
                 tp_payload = tp_order.model_dump(exclude_none=True, by_alias=True)
@@ -831,11 +1003,21 @@ class TastyTradeClient:
                 placed_tp = session._post(tp_url, data=tp_json)
                 tp_order_id = self._extract_order_id(placed_tp)
                 if tp_order_id is None:
-                    LOGGER.warning('TP order returned no ID (dry_run=%s): %s', eff_dry, repr(placed_tp))
+                    LOGGER.warning(
+                        "TP order returned no ID (dry_run=%s): %s",
+                        eff_dry,
+                        repr(placed_tp),
+                    )
             except Exception as exc:
                 msg = str(exc)
-                LOGGER.warning("TP order failed (entry_id=%s): %s", market_order_id, msg)
-                if 'invalid_grant' in msg or 'Grant revoked' in msg or 'invalid_token' in msg:
+                LOGGER.warning(
+                    "TP order failed (entry_id=%s): %s", market_order_id, msg
+                )
+                if (
+                    "invalid_grant" in msg
+                    or "Grant revoked" in msg
+                    or "invalid_token" in msg
+                ):
                     self._mark_needs_reauth()
                     raise TastytradeAuthError(
                         "TastyTrade authentication failed. Use `set_refresh_token(...)` or restart."
@@ -853,9 +1035,9 @@ class TastyTradeClient:
 
     def _normalize_symbol(self, symbol: str) -> str:
         symbol = symbol.upper().strip()
-        futures = {'NQ', 'MNQ', 'ES', 'MES', 'RTY', 'YM'}
+        futures = {"NQ", "MNQ", "ES", "MES", "RTY", "YM"}
         # if already a futures contract like /NQZ5 or NQZ5, ensure leading '/'
-        if symbol.startswith('/'):
+        if symbol.startswith("/"):
             return symbol
         # check product codes (e.g., 'NQ' -> resolve front-month)
         if symbol in futures:
@@ -865,7 +1047,7 @@ class TastyTradeClient:
             # fallback: return a reasonable default based on current date
             now = datetime.now(timezone.utc)
             month = (now.month % 12) + 1
-            month_codes = 'FGHJKMNQUVXZ'
+            month_codes = "FGHJKMNQUVXZ"
             month_code = month_codes[month - 1]
             year = now.year if month != 1 else now.year + 1
             year_digit = str(year)[-2:]
@@ -873,11 +1055,15 @@ class TastyTradeClient:
         # check for explicit contract codes like NQZ25 or NQH26 (with optional exchange suffix)
         # Accept patterns like 'NQZ25', 'NQZ25:XCME', '/NQZ25', '/NQZ25:XCME'
         import re
-        m = re.match(r'^/?(?P<prod>NQ|MNQ|ES|MES|RTY|YM)(?P<month>[A-Z])(?P<year>\d{1,2})(?::(?P<exch>\w+))?$', symbol)
+
+        m = re.match(
+            r"^/?(?P<prod>NQ|MNQ|ES|MES|RTY|YM)(?P<month>[A-Z])(?P<year>\d{1,2})(?::(?P<exch>\w+))?$",
+            symbol,
+        )
         if m:
-            prod = m.group('prod')
-            month = m.group('month')
-            year = m.group('year')
+            prod = m.group("prod")
+            month = m.group("month")
+            year = m.group("year")
             # Preserve short year (e.g., '25') to construct contract symbol
             return f"/{prod}{month}{year}"
         return symbol
@@ -886,46 +1072,51 @@ class TastyTradeClient:
         # Get quote
         # Consider both forms: leading '/' or numeric-month contract like 'NQZ25'
         is_future = False
-        if isinstance(symbol, str) and symbol.startswith('/'):
+        if isinstance(symbol, str) and symbol.startswith("/"):
             is_future = True
         else:
             # detect explicit future contract like NQZ25
             import re
-            if isinstance(symbol, str) and re.match(r'^(NQ|MNQ|ES|MES|RTY|YM)[A-Z]\d{1,2}(:\w+)?$', symbol.upper()):
+
+            if isinstance(symbol, str) and re.match(
+                r"^(NQ|MNQ|ES|MES|RTY|YM)[A-Z]\d{1,2}(:\w+)?$", symbol.upper()
+            ):
                 is_future = True
 
         if is_future:
             # Future: API sometimes expects symbol without exchange suffix or leading '/'.
             # Try several common variants to avoid 404 responses.
             variants = []
-            raw = symbol.lstrip('/')
-            variants.append('/' + raw)
+            raw = symbol.lstrip("/")
+            variants.append("/" + raw)
             variants.append(raw)
             # If symbol contains exchange suffix (like :XCME), strip it
-            if ':' in raw:
-                base = raw.split(':', 1)[0]
-                variants.append('/' + base)
+            if ":" in raw:
+                base = raw.split(":", 1)[0]
+                variants.append("/" + base)
                 variants.append(base)
             quote_data = None
             last_exc = None
             for v in variants:
                 try:
-                    resp = session._get(f'/quotes/futures?symbol={v}')
-                    quote_data = resp['data']['items']
-                    LOGGER.debug('Quote fetch succeeded for variant: %s', v)
+                    resp = session._get(f"/quotes/futures?symbol={v}")
+                    quote_data = resp["data"]["items"]
+                    LOGGER.debug("Quote fetch succeeded for variant: %s", v)
                     break
                 except Exception as exc:
                     last_exc = exc
-                    LOGGER.debug('Quote fetch failed for variant %s: %s', v, exc)
+                    LOGGER.debug("Quote fetch failed for variant %s: %s", v, exc)
             if quote_data is None and last_exc is not None:
                 # Re-raise last exception to bubble up
                 raise last_exc
         else:
             # Equity
-            quote_data = session._get(f'/quotes/equities?symbol={symbol}')['data']['items']
+            quote_data = session._get(f"/quotes/equities?symbol={symbol}")["data"][
+                "items"
+            ]
         if quote_data:
-            bid = quote_data[0].get('bid-price')
-            ask = quote_data[0].get('ask-price')
+            bid = quote_data[0].get("bid-price")
+            ask = quote_data[0].get("ask-price")
             if bid and ask:
                 return (bid + ask) / 2
         # Fallback

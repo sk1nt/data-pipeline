@@ -443,7 +443,9 @@ class GEXBotPoller:
                     # Publish full snapshot for downstream consumers (Discord feed, websocket, etc.)
                     self.redis.client.publish(SNAPSHOT_PUBSUB_CHANNEL, payload)
                 except Exception:
-                    LOGGER.debug("Failed to publish snapshot for %s", symbol, exc_info=True)
+                    LOGGER.debug(
+                        "Failed to publish snapshot for %s", symbol, exc_info=True
+                    )
             except Exception:
                 LOGGER.warning(
                     "Failed to cache GEX snapshot for %s", symbol, exc_info=True

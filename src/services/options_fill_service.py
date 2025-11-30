@@ -37,7 +37,9 @@ class OptionsFillService:
             if data.bid and data.ask:
                 return (data.bid + data.ask) / 2
         except TastytradeAuthError as e:
-            print(f"TastyTrade auth error while fetching market data for {option_symbol}: {e}")
+            print(
+                f"TastyTrade auth error while fetching market data for {option_symbol}: {e}"
+            )
             raise
         except Exception as e:
             print(f"Error fetching market data for {option_symbol}: {e}")
@@ -204,7 +206,9 @@ class OptionsFillService:
         exp = expiry.strip()
         import re
 
-        m = re.match(r"^(?P<month>\d{1,2})/(?P<day>\d{1,2})(?:/(?P<year>\d{2,4}))?$", exp)
+        m = re.match(
+            r"^(?P<month>\d{1,2})/(?P<day>\d{1,2})(?:/(?P<year>\d{2,4}))?$", exp
+        )
         if not m:
             # Try ISO date
             try:
