@@ -72,4 +72,3 @@ async def test_process_alert_logs_to_redis_and_returns_struct(monkeypatch):
     payload_obj = json.loads(payload)
     assert payload_obj.get("order_id") == "abc123"
     assert payload_obj.get("computed_quantity") == result.get("quantity")
-

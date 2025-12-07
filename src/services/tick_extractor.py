@@ -8,10 +8,10 @@ from datetime import datetime, timedelta
 import sys
 import pytz
 
-from ..lib.scid_parser import parse_scid_file_backwards_generator, is_tick_record
-from ..lib.logging_config import setup_logging, logger
+from lib.scid_parser import parse_scid_file_backwards_generator, is_tick_record
+from lib.logging_config import setup_logging, logger
 from ..models.mnq_tick_record import MnqTickRecord
-from ..lib.database import db
+from lib.database import db
 from ..services.depth_extractor import DepthExtractor
 
 

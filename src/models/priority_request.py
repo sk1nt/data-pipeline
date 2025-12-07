@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, validator
 from uuid import uuid4, UUID
 
 from .enums import GEXDataType, PriorityLevel
-from ..lib.logging import get_logger
+from lib.logging import get_logger
 
 logger = get_logger(__name__)
 

@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -89,7 +90,6 @@ async def test_snapshot_timestamps_increment():
 
 @pytest.mark.asyncio
 async def test_static_snapshot_timestamps_bumped():
-    # Configure TS client and poller
     ts = FakeTSClient()
     settings = GEXBotPollerSettings(api_key="apikey", symbols=["SPX", "NQ_NDX"])
     fake_redis = FakeRedisClient()
@@ -122,22 +122,85 @@ async def test_static_snapshot_timestamps_bumped():
     poller._is_rth_now = lambda: True
     await poller._run()
 
-    # Ensure multiple net_gex samples for same symbol have increasing timestamps
+    # Ensure duplicate timestamps are bumped so they still publish in order
     pairs = [(rec[0], rec[1]) for rec in ts.samples if rec[0].startswith("ts:gex:")]
     net_gex_pairs = [p for p in pairs if ":net_gex:" in p[0]]
     assert len(net_gex_pairs) >= 2
-    # Group by symbol and ensure timestamps increase per symbol
     by_symbol = {}
     for key, ts_ms in net_gex_pairs:
-        # key format: ts:gex:net_gex:SYMBOL
         parts = key.split(":")
-        if len(parts) >= 4:
-            sym = parts[3]
-        else:
-            sym = "UNKNOWN"
+        sym = parts[3] if len(parts) >= 4 else "UNKNOWN"
         by_symbol.setdefault(sym, []).append(ts_ms)
-    # Check each symbol's timestamps are strictly increasing
     for sym, tss in by_symbol.items():
         assert all(tss[i] < tss[i + 1] for i in range(len(tss) - 1)), (
             f"timestamps not increasing for {sym}"
         )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_older_than_cutoff_is_skipped():
+    ts = FakeTSClient()
+    settings = GEXBotPollerSettings(api_key="apikey", symbols=["SPX"])
+    fake_redis = FakeRedisClient()
+    poller = GEXBotPoller(settings, redis_client=fake_redis, ts_client=ts)
+
+    stale_ts = datetime.utcnow().replace(tzinfo=timezone.utc) - timedelta(minutes=10)
+    stale_snapshot = {
+        "symbol": "SPX",
+        "timestamp": stale_ts.isoformat(),
+        "spot": 100.0,
+        "zero_gamma": 0.1,
+        "net_gex": 50,
+        "major_pos_vol": 10,
+        "major_neg_vol": -5,
+        "major_pos_oi": 1,
+        "major_neg_oi": -1,
+        "sum_gex_oi": 100,
+        "max_priors": [],
+        "strikes": [],
+    }
+
+    await poller._record_timeseries(stale_snapshot)
+
+    assert ts.samples == []
+    assert poller.snapshot_count == 0
+    assert fake_redis.get("gex:snapshot:SPX") is None
+
+
+@pytest.mark.asyncio
+async def test_stale_snapshot_is_skipped():
+    ts = FakeTSClient()
+    settings = GEXBotPollerSettings(api_key="apikey", symbols=["SPX"])
+    fake_redis = FakeRedisClient()
+    poller = GEXBotPoller(settings, redis_client=fake_redis, ts_client=ts)
+
+    latest_ts = datetime(2024, 1, 2, 12, 0, tzinfo=timezone.utc)
+    stale_ts = latest_ts - timedelta(minutes=5)
+
+    fresh_snapshot = {
+        "symbol": "SPX",
+        "timestamp": latest_ts.isoformat(),
+        "spot": 100.0,
+        "zero_gamma": 0.1,
+        "net_gex": 50,
+        "major_pos_vol": 10,
+        "major_neg_vol": -5,
+        "major_pos_oi": 1,
+        "major_neg_oi": -1,
+        "sum_gex_oi": 100,
+        "max_priors": [],
+        "strikes": [],
+    }
+    stale_snapshot = dict(fresh_snapshot)
+    stale_snapshot["timestamp"] = stale_ts.isoformat()
+
+    await poller._record_timeseries(fresh_snapshot)
+    await poller._record_timeseries(stale_snapshot)
+
+    # Only the fresh snapshot should be stored and published
+    net_gex_samples = [rec for rec in ts.samples if ":net_gex:" in rec[0]]
+    assert len(net_gex_samples) == 1
+    assert poller.snapshot_count == 1
+
+    cached = json.loads(fake_redis.get("gex:snapshot:SPX"))
+    assert cached["timestamp"] == latest_ts.isoformat()

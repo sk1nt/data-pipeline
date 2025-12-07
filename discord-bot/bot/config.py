@@ -77,7 +77,9 @@ def _parse_channel_map(raw: Optional[str]) -> Dict[str, Tuple[int, ...]]:
     mapping: Dict[str, Tuple[int, ...]] = {}
     if not raw:
         return mapping
-    for token in raw.split(","):
+    # Accept either ',' or '|' between pairs so envs like "NQ:1|ES:2" still parse
+    normalized = raw.replace("|", ",")
+    for token in normalized.split(","):
         if ":" not in token:
             continue
         sym, ids_raw = token.split(":", 1)

@@ -6,8 +6,8 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 from uuid import UUID
 
-from ..lib.logging import get_logger
-from ..lib.utils import generate_uuid
+from lib.logging import get_logger
+from lib.utils import generate_uuid
 from ..models.base import BaseModel
 from ..models.enums import JobStatus, DataType
 

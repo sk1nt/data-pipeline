@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, validator
 
-from ..lib.logging import get_logger
+from lib.logging import get_logger
 
 logger = get_logger(__name__)
 

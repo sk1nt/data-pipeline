@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from ..services.tastytrade_client import tastytrade_client
-from ..lib.redis_client import redis_client
-from ..lib.duckdb_client import duckdb_client
+from lib.redis_client import redis_client
+from lib.duckdb_client import duckdb_client
 
 router = APIRouter()
 

@@ -255,7 +255,10 @@ class TastyTradeClient:
         else:
             # refresh if token expired
             try:
-                if self._session_expiration and datetime.now(timezone.utc) >= self._session_expiration:
+                if (
+                    self._session_expiration
+                    and datetime.now(timezone.utc) >= self._session_expiration
+                ):
                     self._session.refresh()
                     self._session_expiration = self._derive_expiration(self._session)
             except Exception as exc:  # pragma: no cover - handle invalid grant
@@ -440,7 +443,9 @@ class TastyTradeClient:
                             refresh_token=self._refresh_token,
                             is_test=self._use_sandbox,
                         )
-                        self._session_expiration = self._derive_expiration(self._session)
+                        self._session_expiration = self._derive_expiration(
+                            self._session
+                        )
                         self._needs_reauth = False
                         # keep symbol cache fresh
                         self._symbol_cache.clear()

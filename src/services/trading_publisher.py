@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from ..lib.logging import get_logger
-from ..lib.redis_client import RedisClient
+from lib.logging import get_logger
+from lib.redis_client import RedisClient
 from ..models.market_data import TickEvent, Level2Event
 
 LOG = get_logger(__name__)

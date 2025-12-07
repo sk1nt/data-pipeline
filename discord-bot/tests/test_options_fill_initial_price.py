@@ -23,24 +23,29 @@ async def test_initial_price_is_used(monkeypatch):
 
     # fake option chain with a matching option
     fake_option = SimpleNamespace(
-        symbol="UBER_121220P78", strike_price=Decimal("78"), option_type=SimpleNamespace(value="p"),
+        symbol="UBER_121220P78",
+        strike_price=Decimal("78"),
+        option_type=SimpleNamespace(value="p"),
     )
 
     # get_option_chain replacement: return a dict keyed by a date-like key
     chain = {"2025-12-05": [fake_option]}
-    monkeypatch.setattr("services.options_fill_service.get_option_chain", lambda session, symbol: chain)
+    monkeypatch.setattr(
+        "services.options_fill_service.get_option_chain", lambda session, symbol: chain
+    )
 
     # Ensure we return a mid_price if needed (but we'll provide initial_price so it's not used)
     async def fake_get_mid_price(symbol):
         return Decimal("0.5")
+
     monkeypatch.setattr(svc, "get_mid_price", fake_get_mid_price)
 
     captured = {}
 
     async def fake_place_limit_order(option, quantity, action, price):
         # Record only the first attempt's price
-        if 'price' not in captured:
-            captured['price'] = price
+        if "price" not in captured:
+            captured["price"] = price
         return "ok"
 
     async def fake_check_order_filled(order_id):
@@ -65,4 +70,4 @@ async def test_initial_price_is_used(monkeypatch):
     )
 
     assert result is not None
-    assert captured.get('price') == Decimal("0.75")
+    assert captured.get("price") == Decimal("0.75")

@@ -10,7 +10,7 @@ import duckdb
 import redis
 
 from ..config import settings
-from ..lib.redis_client import RedisClient
+from lib.redis_client import RedisClient
 from .redis_timeseries import RedisTimeSeriesClient
 
 

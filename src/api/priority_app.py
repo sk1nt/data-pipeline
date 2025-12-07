@@ -13,9 +13,9 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from ..lib.logging import setup_logging, get_logger
-from ..lib.priority_db import get_priority_db_manager
-from ..lib.redis_client import get_redis_client
+from lib.logging import setup_logging, get_logger
+from lib.priority_db import get_priority_db_manager
+from lib.redis_client import get_redis_client
 
 # Setup logging
 setup_logging()

@@ -16,7 +16,7 @@ import pandas as pd
 import redis
 
 from ..config import settings as config_settings
-from ..lib.redis_client import RedisClient
+from lib.redis_client import RedisClient
 from .redis_timeseries import RedisTimeSeriesClient
 
 LOGGER = logging.getLogger(__name__)

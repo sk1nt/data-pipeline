@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any
 from pydantic import BaseModel, Field, validator
 from uuid import uuid4, UUID
 
-from ..lib.logging import get_logger
+from lib.logging import get_logger
 
 logger = get_logger(__name__)
 

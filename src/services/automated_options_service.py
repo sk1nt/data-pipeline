@@ -7,8 +7,8 @@ from typing import Optional
 from services.alert_parser import AlertParser
 from services.options_fill_service import OptionsFillService
 from services.tastytrade_client import tastytrade_client, TastytradeAuthError
-from ..lib.logging import get_logger
-from ..lib.redis_client import get_redis_client
+from lib.logging import get_logger
+from lib.redis_client import get_redis_client
 
 try:
     from tastytrade.account import Account  # type: ignore
@@ -96,7 +96,11 @@ class AutomatedOptionsService:
             # Non-fatal; we still return success, but log for the operator
             print("Failed to write audit log to Redis for automated alert")
 
-        return {"order_id": order_id, "quantity": int(quantity), "entry_price": entry_price}
+        return {
+            "order_id": order_id,
+            "quantity": int(quantity),
+            "entry_price": entry_price,
+        }
 
     def _compute_quantity(self, alert_data: dict, channel_id: str) -> int:
         """Compute contract quantity using allocation, price, and account balances."""

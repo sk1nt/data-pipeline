@@ -5,8 +5,8 @@ Rule engine for automatic priority assignment in the GEX priority system.
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 
-from ..lib.logging import get_logger
-from ..lib.exceptions import GEXPriorityError
+from lib.logging import get_logger
+from lib.exceptions import GEXPriorityError
 from ..models.priority_rule import PriorityRule
 from ..models.priority_request import PriorityRequest
 from ..models.data_source import DataSource

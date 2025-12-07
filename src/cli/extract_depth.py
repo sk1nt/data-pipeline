@@ -5,7 +5,7 @@ CLI command for extracting MNQ depth data.
 import click
 from datetime import datetime, timedelta
 
-from ..lib.logging_config import setup_logging
+from lib.logging_config import setup_logging
 from ..services.depth_extractor import DepthExtractor
 
 

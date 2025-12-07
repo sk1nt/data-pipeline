@@ -6,10 +6,10 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 from uuid import UUID
 
-from ..lib.logging import get_logger
-from ..lib.priority_db import PriorityDatabaseManager
-from ..lib.redis_client import RedisClient
-from ..lib.exceptions import DatabaseError
+from lib.logging import get_logger
+from lib.priority_db import PriorityDatabaseManager
+from lib.redis_client import RedisClient
+from lib.exceptions import DatabaseError
 from ..models.priority_request import PriorityRequest
 from ..models.data_source import DataSource
 from ..models.enums import JobStatus

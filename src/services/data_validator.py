@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import duckdb
 import polars as pl
 
-from ..lib.logging_config import logger
+from lib.logging_config import logger
 
 
 class DataValidator:

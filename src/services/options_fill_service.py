@@ -180,8 +180,10 @@ class OptionsFillService:
         for attempt in range(self.max_retries + 1):
             print(f"Attempt {attempt + 1}: Placing order at {current_price}")
             try:
-                logger = __import__('logging').getLogger(__name__)
-                logger.info("Attempt %s: placing order at %s", attempt + 1, current_price)
+                logger = __import__("logging").getLogger(__name__)
+                logger.info(
+                    "Attempt %s: placing order at %s", attempt + 1, current_price
+                )
             except Exception:
                 pass
             order_id = await self.place_limit_order(

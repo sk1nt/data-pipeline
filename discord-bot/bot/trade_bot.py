@@ -57,9 +57,14 @@ class TradeBot(commands.Bot):
             "MES": "ES_SPX",
         }
         self.display_zone = ZoneInfo(os.getenv("DISPLAY_TIMEZONE", "America/New_York"))
-        self.redis_snapshot_prefix = os.getenv("GEX_SNAPSHOT_PREFIX", "gex:snapshot:")
+        # Accept legacy feed-specific env overrides so Discord-only deployments stay in sync
+        self.redis_snapshot_prefix = os.getenv(
+            "GEX_SNAPSHOT_PREFIX",
+            os.getenv("GEX_FEED_SNAPSHOT_PREFIX", "gex:snapshot:"),
+        )
         self.gex_snapshot_channel = os.getenv(
-            "GEX_SNAPSHOT_CHANNEL", "gex:snapshot:stream"
+            "GEX_SNAPSHOT_CHANNEL",
+            os.getenv("GEX_FEED_SNAPSHOT_CHANNEL", "gex:snapshot:stream"),
         )
         self.allowed_channel_ids = tuple(
             getattr(config, "allowed_channel_ids", ()) or ()
@@ -73,11 +78,20 @@ class TradeBot(commands.Bot):
         self._gex_feed_stop = asyncio.Event()
         self.gex_feed_enabled = bool(getattr(config, "gex_feed_enabled", False))
         self.gex_feed_channel_ids = getattr(config, "gex_feed_channel_ids", None)
-        self.gex_feed_symbol = (
-            getattr(config, "gex_feed_symbol", "NQ_NDX") or "NQ_NDX"
-        ).upper()
+        raw_feed_symbol = getattr(config, "gex_feed_symbol", "NQ_NDX") or "NQ_NDX"
+        # Gracefully handle comma-separated symbols passed via GEX_FEED_SYMBOL
+        raw_feed_symbol_list = None
+        if isinstance(raw_feed_symbol, str) and "," in raw_feed_symbol:
+            raw_feed_symbol_list = [
+                sym.strip().upper()
+                for sym in raw_feed_symbol.split(",")
+                if sym.strip()
+            ]
+        self.gex_feed_symbol = (raw_feed_symbol_list or [raw_feed_symbol])[0].upper()
         self.gex_feed_symbols = tuple(
-            (getattr(config, "gex_feed_symbols", None) or ()) or (self.gex_feed_symbol,)
+            (getattr(config, "gex_feed_symbols", None) or ())
+            or raw_feed_symbol_list
+            or (self.gex_feed_symbol,)
         )
         self.gex_feed_channel_map = {
             (k or "").upper(): tuple(v)
@@ -114,6 +128,10 @@ class TradeBot(commands.Bot):
         self.gex_feed_backoff_max_seconds = max(
             self.gex_feed_backoff_base_seconds,
             float(getattr(config, "gex_feed_backoff_max_seconds", 1.0) or 1.0),
+        )
+        # Minimum delay between Discord edits; can be overridden via config/env to 1s
+        self.gex_feed_edit_seconds = max(
+            0.0, float(getattr(config, "gex_feed_edit_seconds", 0.0) or 0.0)
         )
         self._gex_feed_backoff_seconds = 0.0
         self._gex_feed_block_until: Optional[datetime] = None
@@ -924,7 +942,9 @@ class TradeBot(commands.Bot):
             order_id = result.get("order_id")
             qty = result.get("quantity")
             price = result.get("entry_price")
-            msg = f"Automated order placed: id={order_id}, qty={qty}, entry_price={price}"
+            msg = (
+                f"Automated order placed: id={order_id}, qty={qty}, entry_price={price}"
+            )
         else:
             msg = f"Automated order placed: {result}"
         await message.channel.send(msg)
@@ -996,7 +1016,8 @@ class TradeBot(commands.Bot):
         return False
 
     async def _sleep_between_feed_updates(self) -> None:
-        delay = self.gex_feed_update_seconds
+        # Use a separate edit delay so we can keep poll cadence fast without flooding Discord
+        delay = self.gex_feed_edit_seconds
         if self._is_feed_blocked():
             remaining = (
                 self._gex_feed_block_until - datetime.now(timezone.utc)
@@ -1135,28 +1156,18 @@ class TradeBot(commands.Bot):
     ) -> None:
         tracker = RollingWindowTracker(window_seconds=self.gex_feed_window_seconds)
         messages: Dict[int, discord.Message] = {}
-        next_refresh = self._next_refresh_boundary(datetime.now(self.display_zone))
-        # Buffer aggregation state so we only send one message per aggregation window
-        pending_content: Optional[str] = None
-        pending_delta_map: Optional[Dict[str, "MetricSnapshot"]] = None
-        pending_first_ts: Optional[datetime] = None
         pubsub = await self._create_gex_pubsub()
+        if not pubsub:
+            print("GEX feed: pubsub unavailable, skipping session")
+            return
         while not self._gex_feed_stop.is_set():
             now = datetime.now(self.display_zone)
             if now >= session_end:
                 break
-            if self._is_feed_blocked():
-                await self._sleep_between_feed_updates()
-                continue
-            data = None
-            if pubsub:
-                data = await self._next_pubsub_snapshot(pubsub, symbol)
-            # Prefer polling canonical Redis snapshot keys for the feed to avoid stale cache race conditions
+            data = await self._next_pubsub_snapshot(pubsub, symbol)
             if not data:
-                data = await self.get_gex_snapshot(symbol)
-            if not data:
-                await self._gex_feed_metrics.record_error(now, reason="no_data")
-                await self._sleep_between_feed_updates()
+                # No message yet; small sleep to avoid tight loop
+                await asyncio.sleep(0.01)
                 continue
             delta_map = self._build_feed_delta_map(tracker, data, now)
             content = self.format_gex_short(
@@ -1165,70 +1176,23 @@ class TradeBot(commands.Bot):
                 time_format="%I:%M:%S %p %Z",
                 delta_block=delta_map,
             )
-            # Buffer content and delta_map; coalesce updates into one send/edit per aggregation window
-            # During RTH this effectively limits to 1 aggregated message/sec by default
-            pending_content = content
-            pending_delta_map = delta_map
-            if pending_first_ts is None:
-                pending_first_ts = now
-
-            # Determine wait interval so we don't publish faster than configured cadence
-            effective_wait = max(0.05, self.gex_feed_update_seconds)
-            age = (now - pending_first_ts).total_seconds() if pending_first_ts else 0
-            if age >= effective_wait:
-                if not messages:
-                    messages = await self._post_feed_messages(channels, pending_content)
-                    await self._gex_feed_metrics.record_update(
-                        now, pending_delta_map, refresh=True
-                    )
-                else:
-                    await self._edit_feed_messages(messages, pending_content)
-                    await self._gex_feed_metrics.record_update(
-                        now, pending_delta_map, refresh=False
-                    )
-                # Clear buffer
-                pending_content = None
-                pending_delta_map = None
-                pending_first_ts = None
-            if now >= next_refresh and now < session_end:
-                # Force immediate refresh; publish any pending content first
-                if pending_content:
-                    if not messages:
-                        messages = await self._post_feed_messages(
-                            channels, pending_content
-                        )
-                        await self._gex_feed_metrics.record_update(
-                            now, pending_delta_map, refresh=True
-                        )
-                    else:
-                        await self._edit_feed_messages(messages, pending_content)
-                        await self._gex_feed_metrics.record_update(
-                            now, pending_delta_map, refresh=False
-                        )
-                    pending_content = None
-                    pending_delta_map = None
-                    pending_first_ts = None
-                await self._delete_feed_messages(messages)
+            if not messages:
                 messages = await self._post_feed_messages(channels, content)
-                await self._gex_feed_metrics.record_update(now, delta_map, refresh=True)
-                next_refresh = self._next_refresh_boundary(now)
-            await self._sleep_between_feed_updates()
+                await self._gex_feed_metrics.record_update(
+                    now, delta_map, refresh=True
+                )
+            else:
+                await self._edit_feed_messages(messages, content)
+                await self._gex_feed_metrics.record_update(
+                    now, delta_map, refresh=False
+                )
+            # Short sleep to avoid hammering Redis/pubsub when messages flood
+            await asyncio.sleep(0.01)
         if pubsub:
             try:
                 await asyncio.to_thread(pubsub.close)
             except Exception:
                 pass
-
-    def _next_refresh_boundary(self, current: datetime) -> datetime:
-        minute_block = (
-            current.minute // self.gex_feed_refresh_minutes
-        ) * self.gex_feed_refresh_minutes
-        boundary = current.replace(
-            minute=minute_block, second=0, microsecond=0
-        ) + timedelta(minutes=self.gex_feed_refresh_minutes)
-        if boundary <= current:
-            boundary += timedelta(minutes=self.gex_feed_refresh_minutes)
-        return boundary
 
     async def _create_gex_pubsub(self):
         try:
@@ -1244,50 +1208,53 @@ class TradeBot(commands.Bot):
     async def _next_pubsub_snapshot(self, pubsub, symbol: str):
         if not pubsub:
             return None
+        latest = None
         try:
-            message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
+            while True:
+                message = await asyncio.to_thread(pubsub.get_message, timeout=0.0)
+                if not message or message.get("type") != "message":
+                    break
+                raw = message.get("data")
+                if raw is None:
+                    continue
+                try:
+                    payload = (
+                        json.loads(raw.decode())
+                        if isinstance(raw, (bytes, bytearray))
+                        else json.loads(raw)
+                        if isinstance(raw, str)
+                        else raw
+                    )
+                except Exception:
+                    continue
+                normalized_symbol = (symbol or "NQ_NDX").upper()
+                ticker = self.ticker_aliases.get(normalized_symbol, normalized_symbol)
+                if (payload.get("symbol") or "").upper() != ticker:
+                    continue
+                normalized = self._normalize_snapshot_payload(payload, ticker)
+                if not normalized:
+                    continue
+                now = datetime.now(timezone.utc)
+                ts = normalized.get("timestamp") or now
+                if isinstance(ts, datetime):
+                    age = (
+                        now - (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc))
+                    ).total_seconds()
+                else:
+                    age = 9999
+                normalized["display_symbol"] = normalized_symbol
+                normalized["_source"] = "redis-pubsub"
+                if age <= 5:
+                    normalized["_freshness"] = "current"
+                elif age <= 30:
+                    normalized["_freshness"] = "stale"
+                else:
+                    normalized["_freshness"] = "incomplete"
+                latest = normalized
         except Exception as exc:
             print(f"GEX feed pubsub error: {exc}")
             return None
-        if not message or message.get("type") != "message":
-            return None
-        raw = message.get("data")
-        if raw is None:
-            return None
-        try:
-            payload = (
-                json.loads(raw.decode())
-                if isinstance(raw, (bytes, bytearray))
-                else json.loads(raw)
-                if isinstance(raw, str)
-                else raw
-            )
-        except Exception:
-            return None
-        normalized_symbol = (symbol or "NQ_NDX").upper()
-        ticker = self.ticker_aliases.get(normalized_symbol, normalized_symbol)
-        if (payload.get("symbol") or "").upper() != ticker:
-            return None
-        normalized = self._normalize_snapshot_payload(payload, ticker)
-        if not normalized:
-            return None
-        now = datetime.now(timezone.utc)
-        ts = normalized.get("timestamp") or now
-        if isinstance(ts, datetime):
-            age = (
-                now - (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc))
-            ).total_seconds()
-        else:
-            age = 9999
-        normalized["display_symbol"] = normalized_symbol
-        normalized["_source"] = "redis-pubsub"
-        if age <= 5:
-            normalized["_freshness"] = "current"
-        elif age <= 30:
-            normalized["_freshness"] = "stale"
-        else:
-            normalized["_freshness"] = "incomplete"
-        return normalized
+        return latest
 
     async def _post_feed_messages(
         self, channels: List[discord.abc.Messageable], content: str

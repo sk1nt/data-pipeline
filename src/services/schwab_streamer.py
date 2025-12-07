@@ -19,8 +19,8 @@ from schwab import auth
 from schwab import streaming as schwab_streaming
 
 from ..config import settings
-from ..lib.logging import get_logger
-from ..lib.redis_client import RedisClient
+from lib.logging import get_logger
+from lib.redis_client import RedisClient
 from ..models.market_data import Level2Event, Level2Quote, TickEvent
 from ..token_store import MissingBootstrapTokenError, TokenStore, TokenStoreError
 from .trading_publisher import TradingEventPublisher

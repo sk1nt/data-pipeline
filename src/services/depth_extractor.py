@@ -6,9 +6,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List
 
-from ..lib.logging_config import logger
+from lib.logging_config import logger
 from ..models.depth_snapshot import DepthSnapshot
-from ..lib.parquet_handler import ParquetHandler
+from lib.parquet_handler import ParquetHandler
 
 
 class DepthExtractor:

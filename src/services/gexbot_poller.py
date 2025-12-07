@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 
-from ..lib.redis_client import RedisClient
+from lib.redis_client import RedisClient
 from .redis_timeseries import RedisTimeSeriesClient
 
 
