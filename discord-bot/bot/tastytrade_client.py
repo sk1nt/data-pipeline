@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import re
 from decimal import Decimal
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -42,6 +43,11 @@ class AccountSummary:
 
 
 LOGGER = logging.getLogger(__name__)
+AUTH_ERROR_TEXT = (
+    "TastyTrade authentication failed (refresh token invalid or revoked). "
+    "Use `set_refresh_token(...)` or run `python scripts/get_tastytrade_refresh_token.py --sandbox` "
+    "to obtain a new token and then call `set_refresh_token` or restart the bot."
+)
 
 
 class TastytradeAuthError(RuntimeError):
@@ -117,17 +123,7 @@ class TastyTradeClient:
             except Exception as exc:
                 msg = str(exc)
                 LOGGER.warning("TastyTrade session/account init failed: %s", msg)
-                if (
-                    "invalid_grant" in msg
-                    or "Grant revoked" in msg
-                    or "invalid_token" in msg
-                ):
-                    self._mark_needs_reauth()
-                    raise TastytradeAuthError(
-                        "TastyTrade authentication failed (refresh token invalid or revoked). "
-                        "Use `set_refresh_token(...)` or run `python scripts/get_tastytrade_refresh_token.py --sandbox` "
-                        "to obtain a new token and then call `set_refresh_token` or restart the bot."
-                    )
+                self._raise_on_auth_error(exc)
                 raise
             balances = account.get_balances(session)
             bp = self._pick_buying_power(balances)
@@ -262,18 +258,7 @@ class TastyTradeClient:
                     self._session.refresh()
                     self._session_expiration = self._derive_expiration(self._session)
             except Exception as exc:  # pragma: no cover - handle invalid grant
-                msg = str(exc).lower()
-                if (
-                    "invalid_grant" in msg
-                    or "grant revoked" in msg
-                    or "invalid_token" in msg
-                ):
-                    self._mark_needs_reauth()
-                    raise TastytradeAuthError(
-                        "TastyTrade authentication failed (refresh token invalid or revoked). "
-                        "Use `set_refresh_token(...)` or run `python scripts/get_tastytrade_refresh_token.py --sandbox` "
-                        "to obtain a new token and then call `set_refresh_token` or restart the bot."
-                    )
+                self._raise_on_auth_error(exc)
                 raise
         return self._session
 
@@ -387,12 +372,8 @@ class TastyTradeClient:
         except Exception as exc:
             status["error"] = str(exc)
             # If it's an auth issue, mark for reauth
-            msg = str(exc).lower()
-            if (
-                "invalid_grant" in msg
-                or "grant revoked" in msg
-                or "invalid_token" in msg
-            ):
+            msg = str(exc).lower() if exc else ""
+            if any(key in msg for key in ("invalid_grant", "grant revoked", "invalid_token")):
                 self._mark_needs_reauth()
         status["needs_reauth"] = getattr(self, "_needs_reauth", False)
         status["refresh_token_hash"] = self._hash_token(
@@ -518,8 +499,6 @@ class TastyTradeClient:
             candidates.add(base)
             candidates.add("/" + base)
         # If year supplied as 2-digits (e.g., NQZ25), add single-digit variant (NQZ5)
-        import re
-
         m = re.match(r"^(?P<prod>[A-Z]{1,4})(?P<month>[A-Z])(?P<year>\d{2})$", cand)
         if m:
             prod = m.group("prod")
@@ -579,10 +558,8 @@ class TastyTradeClient:
             resolved = None
             if matches:
                 # Prefer single-digit year format if both are present (e.g., '/NQZ5')
-                import re as _re
-
                 single_digit = [
-                    m for m in matches if _re.match(r"^/[A-Z]{1,4}[A-Z]\d$", m)
+                    m for m in matches if re.match(r"^/[A-Z]{1,4}[A-Z]\d$", m)
                 ]
                 if single_digit:
                     resolved = single_digit[0]
@@ -590,7 +567,7 @@ class TastyTradeClient:
                     resolved = matches[0]
                 # If we chose a two-digit year symbol, prefer a single-digit
                 # version if the futures list has one for the same product/month.
-                if resolved and _re.match(r"^/[A-Z]{1,4}[A-Z]\d{2}$", resolved):
+                if resolved and re.match(r"^/[A-Z]{1,4}[A-Z]\d{2}$", resolved):
                     prod = resolved[1:3]
                     month = resolved[3]
                     # create one-digit variant
@@ -661,17 +638,7 @@ class TastyTradeClient:
             except Exception as exc:
                 msg = str(exc)
                 LOGGER.warning("Failed to cancel order %s: %s", order_id, msg)
-                if (
-                    "invalid_grant" in msg
-                    or "Grant revoked" in msg
-                    or "invalid_token" in msg
-                ):
-                    self._mark_needs_reauth()
-                    raise TastytradeAuthError(
-                        "TastyTrade authentication failed (refresh token invalid or revoked). "
-                        "Use `set_refresh_token(...)` or run `python scripts/get_tastytrade_refresh_token.py --sandbox` "
-                        "to obtain a new token and then call `set_refresh_token` or restart the bot."
-                    )
+                self._raise_on_auth_error(exc)
                 raise
 
     def get_order(self, order_id: str) -> dict:
@@ -732,10 +699,6 @@ class TastyTradeClient:
         if value is None:
             return 0.0
 
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return 0.0
         try:
             return float(value)
         except (TypeError, ValueError):
@@ -928,8 +891,6 @@ class TastyTradeClient:
                 leg_symbol = leg_symbol.split(":", 1)[0]
 
             # Normalize year for futures (keep as-is, but ensure single-digit if needed)
-            import re
-
             m = re.match(
                 r"^(?P<prod>NQ|MNQ|ES|MES|RTY|YM)(?P<month>[A-Z])(?P<year>\d{1,2})$",
                 leg_symbol,
@@ -977,17 +938,7 @@ class TastyTradeClient:
             except Exception as exc:
                 msg = str(exc)
                 LOGGER.warning("Market entry failed: %s", msg)
-                if (
-                    "invalid_grant" in msg
-                    or "Grant revoked" in msg
-                    or "invalid_token" in msg
-                ):
-                    self._mark_needs_reauth()
-                    raise TastytradeAuthError(
-                        "TastyTrade authentication failed (refresh token invalid or revoked). "
-                        "Use `set_refresh_token(...)` or run `python scripts/get_tastytrade_refresh_token.py --sandbox` "
-                        "to obtain a new token and then call `set_refresh_token` or restart the bot."
-                    )
+                self._raise_on_auth_error(exc)
                 raise
 
             # Build TP as a separate limit order (legging in to satisfy API rules)
@@ -1036,15 +987,7 @@ class TastyTradeClient:
                 LOGGER.warning(
                     "TP order failed (entry_id=%s): %s", market_order_id, msg
                 )
-                if (
-                    "invalid_grant" in msg
-                    or "Grant revoked" in msg
-                    or "invalid_token" in msg
-                ):
-                    self._mark_needs_reauth()
-                    raise TastytradeAuthError(
-                        "TastyTrade authentication failed. Use `set_refresh_token(...)` or restart."
-                    )
+                self._raise_on_auth_error(exc)
                 # Entry already placed; surface TP failure but keep entry ID
                 return (
                     f"[{'DRY-RUN' if eff_dry else 'LIVE'}] Placed {action.lower()} entry {quantity} {symbol} @ market "
@@ -1077,8 +1020,6 @@ class TastyTradeClient:
             return f"/{symbol}{month_code}{year_digit}"
         # check for explicit contract codes like NQZ25 or NQH26 (with optional exchange suffix)
         # Accept patterns like 'NQZ25', 'NQZ25:XCME', '/NQZ25', '/NQZ25:XCME'
-        import re
-
         m = re.match(
             r"^/?(?P<prod>NQ|MNQ|ES|MES|RTY|YM)(?P<month>[A-Z])(?P<year>\d{1,2})(?::(?P<exch>\w+))?$",
             symbol,
@@ -1099,8 +1040,6 @@ class TastyTradeClient:
             is_future = True
         else:
             # detect explicit future contract like NQZ25
-            import re
-
             if isinstance(symbol, str) and re.match(
                 r"^(NQ|MNQ|ES|MES|RTY|YM)[A-Z]\d{1,2}(:\w+)?$", symbol.upper()
             ):
@@ -1140,7 +1079,18 @@ class TastyTradeClient:
         if quote_data:
             bid = quote_data[0].get("bid-price")
             ask = quote_data[0].get("ask-price")
-            if bid and ask:
+            if bid is not None and ask is not None:
                 return (bid + ask) / 2
-        # Fallback
-        return 4000.0
+            # Fall back to last/mark if bid/ask missing
+            for key in ("last-price", "mark-price", "close-price", "last", "mark"):
+                val = quote_data[0].get(key)
+                if val is not None:
+                    return float(val)
+        raise RuntimeError(f"No quote data available for symbol: {symbol}")
+
+    def _raise_on_auth_error(self, exc: Exception) -> None:
+        """Raise a standardized auth error when the refresh token is invalid."""
+        msg = str(exc).lower() if exc else ""
+        if any(key in msg for key in ("invalid_grant", "grant revoked", "invalid_token")):
+            self._mark_needs_reauth()
+            raise TastytradeAuthError(AUTH_ERROR_TEXT) from exc
