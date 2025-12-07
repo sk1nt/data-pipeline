@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../src"))
 
 from .tastytrade_client import TastyTradeClient, TastytradeAuthError
+from services.auth_service import AuthService
 
 
 class TradeBot(commands.Bot):
@@ -874,6 +875,68 @@ class TradeBot(commands.Bot):
             self.add_command(commands.Command(_market_cmd, name="market"))
             self.add_command(commands.Command(_uwalerts_cmd, name="uw"))
             self.add_command(commands.Command(_tt_cmd, name="tt"))
+            # LEFT IN PLACE FOR BACKWARDS COMPATIBILITY: register class method
+            async def _allowlist_cmd(ctx, *args):
+                """Admin CLI to manage the allowlist from Discord.
+
+                Usage:
+                  !allowlist list users
+                  !allowlist list channels
+                  !allowlist add user 12345
+                  !allowlist remove channel 67890
+                """
+                # Use class-level command if available
+                if hasattr(self, "_allowlist_cmd_impl"):
+                    return await self._allowlist_cmd_impl(ctx, *args)
+                if not await self._ensure_privileged(ctx):
+                    return
+                if not args:
+                    await self._send_dm_or_warn(ctx, "Usage: !allowlist <list|add|remove> <users|channels> [id]")
+                    return
+                action = args[0].lower()
+                if action == "list" and len(args) >= 2:
+                    target = args[1].lower()
+                    if target == "users":
+                        users = AuthService.list_users_allowlist()
+                        await self._send_dm_or_warn(ctx, "Allowlisted users:\n" + "\n".join(users))
+                        return
+                    if target == "channels":
+                        channels = AuthService.list_channels_allowlist()
+                        await self._send_dm_or_warn(ctx, "Allowlisted channels:\n" + "\n".join(channels))
+                        return
+                if action == "add" and len(args) >= 3:
+                    kind = args[1].lower()
+                    ident = args[2]
+                    if kind == "user":
+                        if AuthService.add_user_to_allowlist(ident):
+                            await self._send_dm_or_warn(ctx, f"Added user {ident} to allowlist")
+                        else:
+                            await self._send_dm_or_warn(ctx, f"Failed to add user {ident}")
+                        return
+                    if kind == "channel":
+                        if AuthService.add_channel_to_allowlist(ident):
+                            await self._send_dm_or_warn(ctx, f"Added channel {ident} to allowlist")
+                        else:
+                            await self._send_dm_or_warn(ctx, f"Failed to add channel {ident}")
+                        return
+                if action == "remove" and len(args) >= 3:
+                    kind = args[1].lower()
+                    ident = args[2]
+                    if kind == "user":
+                        if AuthService.remove_user_from_allowlist(ident):
+                            await self._send_dm_or_warn(ctx, f"Removed user {ident} from allowlist")
+                        else:
+                            await self._send_dm_or_warn(ctx, f"Failed to remove user {ident}")
+                        return
+                    if kind == "channel":
+                        if AuthService.remove_channel_from_allowlist(ident):
+                            await self._send_dm_or_warn(ctx, f"Removed channel {ident} from allowlist")
+                        else:
+                            await self._send_dm_or_warn(ctx, f"Failed to remove channel {ident}")
+                        return
+                await self._send_dm_or_warn(ctx, "Invalid command. Usage: !allowlist <list|add|remove> <users|channels> [id]")
+
+            self.add_command(commands.Command(_allowlist_cmd, name="allowlist"))
         except Exception as e:
             # If registration fails (e.g., during import-time tests), print error for debugging
             print(f"Command registration failed: {e}")
@@ -2161,6 +2224,56 @@ class TradeBot(commands.Bot):
             return True
         await ctx.send("You are not authorized to use this command.")
         return False
+
+    async def _allowlist_cmd_impl(self, ctx, *args):
+        """Implementation backing for allowlist admin command."""
+        if not await self._ensure_privileged(ctx):
+            return
+        if not args:
+            await self._send_dm_or_warn(ctx, "Usage: !allowlist <list|add|remove> <users|channels> [id]")
+            return
+        action = args[0].lower()
+        if action == "list" and len(args) >= 2:
+            target = args[1].lower()
+            if target == "users":
+                users = AuthService.list_users_allowlist()
+                await self._send_dm_or_warn(ctx, "Allowlisted users:\n" + "\n".join(users))
+                return
+            if target == "channels":
+                channels = AuthService.list_channels_allowlist()
+                await self._send_dm_or_warn(ctx, "Allowlisted channels:\n" + "\n".join(channels))
+                return
+        if action == "add" and len(args) >= 3:
+            kind = args[1].lower()
+            ident = args[2]
+            if kind == "user":
+                if AuthService.add_user_to_allowlist(ident):
+                    await self._send_dm_or_warn(ctx, f"Added user {ident} to allowlist")
+                else:
+                    await self._send_dm_or_warn(ctx, f"Failed to add user {ident}")
+                return
+            if kind == "channel":
+                if AuthService.add_channel_to_allowlist(ident):
+                    await self._send_dm_or_warn(ctx, f"Added channel {ident} to allowlist")
+                else:
+                    await self._send_dm_or_warn(ctx, f"Failed to add channel {ident}")
+                return
+        if action == "remove" and len(args) >= 3:
+            kind = args[1].lower()
+            ident = args[2]
+            if kind == "user":
+                if AuthService.remove_user_from_allowlist(ident):
+                    await self._send_dm_or_warn(ctx, f"Removed user {ident} from allowlist")
+                else:
+                    await self._send_dm_or_warn(ctx, f"Failed to remove user {ident}")
+                return
+            if kind == "channel":
+                if AuthService.remove_channel_from_allowlist(ident):
+                    await self._send_dm_or_warn(ctx, f"Removed channel {ident} from allowlist")
+                else:
+                    await self._send_dm_or_warn(ctx, f"Failed to remove channel {ident}")
+                return
+        await self._send_dm_or_warn(ctx, "Invalid command. Usage: !allowlist <list|add|remove> <users|channels> [id]")
 
     def _init_alert_channels(self) -> List[int]:
         specific = getattr(self.config, "uw_channel_ids", None) or ()
