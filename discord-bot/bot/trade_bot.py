@@ -753,6 +753,28 @@ class TradeBot(commands.Bot):
                                 ctx, "Unable to fetch auth status"
                             )
                             return
+                        def _format_session_exp(exp):
+                            if not exp:
+                                return "n/a"
+                            from datetime import datetime, timezone
+                            if isinstance(exp, str):
+                                try:
+                                    exp_dt = datetime.fromisoformat(exp)
+                                except Exception:
+                                    return exp
+                            else:
+                                exp_dt = exp
+                            if exp_dt.tzinfo is None:
+                                exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                            # Human readable
+                            now = datetime.now(timezone.utc)
+                            delta = exp_dt - now
+                            days = delta.days
+                            hours = delta.seconds // 3600
+                            minutes = (delta.seconds % 3600) // 60
+                            rel = f"in {days}d {hours}h {minutes}m" if delta.total_seconds() > 0 else f"expired {abs(days)}d {abs(hours)}h ago"
+                            return f"{exp_dt.strftime('%Y-%m-%d %H:%M:%S %Z')} ({rel})"
+
                         msg = (
                             f"TastyTrade Auth Status:\n"
                             f"Session Valid: {status.get('session_valid')}\n"
@@ -760,7 +782,7 @@ class TradeBot(commands.Bot):
                             f"Accounts: {', '.join(status.get('accounts') or [])}\n"
                             f"Use Sandbox: {status.get('use_sandbox')}\n"
                             f"Dry Run: {status.get('dry_run')}\n"
-                            f"Session Expiration: {status.get('session_expiration')}\n"
+                            f"Session Expiration: {_format_session_exp(status.get('session_expiration'))}\n"
                             f"Refresh Token Hash: {status.get('refresh_token_hash')}\n"
                             f"Needs Reauth: {status.get('needs_reauth')}\n"
                         )
