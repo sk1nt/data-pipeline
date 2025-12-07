@@ -327,8 +327,17 @@ class OptionsFillService:
             exit_price = (entry_price * profit_multiplier).quantize(
                 self.tick_increment, rounding=ROUND_HALF_UP
             )
+            # Place an exit for 50% of the filled quantity (rounded down)
+            try:
+                qty_int = int(quantity)
+            except Exception:
+                qty_int = 0
+            exit_qty = max(0, qty_int // 2)
+            if exit_qty <= 0:
+                # No exit to place (quantity too small)
+                return None
             return await self.place_limit_order(
-                option, quantity, OrderAction.SELL_TO_CLOSE, exit_price
+                option, Decimal(str(exit_qty)), OrderAction.SELL_TO_CLOSE, exit_price
             )
         except Exception as exc:
             print(f"Error creating profit exit {exc}")

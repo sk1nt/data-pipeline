@@ -1,0 +1,72 @@
+openapi: 3.0.3
+info:
+  title: Automated Alert Trading - Admin API
+  version: 0.1.0
+paths:
+  /admin/alerts/process:
+    post:
+      summary: Process a test alert message (for integrations/tests)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, channel_id, user_id]
+              properties:
+                message:
+                  type: string
+                channel_id:
+                  type: string
+                user_id:
+                  type: string
+                dry_run:
+                  type: boolean
+            example:
+              message: "Alert: BTO UBER 78p 12/05 @ 0.75"
+              channel_id: "123456789"
+              user_id: "987654321"
+              dry_run: true
+      responses:
+        '200':
+          description: Alert processed (may be dry-run)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  order_id:
+                    type: string
+                  entry_price:
+                    type: number
+        '401':
+          description: Unauthorized
+  /admin/audit/recent:
+    get:
+      summary: Retrieve recent audit events for automated alerts (paginated)
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Recent audit events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items:
+                      type: object
+        '401':
+          description: Unauthorized

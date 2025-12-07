@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.getcwd(), "src"))
 
 # Test the automated options service audit logging and returned structure
 from src.services.automated_options_service import AutomatedOptionsService
+from src.services.tastytrade_client import TastytradeAuthError
 
 
 class FakeRedis:
@@ -82,3 +83,15 @@ async def test_process_alert_disallowed_channel(monkeypatch):
     msg = "Alert: BTO UBER 78p 12/05 @ 0.75"
     result = await svc.process_alert(msg, "9999999999", "704125082750156840")
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_process_alert_auth_failure(monkeypatch):
+    class FailingTastyClient:
+        def ensure_authorized(self):
+            raise TastytradeAuthError("invalid_grant")
+
+    svc = AutomatedOptionsService(tastytrade_client=FailingTastyClient())
+    message = "Alert: BTO UBER 78p 12/05 @ 0.75"
+    with pytest.raises(TastytradeAuthError):
+        await svc.process_alert(message, "1255265167113978008", "704125082750156840")

@@ -760,6 +760,9 @@ class TradeBot(commands.Bot):
                             f"Accounts: {', '.join(status.get('accounts') or [])}\n"
                             f"Use Sandbox: {status.get('use_sandbox')}\n"
                             f"Dry Run: {status.get('dry_run')}\n"
+                            f"Session Expiration: {status.get('session_expiration')}\n"
+                            f"Refresh Token Hash: {status.get('refresh_token_hash')}\n"
+                            f"Needs Reauth: {status.get('needs_reauth')}\n"
                         )
                         err = status.get("error")
                         if err:
