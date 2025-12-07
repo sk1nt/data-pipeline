@@ -34,6 +34,18 @@ class AutomatedOptionsService:
         if not alert_data:
             return None
 
+        # Verify allowed user & channel for automated trades
+        from services.auth_service import AuthService
+
+        if not AuthService.verify_user_and_channel_for_automated_trades(user_id, channel_id):
+            # Not permitted to trigger automated trades
+            logger.warning(
+                "User %s or channel %s is not permitted for automated trades",
+                user_id,
+                channel_id,
+            )
+            return None
+
         # Verify auth before attempting to place an order
         try:
             self.tastytrade_client.ensure_authorized()

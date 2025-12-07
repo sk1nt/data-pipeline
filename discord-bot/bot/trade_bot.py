@@ -897,6 +897,14 @@ class TradeBot(commands.Bot):
             return
 
         # Check for alert messages
+        # Ignore replies — only first messages trigger alerts
+        try:
+            is_reply = getattr(message, "reference", None) is not None
+        except Exception:
+            is_reply = False
+        if is_reply:
+            return
+
         if message.content.startswith("Alert"):
             await self._process_alert_message(message)
 

@@ -196,6 +196,15 @@ except ImportError as e:
     logger.warning(f"Rules route modules not available yet: {e}")
     logger.info("API will start with limited functionality")
 
+try:
+    from .routes.allowlist import router as allowlist_router
+
+    app.include_router(allowlist_router, tags=["allowlist"])
+    logger.info("Allowlist API routes loaded successfully")
+except ImportError as e:
+    logger.warning(f"Allowlist route modules not available yet: {e}")
+    logger.info("API will start with limited functionality")
+
 
 if __name__ == "__main__":
     import uvicorn

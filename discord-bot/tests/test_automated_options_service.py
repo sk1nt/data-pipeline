@@ -72,3 +72,13 @@ async def test_process_alert_logs_to_redis_and_returns_struct(monkeypatch):
     payload_obj = json.loads(payload)
     assert payload_obj.get("order_id") == "abc123"
     assert payload_obj.get("computed_quantity") == result.get("quantity")
+
+
+@pytest.mark.asyncio
+async def test_process_alert_disallowed_channel(monkeypatch):
+    svc = AutomatedOptionsService(tastytrade_client=FakeTastyClient())
+
+    # No channel in the allowlist
+    msg = "Alert: BTO UBER 78p 12/05 @ 0.75"
+    result = await svc.process_alert(msg, "9999999999", "704125082750156840")
+    assert result is None
