@@ -9,6 +9,18 @@ from ..config.settings import config
 from datetime import datetime
 
 
+def _select_account(accounts):
+    if not accounts:
+        return None
+    target = getattr(config, "tastytrade_account", None)
+    if target:
+        for acc in accounts:
+            acc_number = getattr(acc, "account_number", None) or getattr(acc, "number", None)
+            if acc_number == target:
+                return acc
+    return accounts[0]
+
+
 class FuturesOrderService:
     async def place_order(self, params: FuturesOrderParams, user_id: str) -> str:
         """Place a futures order via Tastytrade API."""
@@ -17,9 +29,9 @@ class FuturesOrderService:
 
         # Get account
         accounts = Account.get(session)
-        if not accounts:
+        account = _select_account(accounts)
+        if not account:
             raise ValueError("No Tastytrade accounts found")
-        account = accounts[0]  # Use first account
 
         # Get future instrument
         future = Future.get(session, params.symbol)

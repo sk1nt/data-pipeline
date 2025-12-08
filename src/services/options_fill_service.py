@@ -15,6 +15,10 @@ from tastytrade.order import (
 
 # Import via absolute paths so the module works when `src` is on sys.path
 from services.tastytrade_client import tastytrade_client, TastytradeAuthError
+
+
+class InsufficientBuyingPowerError(Exception):
+    """Raised when estimated notional exceeds available buying power."""
 from src.lib.retries import retry_with_backoff, TransientError
 from config.settings import config
 
@@ -52,6 +56,20 @@ class OptionsFillService:
             print(f"Error fetching market data for {option_symbol}: {e}")
         return None
 
+    def _select_account(self, accounts):
+        """Select configured account if present, else first available."""
+        if not accounts:
+            return None
+        target = getattr(config, "tastytrade_account", None)
+        if target:
+            for acc in accounts:
+                acc_number = getattr(acc, "account_number", None) or getattr(
+                    acc, "number", None
+                )
+                if acc_number == target:
+                    return acc
+        return accounts[0]
+
     async def place_limit_order(
         self, option: Option, quantity: Decimal, action: OrderAction, price: Decimal
     ) -> Optional[str]:
@@ -71,9 +89,9 @@ class OptionsFillService:
         self.tastytrade_client.ensure_authorized()
         session = self.tastytrade_client.get_session()
         accounts = Account.get(session)
-        if not accounts:
+        account = self._select_account(accounts)
+        if not account:
             return None
-        account = accounts[0]
 
         # Preflight: verify trading status to avoid placing orders when options are closing-only
         try:
@@ -101,8 +119,13 @@ class OptionsFillService:
             contract_price = float(price) * 100
             est_notional = float(quantity) * contract_price
             if buying_power <= 0 or est_notional > buying_power:
-                print(f"Insufficient buying power for order: est_notional={est_notional} buying_power={buying_power}")
-                return None
+                msg = (
+                    f"Insufficient buying power for order: est_notional={est_notional} buying_power={buying_power}"
+                )
+                print(msg)
+                raise InsufficientBuyingPowerError(msg)
+        except InsufficientBuyingPowerError:
+            raise
         except Exception:
             # If we can't determine balances, continue and allow order to proceed
             pass
@@ -190,8 +213,8 @@ class OptionsFillService:
             self.tastytrade_client.ensure_authorized()
             session = self.tastytrade_client.get_session()
             accounts = Account.get(session)
-            if accounts:
-                account = accounts[0]
+            account = self._select_account(accounts)
+            if account:
                 orders = account.get_live_orders(session)
                 for order in orders:
                     if str(order.id) == order_id and order.status.value == "Filled":
@@ -209,8 +232,8 @@ class OptionsFillService:
             self.tastytrade_client.ensure_authorized()
             session = self.tastytrade_client.get_session()
             accounts = Account.get(session)
-            if accounts:
-                account = accounts[0]
+            account = self._select_account(accounts)
+            if account:
                 @retry_with_backoff(max_retries=3, initial_backoff=0.5)
                 def attempt_delete():
                     return account.delete_order(session, order_id)
@@ -430,9 +453,9 @@ class OptionsFillService:
             self.tastytrade_client.ensure_authorized()
             session = self.tastytrade_client.get_session()
             accounts = Account.get(session)
-            if not accounts:
+            account = self._select_account(accounts)
+            if not account:
                 return None
-            account = accounts[0]
             orders = account.get_live_orders(session)
             entry_order = None
             for o in orders:

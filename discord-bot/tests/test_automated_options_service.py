@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.getcwd(), "src"))
 # Test the automated options service audit logging and returned structure
 from src.services.automated_options_service import AutomatedOptionsService
 from src.services.tastytrade_client import TastytradeAuthError
+from src.services.options_fill_service import InsufficientBuyingPowerError
 
 
 class FakeRedis:
@@ -128,3 +129,78 @@ async def test_process_alert_failure_audits(monkeypatch):
     assert key == "audit:automated_alerts"
     payload_obj = json.loads(payload)
     assert payload_obj.get("status") == "failed"
+
+
+@pytest.mark.asyncio
+async def test_process_alert_insufficient_buying_power(monkeypatch):
+    fake_redis = FakeRedis()
+    wrapper = FakeRedisWrapper(fake_redis)
+
+    monkeypatch.setattr(
+        "src.services.automated_options_service.get_redis_client",
+        lambda: wrapper,
+    )
+
+    notify_calls = []
+    monkeypatch.setattr(
+        "services.notifications.notify_operator",
+        lambda msg: notify_calls.append(msg) or True,
+    )
+
+    svc = AutomatedOptionsService(tastytrade_client=FakeTastyClient())
+    # Force computed notional to exceed buying power
+    monkeypatch.setattr(
+        svc, "_compute_quantity", lambda alert, channel: (1, 0.0, 500.0)
+    )
+
+    result = await svc.process_alert(
+        "Alert: BTO UBER 78p 12/05 @ 0.75", "1255265167113978008", "704125082750156840"
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "insufficient_buying_power"
+    assert notify_calls, "Operator notification should be sent"
+
+    # Audit should record failure reason
+    assert fake_redis.calls
+    _, payload = fake_redis.calls[0]
+    payload_obj = json.loads(payload)
+    assert payload_obj.get("reason") == "insufficient_buying_power"
+
+
+@pytest.mark.asyncio
+async def test_process_alert_insufficient_buying_power_from_fill(monkeypatch):
+    fake_redis = FakeRedis()
+    wrapper = FakeRedisWrapper(fake_redis)
+
+    monkeypatch.setattr(
+        "src.services.automated_options_service.get_redis_client",
+        lambda: wrapper,
+    )
+
+    notify_calls = []
+    monkeypatch.setattr(
+        "services.notifications.notify_operator",
+        lambda msg: notify_calls.append(msg) or True,
+    )
+
+    class RaiseFillService:
+        async def fill_options_order(self, *args, **kwargs):
+            raise InsufficientBuyingPowerError("est_notional=885.0 buying_power=0.0")
+
+    svc = AutomatedOptionsService(tastytrade_client=FakeTastyClient())
+    svc.fill_service = RaiseFillService()
+
+    result = await svc.process_alert(
+        "Alert: BTO UBER 78p 12/05 @ 0.75", "1255265167113978008", "704125082750156840"
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "insufficient_buying_power"
+    assert notify_calls, "Operator notification should be sent"
+
+    # Audit should record failure reason
+    assert fake_redis.calls
+    _, payload = fake_redis.calls[0]
+    payload_obj = json.loads(payload)
+    assert payload_obj.get("reason") == "insufficient_buying_power"

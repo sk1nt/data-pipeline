@@ -5,8 +5,10 @@ from typing import Optional
 
 # Import via absolute paths so the module works when `src` is on sys.path
 from services.alert_parser import AlertParser
-from services.options_fill_service import OptionsFillService
+from services.options_fill_service import OptionsFillService, InsufficientBuyingPowerError
 from services.tastytrade_client import tastytrade_client, TastytradeAuthError
+from config.settings import config
+from services.notifications import notify_operator
 from lib.logging import get_logger
 from lib.redis_client import get_redis_client
 
@@ -55,7 +57,29 @@ class AutomatedOptionsService:
             raise TastytradeAuthError(msg) from exc
 
         # Calculate quantity based on allocation and account balances
-        quantity = self._compute_quantity(alert_data, channel_id)
+        quantity, buying_power, est_notional = self._compute_quantity(alert_data, channel_id)
+
+        if buying_power <= 0 or est_notional > buying_power:
+            reason = "insufficient_buying_power"
+            err_msg = (
+                f"Insufficient buying power for order: est_notional={est_notional} buying_power={buying_power}"
+            )
+            logger.warning(err_msg)
+            notify_operator(err_msg)
+            self._audit_failure(
+                user_id=user_id,
+                channel_id=channel_id,
+                alert_message=message,
+                parsed_alert=alert_data,
+                reason=reason,
+                error=err_msg,
+            )
+            return {
+                "status": "error",
+                "reason": reason,
+                "estimated_notional": est_notional,
+                "buying_power": buying_power,
+            }
 
         # Place order
         try:
@@ -92,46 +116,44 @@ class AutomatedOptionsService:
             except Exception:
                 pass
             raise TastytradeAuthError(msg) from exc
+        except InsufficientBuyingPowerError as exc:
+            err_msg = str(exc)
+            notify_operator(err_msg)
+            self._audit_failure(
+                user_id=user_id,
+                channel_id=channel_id,
+                alert_message=message,
+                parsed_alert=alert_data,
+                reason="insufficient_buying_power",
+                error=err_msg,
+            )
+            return {
+                "status": "error",
+                "reason": "insufficient_buying_power",
+                "error": err_msg,
+            }
         except Exception as exc:
             # Generic failure while placing order — audit and return
             print(f"Unhandled error placing order: {exc}")
-            try:
-                redis_client = get_redis_client()
-                redis_conn = redis_client.client
-                audit_key = "audit:automated_alerts"
-                fail_payload = {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "user_id": user_id,
-                    "channel_id": channel_id,
-                    "alert_message": message,
-                    "parsed_alert": alert_data,
-                    "status": "failed",
-                    "reason": "exception",
-                    "error": str(exc),
-                }
-                redis_conn.lpush(audit_key, json.dumps(fail_payload, default=str))
-            except Exception:
-                pass
+            self._audit_failure(
+                user_id=user_id,
+                channel_id=channel_id,
+                alert_message=message,
+                parsed_alert=alert_data,
+                reason="exception",
+                error=str(exc),
+            )
             return None
 
         if not result:
             # Record a failure audit entry if order was not created
-            try:
-                redis_client = get_redis_client()
-                redis_conn = redis_client.client
-                audit_key = "audit:automated_alerts"
-                fail_payload = {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "user_id": user_id,
-                    "channel_id": channel_id,
-                    "alert_message": message,
-                    "parsed_alert": alert_data,
-                    "status": "failed",
-                    "reason": "order_not_created_or_rejected",
-                }
-                redis_conn.lpush(audit_key, json.dumps(fail_payload, default=str))
-            except Exception:
-                pass
+            self._audit_failure(
+                user_id=user_id,
+                channel_id=channel_id,
+                alert_message=message,
+                parsed_alert=alert_data,
+                reason="order_not_created_or_rejected",
+            )
             return None
 
         # Always return structured info: order_id, quantity, entry_price
@@ -166,21 +188,13 @@ class AutomatedOptionsService:
 
         # If order was not created (result is falsy), log a failure audit entry for troubleshooting
         if not result:
-            try:
-                redis_client = get_redis_client()
-                redis_conn = redis_client.client
-                fail_payload = {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "user_id": user_id,
-                    "channel_id": channel_id,
-                    "alert_message": message,
-                    "parsed_alert": alert_data,
-                    "status": "failed",
-                    "reason": "order_not_created_or_rejected",
-                }
-                redis_conn.lpush(audit_key, json.dumps(fail_payload, default=str))
-            except Exception:
-                pass
+            self._audit_failure(
+                user_id=user_id,
+                channel_id=channel_id,
+                alert_message=message,
+                parsed_alert=alert_data,
+                reason="order_not_created_or_rejected",
+            )
 
         return {
             "order_id": order_id,
@@ -188,7 +202,7 @@ class AutomatedOptionsService:
             "entry_price": entry_price,
         }
 
-    def _compute_quantity(self, alert_data: dict, channel_id: str) -> int:
+    def _compute_quantity(self, alert_data: dict, channel_id: str) -> tuple[int, float, float]:
         """Compute contract quantity using allocation, price, and account balances."""
         alloc_pct = 0.1  # TODO: configurable per trader
         price = float(alert_data.get("price") or 0.0)
@@ -202,7 +216,16 @@ class AutomatedOptionsService:
                 session = self.tastytrade_client.get_session()
                 accounts = Account.get(session)
                 if accounts:
-                    account = accounts[0]
+                    target = getattr(config, "tastytrade_account", None)
+                    account = None
+                    if target:
+                        for acc in accounts:
+                            acc_number = getattr(acc, "account_number", None) or getattr(acc, "number", None)
+                            if acc_number == target:
+                                account = acc
+                                break
+                    if account is None:
+                        account = accounts[0]
                     balances = account.get_balances(session)
                     # Prefer available_trading_funds if present
                     buying_power = float(
@@ -238,4 +261,33 @@ class AutomatedOptionsService:
             # Scale down to 10x net liq as a guardrail
             qty = max(1, int((net_liq * 10) // contract_price))
 
-        return qty
+        return qty, float(buying_power), float(est_notional)
+
+    def _audit_failure(
+        self,
+        user_id: str,
+        channel_id: str,
+        alert_message: str,
+        parsed_alert: dict,
+        reason: str,
+        error: Optional[str] = None,
+    ) -> None:
+        """Write a failure audit log (best-effort)."""
+        try:
+            redis_client = get_redis_client()
+            redis_conn = redis_client.client
+            audit_key = "audit:automated_alerts"
+            fail_payload = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "user_id": user_id,
+                "channel_id": channel_id,
+                "alert_message": alert_message,
+                "parsed_alert": parsed_alert,
+                "status": "failed",
+                "reason": reason,
+            }
+            if error:
+                fail_payload["error"] = error
+            redis_conn.lpush(audit_key, json.dumps(fail_payload, default=str))
+        except Exception:
+            pass

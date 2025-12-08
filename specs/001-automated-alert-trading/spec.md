@@ -70,18 +70,18 @@ As an ops or dev engineer, I need clear logs and safe retry/fallback logic when 
 
 ### Functional Requirements
 
-- **FR-001**: The system MUST parse multiple alert message formats and extract necessary fields: action (BTO/STC), symbol, leg type (put/call), strike, expiry, quantity (optional), and price (optional).
-- **FR-002**: Only a configurable allowlist of specific user IDs and channel IDs must be able to trigger automated trading; the system should reject/ignore others.
-- **FR-003**: The system MUST compute a trade quantity using allocation rules (configurable allocation percentage), buying power checks, and a per-trade maximum.
- - **FR-003**: The system MUST compute a trade quantity using allocation rules (configurable allocation percentage), buying power checks, and a per-trade maximum. Allocation percentage is a percentage of the account's available buying power at session login (initial BP) rather than dynamically computed on each order.
-- **FR-004**: The system MUST place a limit entry order using either alert-provided price or mid-market price if no price is given; when in dry-run mode, simulate order without placing.
- - **FR-004**: The system MUST place a limit entry order using either alert-provided price or mid-market price if no price is given; when in dry-run mode, simulate order without placing. The system MUST implement price discovery using instrument tick-size increments and a conversion to market order when the final required increment is within one tick.
-- **FR-005**: When an entry order is filled, the system MUST place a limit exit that sells 50% of the filled quantity at 100% profit based on the actual execution price where possible.
-- **FR-006**: The system MUST write an audit record for each automated operation containing the following fields: timestamp, user_id, channel_id, parsed_alert, computed_quantity, entry_order_id, entry_price, fills (if present), exit_order_id (if placed), and error details (if any).
-- **FR-007**: The system MUST include configurable retry/backoff policy for transient errors and a cancellation policy for stale or unsuccessful retries.
- - **FR-007**: The system MUST include configurable retry/backoff policy for transient errors and a cancellation policy for stale or unsuccessful retries.
- - **FR-009**: The system MUST implement price discovery rules: start at mid/alert price, wait 20s, then up to 3 increments of 1 tick across a 90s window; convert to market when remaining increment ≤ 1 tick.
-- **FR-008**: The system MUST support a dry-run mode that parses alerts, computes quantity, and returns intended orders without placing them.
+- **FR-001**: Parse supported alert formats and extract action (BTO/STC), symbol, option type (call/put), strike, expiry, optional quantity, and optional price.
+- **FR-002**: Enforce a configurable allowlist of user IDs and channel IDs; ignore/reject alerts from others.
+- **FR-003**: Compute trade quantity using configured allocation percentage (against session-initial buying power), buying power checks, and per-trade maximums.
+- **FR-004**: Place a limit entry order using alert price or mid-market fallback; in dry-run mode, simulate without placing.
+- **FR-005**: Apply price discovery: start at alert/mid price, wait ~20s, retry up to 3 times with 1-tick increments within ~90s total; convert to market when remaining gap ≤ 1 tick.
+- **FR-006**: When entry fills, place an exit limit for 50% of filled quantity at 100% profit, using actual execution price when available; support configurable minimum exit size.
+- **FR-007**: Persist an audit record for every automated action with timestamp, user_id, channel_id, parsed_alert, computed_quantity, entry_order_id, entry_price, fills, exit_order_id (if any), and error details.
+- **FR-008**: Provide configurable retry/backoff for transient failures and cancellation for stale/unsuccessful retries.
+- **FR-009**: Support dry-run mode that parses alerts, computes quantities, and returns intended orders without placing them.
+
+**Configuration**
+- Default Tastytrade account: `TASTYTRADE_ACCOUNT=5WT31673` (must match allowlist).
 
 ### Non-Functional Requirements
 

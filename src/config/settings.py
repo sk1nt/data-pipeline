@@ -18,7 +18,7 @@ class TastyTradeConfig(BaseSettings):
     # Tastytrade settings
     tastytrade_client_secret: str = Field(alias="TASTYTRADE_CLIENT_SECRET")
     tastytrade_refresh_token: str = Field(alias="TASTYTRADE_REFRESH_TOKEN")
-    # tastytrade_account: Optional[str] = Field(None, alias="TASTYTRADE_ACCOUNT")
+    tastytrade_account: Optional[str] = Field(None, alias="TASTYTRADE_ACCOUNT")
     tastytrade_use_sandbox: bool = Field(True, alias="TASTYTRADE_USE_SANDBOX")
     tastytrade_prod_client_secret: Optional[str] = Field(
         None, alias="TASTYTRADE_PROD_CLIENT_SECRET"

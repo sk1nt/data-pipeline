@@ -21,7 +21,7 @@ US1 — Alert-driven automated entry & partial exit (P1)
 - [X] T009 [US1] Implement price discovery as `src/services/price_discovery.py` using tick increments and conversion-to-market when ≤ 1 tick. (file: src/services/price_discovery.py)
 - [X] T010 [US1] Add unit tests for price discovery and `round_to_tick`: `discord-bot/tests/test_round_to_tick.py` and `tests/unit/test_price_discovery.py`. (files: discord-bot/tests/test_round_to_tick.py, tests/unit/test_price_discovery.py)
  - [X] T011 [US1] Implement exit order creation (50% of filled quantity at 100% profit) in `src/services/automated_options_service.py`. (file: src/services/automated_options_service.py)
-- [ ] T012 [US1] Add unit & integration tests for entry->fill->exit flow: `tests/integration/test_alert_to_exit_flow.py`. (file: tests/integration/test_alert_to_exit_flow.py)
+- [X] T012 [US1] Add unit & integration tests for entry->fill->exit flow: `tests/integration/test_alert_to_exit_flow.py`. (file: tests/integration/test_alert_to_exit_flow.py)
  - [X] T013 [US1] Ensure audit events are created for all operations and persisted via `src/services/audit.py`. (files: src/services/audit.py, discord-bot/tests/test_audit.py)
 
 US2 — Authorization, controls & audit (P2)
@@ -33,7 +33,6 @@ US2 — Authorization, controls & audit (P2)
 
 US3 — Observability & retry/failure handling (P3)
 
-- [ ] T018 [US3] Implement retry/backoff policy in `src/lib/retries.py` and integrate into `src/services/tastytrade_client.py`. (files: src/lib/retries.py, src/services/tastytrade_client.py)
 - [X] T018 [US3] Implement retry/backoff policy in `src/lib/retries.py` and integrate into `src/services/tastytrade_client.py`. (files: src/lib/retries.py, src/services/tastytrade_client.py)
 - [X] T019 [US3] Implement `TastytradeAuthError` handling and `ensure_authorized()` use in write flows; update `!tt auth` behavior. (files: discord-bot/bot/tastytrade_client.py, discord-bot/bot/trade_bot.py)
 - [X] T020 [US3] Implement operator notification flows for critical failures and add tests for notifications. (files: src/services/notifications.py, discord-bot/tests/test_notifications.py)
@@ -41,11 +40,13 @@ US3 — Observability & retry/failure handling (P3)
 Phase 4 — Polish & Cross-Cutting Concerns
 
 - [X] T021 [P] Add E2E test for full alert -> entry -> partial fill -> exit behavior using a simulated broker. (file: tests/e2e/test_alert_e2e_flow.py)
-- [ ] T022 [P] Update `specs/001-automated-alert-trading/quickstart.md` with setup and run instructions. (file: specs/001-automated-alert-trading/quickstart.md)
-- [ ] T023 [P] Add monitoring metrics for price discovery retries, order attempts, and audit writes. (file: src/services/metrics.py)
-
+- [X] T022 [P] Update `specs/001-automated-alert-trading/quickstart.md` with setup and run instructions. (file: specs/001-automated-alert-trading/quickstart.md)
 - [X] T023 [P] Add monitoring metrics for price discovery retries, order attempts, and audit writes. (file: src/services/metrics.py)
 - [X] T024 [US2] Add ops task to sanitize repo history for sensitive env backups and rotate exposed secrets; add `.env.back` to `.gitignore`. (files: .gitignore, docs/SECURITY.md)
+
+Phase 5 — Risk/Compliance Fixes
+
+- [X] T025 [P] Add explicit insufficient-buying-power handling and operator notification path; document behavior in quickstart/spec. (files: src/services/automated_options_service.py, src/services/notifications.py, specs/001-automated-alert-trading/quickstart.md)
 
 ## Dependencies & Execution Order
 
@@ -65,7 +66,7 @@ Phase 4 — Polish & Cross-Cutting Concerns
 
 ## Summary
 
-- Total tasks: 24
-- Tasks per story: US1: 8, US2: 4, US3: 3, Setup/Foundational/Polish: 9
+- Total tasks: 25
+- Tasks per story: US1: 8, US2: 4, US3: 3, Setup/Foundational/Polish: 9, Risk/Compliance: 1
 
 End of Tasks
