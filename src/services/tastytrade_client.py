@@ -38,11 +38,9 @@ class TastyTradeClient:
                 self._session = Session(
                     provider_secret=config.effective_tastytrade_client_secret,
                     refresh_token=config.effective_tastytrade_refresh_token,
-                    is_test=config.tastytrade_use_sandbox,
                 )
-            except TastytradeError as exc:
-                # If the refresh token is invalid or auth failed, clear session
-                self._session = None
+            except Exception as exc:
+                # Map SDK auth failures to TastytradeAuthError for callers
                 raise TastytradeAuthError(
                     f"TastyTrade authentication failed: {exc}"
                 ) from exc
@@ -60,10 +58,14 @@ class TastyTradeClient:
     def refresh_session(self):
         """Force refresh the session."""
         if self._session:
-            self._session.refresh()
-            self._session_expiration = datetime.now(
-                timezone.utc
-            )  # TODO: update expiration
+            try:
+                self._session.refresh()
+            except Exception:
+                # ignore refresh failures; next ensure will reauth
+                self._session = None
+                self._session_expiration = None
+            else:
+                self._session_expiration = datetime.now(timezone.utc)
 
     def ensure_authorized(self) -> bool:
         """Attempt to ensure session is valid; raise TastytradeAuthError if not."""
@@ -75,6 +77,28 @@ class TastyTradeClient:
         except Exception as exc:
             # Wrap other errors as auth errors for callers
             raise TastytradeAuthError(f"TastyTrade authorization error: {exc}") from exc
+
+
+def post_with_retry(session, url: str, data: str, max_retries: int = 3, initial_backoff: float = 0.5):
+    """Post with retry on transient errors using retry_with_backoff."""
+    from src.lib.retries import retry_with_backoff
+
+    @retry_with_backoff(max_retries=max_retries, initial_backoff=initial_backoff)
+    def _post():
+        return session._post(url, data=data)
+
+    return _post()
+
+
+def get_with_retry(session, url: str, max_retries: int = 3, initial_backoff: float = 0.5):
+    from src.lib.retries import retry_with_backoff
+
+    @retry_with_backoff(max_retries=max_retries, initial_backoff=initial_backoff)
+    def _get():
+        return session._get(url)
+
+    return _get()
+    
 
 
 # Global client instance

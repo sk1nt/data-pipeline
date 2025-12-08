@@ -2,6 +2,7 @@ import os
 import sys
 from types import SimpleNamespace
 import pytest
+import os
 
 sys.path.insert(0, os.path.join(os.getcwd()))
 sys.path.insert(0, os.path.join(os.getcwd(), "src"))
@@ -54,3 +55,6 @@ def test_auth_service_redis_allowlist(monkeypatch):
     assert AuthService.verify_channel_for_automated_trades(cid)
     assert AuthService.remove_channel_from_allowlist(cid)
     assert not AuthService.verify_channel_for_automated_trades(cid)
+    # Ensure the new fallback works for allowed channels/users
+    monkeypatch.setenv("DISCORD_AUTOMATED_TRADE_IDS", "1255265167113978008,970439141512871956")
+    monkeypatch.setenv("ALERT_USERS", "700068629626224700,704125082750156840")

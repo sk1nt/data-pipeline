@@ -57,6 +57,21 @@ specs/[###-feature]/
 ├── contracts/           # Phase 1 output (/speckit.plan command)
 └── tasks.md             # Phase 2 output (/speckit.tasks command - NOT created by /speckit.plan)
 ```
+## Tests Added
+
+- **Unit tests:**
+  - discord-bot/tests/test_round_to_tick.py — validates tick rounding helper behavior.
+  - discord-bot/tests/test_quantity_allocation.py — verifies quantity allocation logic for entries.
+  - discord-bot/tests/test_automated_options_service.py — unit tests for the main automated placement flow and its preflight auth checks.
+
+- **Integration tests:**
+  - src/tests/test_admin_api.py — tests for admin API endpoints `/admin/alerts/process` and `/admin/audit/recent`.
+
+- **E2E (planned):**
+  - Simulated e2e test for full alert → entry → partial fill → TP placement to verify price-discovery behavior (not yet implemented in this branch; listed as a near-term task).
+
+All new unit and integration tests pass locally.
+
 
 ### Source Code (repository root)
 <!--
@@ -80,6 +95,7 @@ tests/
 └── unit/
 
 # [REMOVE IF UNUSED] Option 2: Web application (when "frontend" + "backend" detected)
+## Testing Plan (Phase 2)
 backend/
 ├── src/
 │   ├── models/

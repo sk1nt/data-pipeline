@@ -1007,9 +1007,13 @@ class TradeBot(commands.Bot):
 
         if not AuthService.verify_user_for_automated_trades(str(message.author.id)):
             print(f"User {message.author.id} not authorized for automated trades")
-            await message.channel.send(
-                "You are not authorized to send automated trade alerts."
-            )
+            try:
+                await message.channel.send(
+                    "You are not authorized to send automated trade alerts."
+                )
+            except Exception as send_exc:
+                # Likely missing permissions; fallback to DM attempt or quiet log
+                print(f"Failed to send unauthorized message: {send_exc}")
             return
 
         # Import here to avoid circular imports
@@ -1024,12 +1028,18 @@ class TradeBot(commands.Bot):
         except TastytradeAuthError as exc:
             msg = str(exc)
             print(msg)
-            await message.channel.send(msg)
+            try:
+                await message.channel.send(msg)
+            except Exception as send_exc:
+                print(f"Failed to send auth error message to channel: {send_exc}")
             return
 
         if not result:
             print("Alert processing returned None")
-            await message.channel.send("Alert processing failed or no action taken.")
+            try:
+                await message.channel.send("Alert processing failed or no action taken.")
+            except Exception as send_exc:
+                print(f"Failed to send failure notification in channel: {send_exc}")
             return
 
         print(f"Alert processed successfully: {result}")
@@ -1043,7 +1053,10 @@ class TradeBot(commands.Bot):
             )
         else:
             msg = f"Automated order placed: {result}"
-        await message.channel.send(msg)
+        try:
+            await message.channel.send(msg)
+        except Exception as send_exc:
+            print(f"Failed to send success message to channel: {send_exc}")
 
     async def get_context(self, origin, *, cls=commands.Context):
         ctx = await super().get_context(origin, cls=cls)

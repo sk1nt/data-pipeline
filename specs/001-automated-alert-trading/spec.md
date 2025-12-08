@@ -18,6 +18,10 @@ As a trader authorized for automated alerts, I want the system to parse an incom
 - Computes quantity based on configured allocation and account balances,
 - Places an entry limit order (or simulates in dry-run mode),
 - Places an exit limit order for 50% of filled quantity at 100% profit when a fill is confirmed,
+#### Price Discovery
+
+- Start the order at the current mid-market price if lower than the alert price, otherwise start at the alert price. If the order does not fill within 20 seconds, the system should increment the price by one instrument tick (determined from instrument metadata) and retry. Repeat up to 3 incremental retries over a 90 second period. If the required increment to reach the market is less than or equal to one tick, the system may convert to a market order. This behavior applies to both equities and futures, using the instrument's tick size for increments.
+
 - Records an audit entry and returns a channel confirmation containing the order IDs and entry/exit prices.
 
 **Acceptance Scenarios**:
@@ -69,10 +73,14 @@ As an ops or dev engineer, I need clear logs and safe retry/fallback logic when 
 - **FR-001**: The system MUST parse multiple alert message formats and extract necessary fields: action (BTO/STC), symbol, leg type (put/call), strike, expiry, quantity (optional), and price (optional).
 - **FR-002**: Only a configurable allowlist of specific user IDs and channel IDs must be able to trigger automated trading; the system should reject/ignore others.
 - **FR-003**: The system MUST compute a trade quantity using allocation rules (configurable allocation percentage), buying power checks, and a per-trade maximum.
+ - **FR-003**: The system MUST compute a trade quantity using allocation rules (configurable allocation percentage), buying power checks, and a per-trade maximum. Allocation percentage is a percentage of the account's available buying power at session login (initial BP) rather than dynamically computed on each order.
 - **FR-004**: The system MUST place a limit entry order using either alert-provided price or mid-market price if no price is given; when in dry-run mode, simulate order without placing.
+ - **FR-004**: The system MUST place a limit entry order using either alert-provided price or mid-market price if no price is given; when in dry-run mode, simulate order without placing. The system MUST implement price discovery using instrument tick-size increments and a conversion to market order when the final required increment is within one tick.
 - **FR-005**: When an entry order is filled, the system MUST place a limit exit that sells 50% of the filled quantity at 100% profit based on the actual execution price where possible.
 - **FR-006**: The system MUST write an audit record for each automated operation containing the following fields: timestamp, user_id, channel_id, parsed_alert, computed_quantity, entry_order_id, entry_price, fills (if present), exit_order_id (if placed), and error details (if any).
 - **FR-007**: The system MUST include configurable retry/backoff policy for transient errors and a cancellation policy for stale or unsuccessful retries.
+ - **FR-007**: The system MUST include configurable retry/backoff policy for transient errors and a cancellation policy for stale or unsuccessful retries.
+ - **FR-009**: The system MUST implement price discovery rules: start at mid/alert price, wait 20s, then up to 3 increments of 1 tick across a 90s window; convert to market when remaining increment ≤ 1 tick.
 - **FR-008**: The system MUST support a dry-run mode that parses alerts, computes quantity, and returns intended orders without placing them.
 
 ### Non-Functional Requirements
@@ -122,6 +130,10 @@ As an ops or dev engineer, I need clear logs and safe retry/fallback logic when 
 - **Q2**: Exit sizing on partial fills — Resolved to A: exit sizing uses 50% of the actual filled quantity (rounded down to integer contracts), with a configurable minimum-exit size.
 
 - **Q3**: Price source for entry orders if alert price is absent — Resolved to A: use mid-market price (bid+ask)/2 as the primary fallback for entry orders.
+
+- **Q4**: Allocation percentage base — Resolved to A: allocate against the account's available buying power at session login (initial BP). This is a static reference point used for successive allocation calculations.
+
+- **Q5**: Price discovery conversion rule — Resolved to A: Convert to market if the required increment to reach the market price is ≤ 1 tick based on the instrument's tick size (price discovery uses 1 tick increments, up to 3 retries over 90s; initial wait 20s).
 
 All clarifications have been applied to the spec above.
 

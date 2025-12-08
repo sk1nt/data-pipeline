@@ -43,6 +43,27 @@ class AccountSummary:
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def round_to_tick(price: float, tick: float, direction: str) -> float:
+    """Round price to tick increments in given direction ('up'|'down'|'')"""
+    import math
+
+    if tick <= 0:
+        return price
+    try:
+        if math.isnan(price):
+            return price
+    except Exception:
+        pass
+    n = price / tick
+    if direction == "down":
+        n2 = math.floor(n - 1e-9)
+    elif direction == "up":
+        n2 = math.ceil(n + 1e-9)
+    else:
+        n2 = round(n)
+    return n2 * tick
 AUTH_ERROR_TEXT = (
     "TastyTrade authentication failed (refresh token invalid or revoked). "
     "Use `set_refresh_token(...)` or run `python scripts/get_tastytrade_refresh_token.py --sandbox` "
@@ -856,17 +877,9 @@ class TastyTradeClient:
             # Round TP price to the instrument's tick size and ensure it is on the correct side
             import math
 
+            # Use module-level function for tick rounding
             def _round_to_tick(price: float, tick: float, direction: str) -> float:
-                if tick <= 0 or math.isnan(price):
-                    return price
-                n = price / tick
-                if direction == "down":
-                    n2 = math.floor(n - 1e-9)
-                elif direction == "up":
-                    n2 = math.ceil(n + 1e-9)
-                else:
-                    n2 = round(n)
-                return n2 * tick
+                return round_to_tick(price, tick, direction)
 
             tp_price = _round_to_tick(tp_price, tick_size, round_dir)
             # Safety nudge: Ensure TP is strictly profitable

@@ -91,6 +91,8 @@ ENV/
 env.bak/
 venv.bak/
 .tokens
+.env.back
+.env.*
 
 # Spyder project settings
 .spyderproject

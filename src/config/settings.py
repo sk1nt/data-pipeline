@@ -18,6 +18,7 @@ class TastyTradeConfig(BaseSettings):
     # Tastytrade settings
     tastytrade_client_secret: str = Field(alias="TASTYTRADE_CLIENT_SECRET")
     tastytrade_refresh_token: str = Field(alias="TASTYTRADE_REFRESH_TOKEN")
+    # tastytrade_account: Optional[str] = Field(None, alias="TASTYTRADE_ACCOUNT")
     tastytrade_use_sandbox: bool = Field(True, alias="TASTYTRADE_USE_SANDBOX")
     tastytrade_prod_client_secret: Optional[str] = Field(
         None, alias="TASTYTRADE_PROD_CLIENT_SECRET"
@@ -32,6 +33,9 @@ class TastyTradeConfig(BaseSettings):
 
     # Application settings
     log_level: str = Field("INFO", alias="LOG_LEVEL")
+    # Allowlist for automated alert trading (comma-separated user/channel ids)
+    allowed_users: Optional[str] = Field(None, alias="ALLOWED_USERS")
+    allowed_channels: Optional[str] = Field(None, alias="ALLOWED_CHANNELS")
 
     @field_validator("tastytrade_use_sandbox", mode="before")
     @classmethod
@@ -66,6 +70,30 @@ class TastyTradeConfig(BaseSettings):
             if not self.tastytrade_use_sandbox
             else self.tastytrade_client_secret
         )
+
+    @property
+    def allowed_user_list(self) -> list[str]:
+        if not self.allowed_users:
+            # Fallback to legacy env variables used by discord-bot
+            fallback = os.getenv("ALERT_USERS") or os.getenv("DISCORD_ML_TRADE_USER_ID")
+            if fallback:
+                return [u.strip() for u in fallback.split(",") if u.strip()]
+            return []
+        return [u.strip() for u in self.allowed_users.split(",") if u.strip()]
+
+    @property
+    def allowed_channel_list(self) -> list[str]:
+        if not self.allowed_channels:
+            # Fallback to legacy env variables used by discord-bot
+            fallback = (
+                os.getenv("DISCORD_ALLOWED_CHANNEL_IDS")
+                or os.getenv("DISCORD_AUTOMATED_TRADE_IDS")
+                or os.getenv("DISCORD_GEX_FEED_CHANNEL_IDS")
+            )
+            if fallback:
+                return [c.strip() for c in fallback.split(",") if c.strip()]
+            return []
+        return [c.strip() for c in self.allowed_channels.split(",") if c.strip()]
 
     @property
     def effective_tastytrade_refresh_token(self) -> str:

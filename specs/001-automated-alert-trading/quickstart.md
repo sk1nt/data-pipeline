@@ -18,6 +18,14 @@ Steps
    ```
 5. Check recent audits via admin API or Redis `lrange audit:automated_alerts 0 50` to confirm the event was logged.
 
+Environment toggles & how to run safe vs live
+- `TASTYTRADE_DRY_RUN=true` and `TASTYTRADE_USE_SANDBOX=true` — safe testing mode, no live orders placed and sandbox account used when possible.
+- `TASTYTRADE_DRY_RUN=false` and `TASTYTRADE_USE_SANDBOX=false` — live mode; verify `!tt auth status` and rotate refresh tokens as needed.
+
+Testing notes
+- Use the admin API to validate the full alert flow without sending Discord messages when testing.
+- Local E2E test harness: `pytest tests/e2e/test_alert_e2e_flow.py -q` verifies alert processing and audit logging with simulated broker responses.
+
 Notes
 - To go live, set `TASTYTRADE_DRY_RUN=false`, ensure a valid refresh token, and test with restricted allowlist users and channels.
 - For production safety, rotate the TastyTrade refresh token and verify `!tt auth status` before toggling live mode.

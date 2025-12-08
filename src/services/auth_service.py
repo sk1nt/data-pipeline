@@ -1,6 +1,7 @@
 from typing import List, Optional
 
 from lib.redis_client import get_redis_client
+from src.config.settings import config
 
 # Import via absolute path so it works when `services` is used as a top-level package
 from models.trader import Trader
@@ -28,6 +29,15 @@ class AuthService:
     @staticmethod
     def verify_user_for_automated_trades(discord_id: str) -> bool:
         """Check if user can trigger automated trades from alerts."""
+        try:
+            rc = get_redis_client().client
+            if rc.sismember(AuthService._users_redis_key(), str(discord_id)):
+                return True
+        except Exception:
+            pass
+        cfg_users = getattr(config, "allowed_user_list", None)
+        if cfg_users:
+            return discord_id in cfg_users
         return discord_id in AuthService.AUTOMATED_TRADE_USERS
 
     @staticmethod
@@ -115,6 +125,10 @@ class AuthService:
                 return True
         except Exception:
             pass
+        # Also consult config if set
+        cfg_users = getattr(config, "allowed_user_list", None)
+        if cfg_users:
+            return discord_id in cfg_users
         return discord_id in AuthService.ALERT_USERS
 
     @staticmethod
@@ -125,6 +139,9 @@ class AuthService:
                 return True
         except Exception:
             pass
+        cfg_channels = getattr(config, "allowed_channel_list", None)
+        if cfg_channels:
+            return str(channel_id) in cfg_channels
         return str(channel_id) in AuthService.ALERT_CHANNELS
 
     @staticmethod

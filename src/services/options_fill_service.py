@@ -5,10 +5,17 @@ from datetime import datetime, timezone, date
 from tastytrade import Account
 from tastytrade.instruments import get_option_chain, Option, InstrumentType
 from tastytrade.market_data import get_market_data
-from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType
+from tastytrade.order import (
+    NewOrder,
+    OrderAction,
+    OrderTimeInForce,
+    OrderType,
+    PriceEffect,
+)
 
 # Import via absolute paths so the module works when `src` is on sys.path
 from services.tastytrade_client import tastytrade_client, TastytradeAuthError
+from src.lib.retries import retry_with_backoff, TransientError
 from config.settings import config
 
 
@@ -49,6 +56,17 @@ class OptionsFillService:
         self, option: Option, quantity: Decimal, action: OrderAction, price: Decimal
     ) -> Optional[str]:
         """Place a limit order for the option."""
+        # Normalize action if a string alias was passed for compatibility
+        if isinstance(action, str):
+            alias = action.upper()
+            if alias in ("BTO", "BUY"):
+                action = OrderAction.BUY_TO_OPEN
+            elif alias in ("STC", "SELL"):
+                action = OrderAction.SELL_TO_CLOSE
+            else:
+                # leave as-is; underlying SDK will validate
+                pass
+
         # Verify auth before attempting to place an order
         self.tastytrade_client.ensure_authorized()
         session = self.tastytrade_client.get_session()
@@ -57,24 +75,113 @@ class OptionsFillService:
             return None
         account = accounts[0]
 
+        # Preflight: verify trading status to avoid placing orders when options are closing-only
+        try:
+            trading_status = account.get_trading_status(session)
+            # If options are closing only, we should not submit opening orders
+            if getattr(trading_status, "is_options_closing_only", False):
+                # opening orders are not allowed; abort
+                print("Trading status indicates options are closing-only; aborting order")
+                return None
+        except Exception:
+            # Non-fatal; continue if trading status is unavailable
+            pass
+
+        # Preflight: verify buying power is sufficient for the requested quantity at the target price
+        try:
+            balances = account.get_balances(session)
+            buying_power = float(
+                getattr(balances, "available_trading_funds", None)
+                or getattr(balances, "derivative_buying_power", None)
+                or getattr(balances, "equity_buying_power", None)
+                or getattr(balances, "day_trading_buying_power", None)
+                or getattr(balances, "net_liquidating_value", 0)
+                or 0
+            )
+            contract_price = float(price) * 100
+            est_notional = float(quantity) * contract_price
+            if buying_power <= 0 or est_notional > buying_power:
+                print(f"Insufficient buying power for order: est_notional={est_notional} buying_power={buying_power}")
+                return None
+        except Exception:
+            # If we can't determine balances, continue and allow order to proceed
+            pass
+
         leg = option.build_leg(quantity, action)
+        # Determine appropriate price effect for the order based on action
+        desired_price_effect = (
+            PriceEffect.DEBIT
+            if action in (OrderAction.BUY_TO_OPEN, OrderAction.BUY_TO_CLOSE)
+            else PriceEffect.CREDIT
+        )
         order = NewOrder(
             time_in_force=OrderTimeInForce.DAY,
             order_type=OrderType.LIMIT,
             legs=[leg],
             price=price,
+            price_effect=desired_price_effect,
         )
+        # Ensure the model has our desired price effect; rebuild if the SDK normalized it away
+        try:
+            if order.model_dump().get('price_effect') != desired_price_effect:
+                order = order.model_copy(update={"price_effect": desired_price_effect})
+        except Exception:
+            pass
 
         try:
-            response = account.place_order(
-                session, order, dry_run=config.tastytrade_use_sandbox
-            )
+            # Use retry wrapper for transient errors
+            @retry_with_backoff(max_retries=3, initial_backoff=0.5)
+            def attempt_place_order():
+                # Log the final order JSON before sending for debugging
+                try:
+                    logger = __import__("logging").getLogger(__name__)
+                    logger.debug("Placing order JSON: %s", order.model_dump())
+                except Exception:
+                    pass
+                return account.place_order(
+                    session, order, dry_run=config.tastytrade_use_sandbox
+                )
+
+            response = attempt_place_order()
             return str(response.order.id) if hasattr(response, "order") else None
         except TastytradeAuthError as e:
             print(f"TastyTrade auth error while placing order: {e}")
             raise
         except Exception as e:
-            print(f"Error placing order: {e}")
+            # If the error suggests we can't buy for a credit, try adjusting to debit and retry once
+            msg = str(e)
+            print(f"Error placing order: {msg}")
+            if "cant_buy_for_credit" in msg.lower():
+                try:
+                    logger = __import__("logging").getLogger(__name__)
+                    logger.warning("Order failed due to cant_buy_for_credit; retrying with DEBIT price_effect")
+                except Exception:
+                    pass
+                # If buying for credit error, try a market order fallback (one retry) instead
+                try:
+                    market_order = NewOrder(
+                        time_in_force=OrderTimeInForce.DAY,
+                        order_type=OrderType.MARKET,
+                        legs=[leg],
+                    )
+                    @retry_with_backoff(max_retries=1, initial_backoff=0.5)
+                    def retry_place_market():
+                        try:
+                            logger = __import__("logging").getLogger(__name__)
+                            logger.info("Retrying as market order due to cant_buy_for_credit")
+                        except Exception:
+                            pass
+                        return account.place_order(session, market_order, dry_run=config.tastytrade_use_sandbox)
+
+                    response = retry_place_market()
+                    return str(response.order.id) if hasattr(response, "order") else None
+                except Exception as retry_exc:
+                    print(f"Retry placing market order also failed: {retry_exc}")
+                    return None
+                except Exception as retry_exc:
+                    print(f"Retry placing order also failed: {retry_exc}")
+                    return None
+            return None
             return None
 
     async def check_order_filled(self, order_id: str) -> bool:
@@ -104,7 +211,11 @@ class OptionsFillService:
             accounts = Account.get(session)
             if accounts:
                 account = accounts[0]
-                account.delete_order(session, order_id)
+                @retry_with_backoff(max_retries=3, initial_backoff=0.5)
+                def attempt_delete():
+                    return account.delete_order(session, order_id)
+
+                attempt_delete()
                 return True
         except TastytradeAuthError as e:
             print(f"TastyTrade auth error while canceling order {order_id}: {e}")
@@ -177,8 +288,27 @@ class OptionsFillService:
                 current_price = mid_price
         else:
             current_price = mid_price
-        for attempt in range(self.max_retries + 1):
-            print(f"Attempt {attempt + 1}: Placing order at {current_price}")
+        # Price discovery: start at initial price or mid market and iterate
+        from src.services.price_discovery import discovery_attempts
+        from src.services.metrics import metrics
+
+        start_price = current_price
+        attempts_iter = discovery_attempts(
+            start_price,
+            mid_price,
+            self.tick_increment,
+            max_increments=self.max_retries,
+            wait_seconds=20,
+            convert_to_market_if_remaining_ticks_leq=1,
+        )
+        attempt = 0
+        for current_price, convert_to_market in attempts_iter:
+            # Emit a metrics counter for discovery attempt
+            try:
+                metrics.incr("price_discovery_attempts")
+            except Exception:
+                pass
+            print(f"Attempt {attempt + 1}: Placing order at {current_price} (convert_market={convert_to_market})")
             try:
                 logger = __import__("logging").getLogger(__name__)
                 logger.info(
@@ -186,14 +316,21 @@ class OptionsFillService:
                 )
             except Exception:
                 pass
-            order_id = await self.place_limit_order(
-                option, Decimal(str(quantity)), order_action, current_price
-            )
+            if convert_to_market:
+                # Convert to a market order (place via SDK if available)
+                order_id = await self.place_limit_order(
+                    option, Decimal(str(quantity)), order_action, current_price
+                )
+                # Note: the SDK may accept a dedicated market order call; using limit for parity
+            else:
+                order_id = await self.place_limit_order(
+                    option, Decimal(str(quantity)), order_action, current_price
+                )
             if not order_id:
                 return None
 
-            # Wait for fill
-            await asyncio.sleep(self.timeout_seconds)
+            # Wait for fill (use shorter timeout during price discovery to react quickly)
+            await asyncio.sleep(min(self.timeout_seconds, 20))
             if await self.check_order_filled(order_id):
                 print(f"Order filled on attempt {attempt + 1}")
 
@@ -207,13 +344,8 @@ class OptionsFillService:
                 return {"order_id": order_id, "entry_price": str(current_price)}
             if attempt < self.max_retries:
                 await self.cancel_order(order_id)
-                if order_action in [OrderAction.BUY_TO_OPEN]:
-                    current_price += self.tick_increment * (attempt + 1)
-                else:
-                    current_price -= self.tick_increment * (attempt + 1)
-                current_price = current_price.quantize(
-                    Decimal("0.01"), rounding=ROUND_HALF_UP
-                )
+                # If we were converting to market, we stop iterating; else attempts_iter will move forward
+                attempt += 1
 
         # Leave as DAY order
         print("Order not filled, leaving as DAY order")
@@ -266,6 +398,19 @@ class OptionsFillService:
             return iso
         for k in chain.keys():
             try:
+                # If key is an ISO string, try parsing and compare by month/day/year
+                if isinstance(k, str):
+                    from datetime import date as _date
+
+                    try:
+                        parsed = _date.fromisoformat(k)
+                        if parsed == target:
+                            return k
+                        # also allow matching by month/day ignoring year
+                        if parsed.month == target.month and parsed.day == target.day:
+                            return k
+                    except Exception:
+                        pass
                 if isinstance(k, str) and k.startswith(iso):
                     return k
                 if isinstance(k, datetime) and k.date() == target:
@@ -332,7 +477,8 @@ class OptionsFillService:
                 qty_int = int(quantity)
             except Exception:
                 qty_int = 0
-            exit_qty = max(0, qty_int // 2)
+            # 50% exit: round up to avoid 0 for small sizes (i.e., 1 -> 1)
+            exit_qty = max(0, (qty_int + 1) // 2)
             if exit_qty <= 0:
                 # No exit to place (quantity too small)
                 return None

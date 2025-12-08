@@ -95,3 +95,36 @@ async def test_process_alert_auth_failure(monkeypatch):
     message = "Alert: BTO UBER 78p 12/05 @ 0.75"
     with pytest.raises(TastytradeAuthError):
         await svc.process_alert(message, "1255265167113978008", "704125082750156840")
+
+
+@pytest.mark.asyncio
+async def test_process_alert_failure_audits(monkeypatch):
+    fake_redis = FakeRedis()
+    wrapper = FakeRedisWrapper(fake_redis)
+
+    # Make get_redis_client return our fake wrapper
+    monkeypatch.setattr(
+        "src.services.automated_options_service.get_redis_client",
+        lambda: wrapper,
+    )
+
+    # Fake fill service to return None (indicating failure)
+    async def fake_fill_options_order(*args, **kwargs):
+        return None
+
+    fake_fill_service = SimpleNamespace(fill_options_order=fake_fill_options_order)
+    svc = AutomatedOptionsService(tastytrade_client=FakeTastyClient())
+    svc.fill_service = fake_fill_service
+    message = "Alert: BTO UBER 78p 12/05 @ 0.75"
+    # Use allowed user ID and channel
+    user_id = "704125082750156840"
+    channel_id = "1255265167113978008"
+    result = await svc.process_alert(message, channel_id, user_id)
+    assert result is None
+    # Check failure audit entry was created
+    assert len(fake_redis.calls) >= 1
+    # We expect the last pushed payload to indicate failure
+    key, payload = fake_redis.calls[0]
+    assert key == "audit:automated_alerts"
+    payload_obj = json.loads(payload)
+    assert payload_obj.get("status") == "failed"

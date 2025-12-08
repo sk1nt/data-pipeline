@@ -73,9 +73,65 @@ class AutomatedOptionsService:
         except TastytradeAuthError as exc:
             msg = f"TastyTrade authentication invalid while placing order: {exc}. Please update your refresh token."
             print(msg)
+            # Audit auth failure
+            try:
+                redis_client = get_redis_client()
+                redis_conn = redis_client.client
+                audit_key = "audit:automated_alerts"
+                fail_payload = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "user_id": user_id,
+                    "channel_id": channel_id,
+                    "alert_message": message,
+                    "parsed_alert": alert_data,
+                    "status": "failed",
+                    "reason": "auth",
+                    "error": str(exc),
+                }
+                redis_conn.lpush(audit_key, json.dumps(fail_payload, default=str))
+            except Exception:
+                pass
             raise TastytradeAuthError(msg) from exc
+        except Exception as exc:
+            # Generic failure while placing order — audit and return
+            print(f"Unhandled error placing order: {exc}")
+            try:
+                redis_client = get_redis_client()
+                redis_conn = redis_client.client
+                audit_key = "audit:automated_alerts"
+                fail_payload = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "user_id": user_id,
+                    "channel_id": channel_id,
+                    "alert_message": message,
+                    "parsed_alert": alert_data,
+                    "status": "failed",
+                    "reason": "exception",
+                    "error": str(exc),
+                }
+                redis_conn.lpush(audit_key, json.dumps(fail_payload, default=str))
+            except Exception:
+                pass
+            return None
 
         if not result:
+            # Record a failure audit entry if order was not created
+            try:
+                redis_client = get_redis_client()
+                redis_conn = redis_client.client
+                audit_key = "audit:automated_alerts"
+                fail_payload = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "user_id": user_id,
+                    "channel_id": channel_id,
+                    "alert_message": message,
+                    "parsed_alert": alert_data,
+                    "status": "failed",
+                    "reason": "order_not_created_or_rejected",
+                }
+                redis_conn.lpush(audit_key, json.dumps(fail_payload, default=str))
+            except Exception:
+                pass
             return None
 
         # Always return structured info: order_id, quantity, entry_price
@@ -107,6 +163,24 @@ class AutomatedOptionsService:
         except Exception:
             # Non-fatal; we still return success, but log for the operator
             print("Failed to write audit log to Redis for automated alert")
+
+        # If order was not created (result is falsy), log a failure audit entry for troubleshooting
+        if not result:
+            try:
+                redis_client = get_redis_client()
+                redis_conn = redis_client.client
+                fail_payload = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "user_id": user_id,
+                    "channel_id": channel_id,
+                    "alert_message": message,
+                    "parsed_alert": alert_data,
+                    "status": "failed",
+                    "reason": "order_not_created_or_rejected",
+                }
+                redis_conn.lpush(audit_key, json.dumps(fail_payload, default=str))
+            except Exception:
+                pass
 
         return {
             "order_id": order_id,
