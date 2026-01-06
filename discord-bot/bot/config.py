@@ -73,13 +73,12 @@ def _parse_symbol_list(value: Optional[str]) -> Optional[Tuple[str, ...]]:
 
 
 def _parse_channel_map(raw: Optional[str]) -> Dict[str, Tuple[int, ...]]:
-    """Parse mapping like 'NQ_NDX:123|456,ES_SPX:789,SPX:111|222'."""
+    """Parse mapping like 'NQ_NDX:123,ES_SPX:789,SPX:111' or 'NQ_NDX:123|456,SPX:111|222'."""
     mapping: Dict[str, Tuple[int, ...]] = {}
     if not raw:
         return mapping
-    # Accept either ',' or '|' between pairs so envs like "NQ:1|ES:2" still parse
-    normalized = raw.replace("|", ",")
-    for token in normalized.split(","):
+    # Split by comma to get symbol:channel pairs
+    for token in raw.split(","):
         if ":" not in token:
             continue
         sym, ids_raw = token.split(":", 1)
@@ -87,6 +86,7 @@ def _parse_channel_map(raw: Optional[str]) -> Dict[str, Tuple[int, ...]]:
         if not sym:
             continue
         ids: List[int] = []
+        # Support both single channel (123) and multiple channels (123|456)
         for part in ids_raw.split("|"):
             part = part.strip()
             if not part:

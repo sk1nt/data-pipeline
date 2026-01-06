@@ -13,6 +13,12 @@ def test_compute_quantity_default_buying_power(monkeypatch):
     svc = AutomatedOptionsService(tastytrade_client=SimpleNamespace())
     # Minimal alert_data with price
     alert_data = {"symbol": "UBER", "price": 7.8, "action": "BUY", "option_type": "PUT", "strike": 78, "expiry": "2025-12-05"}
-    qty = svc._compute_quantity(alert_data, "1255265167113978008")
+    result = svc._compute_quantity(alert_data, "1255265167113978008")
+    # _compute_quantity now returns a tuple: (qty, buying_power, est_notional)
+    assert isinstance(result, tuple)
+    assert len(result) == 3
+    qty, buying_power, est_notional = result
     assert isinstance(qty, int)
     assert qty >= 1
+    assert buying_power >= 0
+    assert est_notional >= 0

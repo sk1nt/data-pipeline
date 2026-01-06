@@ -788,6 +788,11 @@ SUPPORTED_WEBHOOK_TOPICS = {
     "options-trade",
     "market-state",
 }
+TOPIC_ALIASES = {
+    # Alias used by Unusual Whales streaming payloads
+    "option_trades_super_algo": "options-trade",
+}
+TOPIC_SYMBOL_SEPARATORS = (":", "|")
 
 
 @asynccontextmanager
@@ -1097,25 +1102,44 @@ async def gex_history_endpoint(request: Request, background_tasks: BackgroundTas
     "/uw", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
 )
 async def universal_webhook(request: Request):
-    """Temporarily accept all webhook payloads for review before tightening validation."""
+    """Accept UW webhook payloads including websocket array format."""
     raw_body = await request.body()
 
-    payload: Dict[str, Any]
+    raw_payload: Any
     try:
-        payload = json.loads(raw_body) if raw_body else {}
+        raw_payload = json.loads(raw_body) if raw_body else {}
     except json.JSONDecodeError:
-        payload = {
+        raw_payload = {
             "__raw_text__": raw_body.decode("utf-8", errors="replace"),
         }
 
-    if not payload and request.method == "GET":
-        payload = dict(request.query_params.multi_items())
+    if not raw_payload and request.method == "GET":
+        raw_payload = dict(request.query_params.multi_items())
 
-    if not isinstance(payload, dict):
-        payload = {"__raw_payload__": payload}
+    # Check if this is a websocket array format message
+    # Format: [null,null,"message_type",\"topic\",{\"data\":{...}}]
+    if isinstance(raw_payload, list) and len(raw_payload) >= 5:
+        try:
+            from src.services.uw_message_service import UWMessageService
+            # Get the RedisClient wrapper, not the raw connection
+            redis_client_wrapper = service_manager.redis_client
+            if not redis_client_wrapper:
+                raise HTTPException(status_code=503, detail="Redis unavailable")
+            uw_service = UWMessageService(redis_client_wrapper)
+            result = uw_service.process_raw_message(raw_payload)
+            if result:
+                return result
+            else:
+                return {"status": "error", "reason": "failed_to_parse_uw_message"}
+        except Exception as e:
+            LOGGER.exception("Failed to process UW websocket message: %s", e)
+            return {"status": "error", "reason": str(e)}
+
+    # Legacy webhook format handling
+    payload = _coerce_webhook_payload(raw_payload)
 
     topic = _extract_webhook_topic(payload)
-    normalized_topic = topic.lower() if topic else None
+    normalized_topic, topic_symbol = _normalize_topic(topic)
 
     if not normalized_topic:
         LOGGER.info("/uw temporarily accepting payload without topic: %s", payload)
@@ -1127,12 +1151,21 @@ async def universal_webhook(request: Request):
 
     redis_client = _get_redis_client()
 
-    stamped_payload = {
+    stamped_payload: Dict[str, Any] = {
         "topic": normalized_topic,
         "received_at": datetime.now(timezone.utc).isoformat(),
         "data": payload,
         "method": request.method,
     }
+    if topic_symbol and isinstance(payload, dict):
+        payload.setdefault("symbol", topic_symbol)
+        payload.setdefault("ticker", topic_symbol)
+        nested = payload.get("data")
+        if isinstance(nested, dict):
+            nested.setdefault("symbol", topic_symbol)
+            nested.setdefault("ticker", topic_symbol)
+        stamped_payload["symbol"] = topic_symbol
+        stamped_payload["ticker"] = topic_symbol
 
     if normalized_topic in SUPPORTED_WEBHOOK_TOPICS:
         if normalized_topic == "options-trade":
@@ -1364,6 +1397,28 @@ def _normalize_string(value: Optional[Any]) -> str:
     return str(value).strip()
 
 
+def _coerce_webhook_payload(raw_payload: Any) -> Dict[str, Any]:
+    """Normalize webhook payloads into a dict so topics can be extracted."""
+    if isinstance(raw_payload, dict):
+        return raw_payload
+
+    if isinstance(raw_payload, list):
+        topic = raw_payload[2] if len(raw_payload) > 2 else None
+        event_type = raw_payload[3] if len(raw_payload) > 3 else None
+        data = raw_payload[4] if len(raw_payload) > 4 else None
+
+        coerced: Dict[str, Any] = {"__raw__": raw_payload}
+        if isinstance(topic, str) and topic.strip():
+            coerced["topic"] = topic.strip()
+        if isinstance(event_type, str) and event_type.strip():
+            coerced["event_type"] = event_type.strip()
+        if data is not None:
+            coerced["data"] = data if isinstance(data, dict) else {"value": data}
+        return coerced
+
+    return {"__raw_payload__": raw_payload}
+
+
 def _extract_webhook_topic(payload: Dict[str, Any]) -> Optional[str]:
     """Pull the topic/object indicator out of a webhook payload."""
     candidate_fields = ("topic", "object", "type", "feed", "kind")
@@ -1379,6 +1434,24 @@ def _extract_webhook_topic(payload: Dict[str, Any]) -> Optional[str]:
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return None
+
+
+def _normalize_topic(topic: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Lowercase and map known aliases to canonical webhook topics plus optional symbol."""
+    if not topic:
+        return None, None
+    normalized = topic.strip().lower()
+
+    symbol: Optional[str] = None
+    for sep in TOPIC_SYMBOL_SEPARATORS:
+        if sep in normalized:
+            parts = normalized.split(sep, 1)
+            normalized = parts[0].strip()
+            symbol = (parts[1] or "").strip().upper() or None
+            break
+
+    canonical = TOPIC_ALIASES.get(normalized, normalized)
+    return canonical, symbol
 
 
 def _get_redis_client():
@@ -1478,6 +1551,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-level", default="info")
     parser.add_argument("--log-dir", default="logs")
     parser.add_argument("--timeout-keep-alive", type=int, default=30)
+    parser.add_argument("--ssl-certfile", help="Path to SSL certificate file")
+    parser.add_argument("--ssl-keyfile", help="Path to SSL private key file")
     return parser.parse_args()
 
 
@@ -1553,13 +1628,25 @@ def main() -> None:
         log_level=getattr(logging, args.log_level.upper(), logging.INFO),
         log_dir=args.log_dir,
     )
-    uvicorn.run(
-        app,
-        host=args.host,
-        port=args.port,
-        log_level=args.log_level.lower(),
-        timeout_keep_alive=args.timeout_keep_alive,
-    )
+    
+    # Build uvicorn config
+    uvicorn_config = {
+        "app": app,
+        "host": args.host,
+        "port": args.port,
+        "log_level": args.log_level.lower(),
+        "timeout_keep_alive": args.timeout_keep_alive,
+    }
+    
+    # Add SSL support if certificates provided
+    if args.ssl_certfile and args.ssl_keyfile:
+        uvicorn_config["ssl_certfile"] = args.ssl_certfile
+        uvicorn_config["ssl_keyfile"] = args.ssl_keyfile
+        LOGGER.info(
+            "SSL enabled: cert=%s, key=%s", args.ssl_certfile, args.ssl_keyfile
+        )
+    
+    uvicorn.run(**uvicorn_config)
 
 
 if __name__ == "__main__":

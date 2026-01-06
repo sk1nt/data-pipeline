@@ -1,85 +1,97 @@
-# Implementation Plan: Automated Alert Trading (Discord → Tastytrade)
+# Implementation Plan: Automated Alert Trading
 
-**Branch**: `001-automated-alert-trading` | **Date**: 2025-12-08 | **Spec**: `specs/001-automated-alert-trading/spec.md`
+**Branch**: `001-automated-alert-trading` | **Date**: 2025-12-12 | **Spec**: [spec.md](./spec.md)
 **Input**: Feature specification from `/specs/001-automated-alert-trading/spec.md`
 
-**Note**: Generated via speckit and updated to reflect current work.
+**Note**: This template is filled in by the `/speckit.plan` command. See `.specify/templates/commands/plan.md` for the execution workflow.
 
 ## Summary
 
-Automate Discord alert-driven option entries with price discovery, immediate 50% profit-take exits, and full auditability. Parse allowlisted alerts, compute quantity using allocation + buying power, submit entry (or dry-run), retry with 1-tick bumps up to 3 times before converting to market, then submit 50% exit on fills. All actions are audited and protected by allowlist/admin key; retries and notifications handle broker errors.
+Automated trading system that parses alert messages from authorized Discord users/channels, places limit entry orders via TastyTrade API with price discovery (start at alert/mid price, retry with 1-tick increments up to 3 times over 90s, convert to market if gap ≤1 tick), and automatically creates limit exit orders for 50% of filled quantity at 100% profit. All actions are audited and support dry-run mode.
 
 ## Technical Context
 
-**Language/Version**: Python 3.11
-**Primary Dependencies**: discord.py (discord-bot), tastytrade Python SDK, redis, httpx
-**Storage**: Redis for hot audit store; DuckDB/Parquet for longer-term persistence
-**Testing**: pytest for unit/integration tests; pytest-asyncio for async code
-**Target Platform**: Linux server (Docker or local deployment)
-**Project Type**: single service + bot  
-**Performance Goals**: alert-to-ack ≤10s (NFR-001)  
-**Constraints**: non-blocking alert handling; dry-run must avoid live orders; Redis unavailability must not crash flow  
-**Scale/Scope**: small team bot + API; single broker integration (Tastytrade)
+**Language/Version**: Python 3.11  
+**Primary Dependencies**: discord.py, redis, FastAPI, Pydantic, TastyTrade SDK, httpx  
+**Storage**: Redis (audit queue, state), DuckDB (persistent audit log)  
+**Testing**: pytest with pytest-asyncio for Discord bot tests  
+**Target Platform**: Linux server (existing data-pipeline deployment)  
+**Project Type**: Single project with Discord bot integration  
+**Performance Goals**: Process alerts within 10s, place exit orders within 5s of fill  
+**Constraints**: <10s alert-to-order latency, reliable audit logging with retry  
+**Scale/Scope**: ~10-50 authorized users, ~100 alerts/day peak
 
 ## Constitution Check
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-- Code Quality: Repo already uses `ruff`; we add unit+integration tests for the feature.
-- Accuracy: `AlertParser`, `AutomatedOptionsService`, and `tastytrade_client` enforce validation.
-- Consistency: Uses existing patterns in `src/services` and `discord-bot`; no new frameworks.
-- Testing: Unit tests for parser, price discovery, retries, and admin API; e2e harness added.
-- Performance: Flow is non-blocking; price discovery bounded to ~90s window.
+- ✅ **Code Quality**: Existing project uses Ruff linter/formatter; code reviews via PR workflow
+- ✅ **Accuracy**: Pydantic models for validation, audit logging for all trades, dry-run mode for testing
+- ✅ **Consistency**: Follows existing patterns in discord-bot/ and src/services/
+- ✅ **Testing**: pytest infrastructure exists; will add contract/integration/unit tests per TDD
+- ✅ **Performance**: Alert processing <10s target aligns with existing GEX feed (<1s) patterns
 
-**Constitution Check - PASS**
+**Status**: ✅ PASS - No violations detected
 
-## Tests Added (current branch)
+## Project Structure
 
-- **Unit tests:**
-  - discord-bot/tests/test_round_to_tick.py — tick rounding helper
-  - discord-bot/tests/test_quantity_allocation.py — allocation sizing
-  - discord-bot/tests/test_automated_options_service.py — placement flow & preflight auth
-  - tests/unit/test_price_discovery.py — tick math & conversion-to-market
-  - tests/unit/test_retries.py, tests/unit/test_tastytrade_client_retries.py — retry/backoff
+### Documentation (this feature)
 
-- **Integration tests:**
-  - src/tests/test_admin_api.py — `/admin/alerts/process`, `/admin/audit/recent`
-
-- **E2E:**
-  - tests/e2e/test_alert_e2e_flow.py — alert → entry → partial fill → exit (simulated broker)
-
-Current gaps: create_entry_order polish (T008) and live-like buying-power regression coverage.
-Default account: using `TASTYTRADE_ACCOUNT=5WT31673`; keep env/whitelist consistent across bot + services.
+```text
+specs/[###-feature]/
+├── plan.md              # This file (/speckit.plan command output)
+├── research.md          # Phase 0 output (/speckit.plan command)
+├── data-model.md        # Phase 1 output (/speckit.plan command)
+├── quickstart.md        # Phase 1 output (/speckit.plan command)
+├── contracts/           # Phase 1 output (/speckit.plan command)
+└── tasks.md             # Phase 2 output (/speckit.tasks command - NOT created by /speckit.plan)
+```
 
 ### Source Code (repository root)
 
 ```text
-src/
-├── services/
-│   ├── automated_options_service.py   # entry/exit orchestration, BP checks, dry-run
-│   ├── price_discovery.py             # tick math + retry cadence
-│   ├── notifications.py               # operator notifications
-│   ├── metrics.py                     # counters for price discovery, order attempts, audit writes
-│   ├── audit.py                       # audit persistence
-│   └── tastytrade_client.py           # broker client with retries/auth guard
-├── config/settings.py                 # allowlist + broker env toggles
-└── api/routes/admin.py                # admin alert processing + audit fetch
-
 discord-bot/
-├── bot/alert_parser.py                # alert parsing/validation
-├── bot/trade_bot.py                   # Discord command wiring + allowlist enforcement
-└── bot/tastytrade_client.py           # bot-side wrapper using service client
+├── bot/
+│   ├── trade_bot.py              # Existing - add alert listener
+│   ├── config.py                 # Existing - add alert config
+│   └── tastytrade_client.py      # Existing - use for orders
+├── utils/
+│   └── alert_parser.py           # NEW - parse alert formats
+└── tests/
+    ├── test_alert_parser.py      # NEW - parser tests
+    ├── test_automated_options_service.py  # Existing - extend
+    └── test_notifications.py     # Existing - extend
+
+src/
+├── models/
+│   └── alert_message.py          # NEW - Pydantic models
+├── services/
+│   ├── automated_options_service.py  # NEW - core orchestration
+│   ├── auth_service.py           # Existing - allowlist management
+│   └── audit_service.py          # NEW - audit persistence
+└── lib/
+    └── redis_client.py           # Existing - use for queue
+
+backend/src/
+└── api/
+    └── alerts_endpoint.py        # NEW - optional API for allowlist mgmt
 
 tests/
-├── e2e/test_alert_e2e_flow.py
-├── unit/ (price discovery, retries, tastytrade client)
-└── fixtures/discord_alerts.py
-
-specs/001-automated-alert-trading/    # spec/plan/tasks/quickstart/contracts
+├── contract/
+│   └── test_alert_api.py         # NEW - API contract tests
+├── integration/
+│   └── test_alert_to_order_flow.py  # NEW - end-to-end
+└── unit/
+    └── test_alert_parsing.py     # NEW - unit tests
 ```
 
-Project layout reuses existing bot + services patterns and centralizes orchestration in `automated_options_service.py`.
+**Structure Decision**: Extends existing single-project structure with Discord bot integration. Alert parsing and service logic goes in `src/services/`, Discord bot listener in `discord-bot/bot/`, audit persistence uses existing Redis/DuckDB patterns.
 
 ## Complexity Tracking
 
-No violations noted.
+> **Fill ONLY if Constitution Check has violations that must be justified**
+
+| Violation | Why Needed | Simpler Alternative Rejected Because |
+|-----------|------------|-------------------------------------|
+| [e.g., 4th project] | [current need] | [why 3 projects insufficient] |
+| [e.g., Repository pattern] | [specific problem] | [why direct DB access insufficient] |

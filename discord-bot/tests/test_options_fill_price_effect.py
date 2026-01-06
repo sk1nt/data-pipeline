@@ -57,6 +57,7 @@ def test_place_limit_order_sets_debit_for_buy(monkeypatch):
 
 
 def test_retry_on_cant_buy_for_credit_and_set_debit(monkeypatch):
+    """Test that cant_buy_for_credit error is raised (no retry with MARKET for options)."""
     class StubClient:
         def ensure_authorized(self):
             return True
@@ -83,22 +84,14 @@ def test_retry_on_cant_buy_for_credit_and_set_debit(monkeypatch):
         def place_order(self, session, order, dry_run=False):
             calls["n"] += 1
             captured_orders.append(order)
-            if calls["n"] == 1:
-                raise Exception("cant_buy_for_credit: You cannot buy for a credit.")
-            return FakeOrder(456)
+            raise Exception("cant_buy_for_credit: You cannot buy for a credit.")
 
     monkeypatch.setattr('services.options_fill_service.Account.get', lambda session: [FakeAccount()])
-    class StubClient:
-        def ensure_authorized(self):
-            return True
-        def get_session(self):
-            return object()
 
     # No module monkeypatch needed - client passed directly
     import asyncio
-    res = asyncio.get_event_loop().run_until_complete(
-        svc.place_limit_order(FakeOption(), Decimal('1'), OrderAction.BUY_TO_OPEN, Decimal('1.0'))
-    )
-    assert res == '456'
-    # First attempt fails with cant_buy_for_credit; fallback should send a MARKET order
-    assert captured_orders[-1].model_dump().get('order_type') == OrderType.MARKET
+    # Options don't support MARKET orders on TastyTrade, so the exception should propagate
+    with pytest.raises(Exception, match="TastyTrade rejected order"):
+        asyncio.get_event_loop().run_until_complete(
+            svc.place_limit_order(FakeOption(), Decimal('1'), OrderAction.BUY_TO_OPEN, Decimal('1.0'))
+        )

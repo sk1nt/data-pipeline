@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-# Import via absolute paths so the module works when `src` is on sys.path
+# Import via absolute paths (src/ is assumed to be in sys.path)
 from services.alert_parser import AlertParser
 from services.options_fill_service import OptionsFillService, InsufficientBuyingPowerError
 from services.tastytrade_client import tastytrade_client, TastytradeAuthError
@@ -25,6 +25,135 @@ class AutomatedOptionsService:
         self.alert_parser = AlertParser()
         self.tastytrade_client = tastytrade_client
         self.fill_service = OptionsFillService(tastytrade_client=self.tastytrade_client)
+
+    async def create_entry_order(
+        self,
+        symbol: str,
+        strike: Decimal,
+        option_type: str,
+        expiry: str,
+        quantity: int,
+        action: str,
+        user_id: str,
+        channel_id: str,
+        initial_price: Optional[Decimal] = None,
+        dry_run: bool = False,
+    ) -> Optional[dict]:
+        """Create entry order with price discovery and optional dry-run mode.
+        
+        Args:
+            symbol: Underlying symbol (e.g., 'UBER', 'SPX')
+            strike: Option strike price
+            option_type: 'CALL' or 'PUT'
+            expiry: Expiration date (YYYY-MM-DD or contract format)
+            quantity: Number of contracts
+            action: 'BTO', 'BUY', 'STO', 'SELL'
+            user_id: Discord user ID for audit
+            channel_id: Discord channel ID for audit
+            initial_price: Starting price for limit order (falls back to mid-market)
+            dry_run: If True, simulates order without placing (default: False)
+            
+        Returns:
+            Dict with status, order_id, quantity, entry_price, dry_run flag; or error dict
+        """
+        # Verify authorization before order placement
+        try:
+            await self.tastytrade_client.ensure_authorized()
+        except TastytradeAuthError as exc:
+            msg = f"TastyTrade authentication invalid: {exc}. Please update the refresh token."
+            logger.error(msg)
+            return {
+                "status": "error",
+                "reason": "authentication_failed",
+                "error": msg,
+            }
+
+        # Place order using fill service with price discovery
+        try:
+            result = await self.fill_service.fill_options_order(
+                symbol=symbol,
+                strike=float(strike),  # fill_options_order expects float
+                option_type=option_type,
+                expiry=expiry,
+                quantity=quantity,
+                action=action,
+                user_id=user_id,
+                channel_id=channel_id,
+                initial_price=initial_price,
+            )
+        except InsufficientBuyingPowerError as exc:
+            logger.error("Insufficient buying power: %s", exc)
+            await notify_operator(str(exc))
+            return {
+                "status": "error",
+                "reason": "insufficient_buying_power",
+                "error": str(exc),
+            }
+        except TastytradeAuthError as exc:
+            logger.error("TastyTrade auth error during order creation: %s", exc)
+            return {
+                "status": "error",
+                "reason": "authentication_failed",
+                "error": str(exc),
+            }
+        except Exception as exc:
+            logger.exception("Failed to create entry order: %s", exc)
+            return {
+                "status": "error",
+                "reason": "order_creation_failed",
+                "error": str(exc),
+            }
+
+        if not result:
+            return {
+                "status": "error",
+                "reason": "fill_service_returned_none",
+                "error": "Fill service did not return a result",
+            }
+
+        # Extract order details from result (fill_options_order returns {"order_id": ..., "entry_price": ...})
+        order_id = result.get("order_id")
+        entry_price_str = result.get("entry_price")
+        entry_price = Decimal(entry_price_str) if entry_price_str else None
+
+        # Audit successful entry order
+        try:
+            redis_client = get_redis_client()
+            redis_conn = redis_client.client
+            audit_key = "audit:automated_alerts" if not dry_run else "audit:automated_alerts_dryrun"
+            payload = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "user_id": user_id,
+                "channel_id": channel_id,
+                "symbol": symbol,
+                "strike": float(strike),
+                "option_type": option_type,
+                "expiry": expiry,
+                "action": action,
+                "quantity": quantity,
+                "entry_price": float(entry_price) if entry_price else None,
+                "order_id": order_id,
+                "dry_run": dry_run,
+                "status": "entry_created",
+            }
+            redis_conn.lpush(audit_key, json.dumps(payload, default=str))
+            logger.info(
+                "Entry order %s: order_id=%s qty=%s entry_price=%s",
+                "simulated" if dry_run else "placed",
+                order_id,
+                quantity,
+                entry_price,
+            )
+        except Exception as audit_exc:
+            logger.warning("Failed to audit entry order: %s", audit_exc)
+
+        return {
+            "status": "success",
+            "order_id": order_id,
+            "quantity": quantity,
+            "entry_price": entry_price,
+            "dry_run": dry_run,
+        }
 
     async def process_alert(
         self, message: str, channel_id: str, user_id: str

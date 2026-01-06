@@ -171,40 +171,19 @@ class OptionsFillService:
             print(f"TastyTrade auth error while placing order: {e}")
             raise
         except Exception as e:
-            # If the error suggests we can't buy for a credit, try adjusting to debit and retry once
+            # If the error suggests we can't buy for a credit, it means price_effect is wrong
+            # Options cannot use MARKET orders - must always be LIMIT
             msg = str(e)
             print(f"Error placing order: {msg}")
-            if "cant_buy_for_credit" in msg.lower():
+            if "cant_buy_for_credit" in msg.lower() or "cannot buy" in msg.lower():
                 try:
                     logger = __import__("logging").getLogger(__name__)
-                    logger.warning("Order failed due to cant_buy_for_credit; retrying with DEBIT price_effect")
+                    logger.warning("Order failed; TastyTrade rejected price_effect. Not retrying to avoid duplicate rejections.")
                 except Exception:
                     pass
-                # If buying for credit error, try a market order fallback (one retry) instead
-                try:
-                    market_order = NewOrder(
-                        time_in_force=OrderTimeInForce.DAY,
-                        order_type=OrderType.MARKET,
-                        legs=[leg],
-                    )
-                    @retry_with_backoff(max_retries=1, initial_backoff=0.5)
-                    def retry_place_market():
-                        try:
-                            logger = __import__("logging").getLogger(__name__)
-                            logger.info("Retrying as market order due to cant_buy_for_credit")
-                        except Exception:
-                            pass
-                        return account.place_order(session, market_order, dry_run=config.tastytrade_use_sandbox)
-
-                    response = retry_place_market()
-                    return str(response.order.id) if hasattr(response, "order") else None
-                except Exception as retry_exc:
-                    print(f"Retry placing market order also failed: {retry_exc}")
-                    return None
-                except Exception as retry_exc:
-                    print(f"Retry placing order also failed: {retry_exc}")
-                    return None
-            return None
+                # Don't retry with market order - options don't support market orders on TastyTrade
+                # The price_effect logic above should have been correct, so this is a broker constraint
+                raise Exception(f"TastyTrade rejected order (price_effect issue): {msg}")
             return None
 
     async def check_order_filled(self, order_id: str) -> bool:
@@ -331,24 +310,18 @@ class OptionsFillService:
                 metrics.incr("price_discovery_attempts")
             except Exception:
                 pass
-            print(f"Attempt {attempt + 1}: Placing order at {current_price} (convert_market={convert_to_market})")
+            print(f"Attempt {attempt + 1}: Placing order at {current_price} (aggressive={convert_to_market})")
             try:
                 logger = __import__("logging").getLogger(__name__)
                 logger.info(
-                    "Attempt %s: placing order at %s", attempt + 1, current_price
+                    "Attempt %s: placing order at %s (aggressive=%s)", attempt + 1, current_price, convert_to_market
                 )
             except Exception:
                 pass
-            if convert_to_market:
-                # Convert to a market order (place via SDK if available)
-                order_id = await self.place_limit_order(
-                    option, Decimal(str(quantity)), order_action, current_price
-                )
-                # Note: the SDK may accept a dedicated market order call; using limit for parity
-            else:
-                order_id = await self.place_limit_order(
-                    option, Decimal(str(quantity)), order_action, current_price
-                )
+            # Note: TastyTrade does not support market orders for options, always use limit
+            order_id = await self.place_limit_order(
+                option, Decimal(str(quantity)), order_action, current_price
+            )
             if not order_id:
                 return None
 

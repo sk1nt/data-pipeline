@@ -1,10 +1,12 @@
 import asyncio
 import json
 import os
+import re
 import sys
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import discord
@@ -26,20 +28,27 @@ class TradeBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.config = config
-        self.redis_client = redis.Redis(
+        # Use connection pooling for better performance and automatic reconnection
+        redis_pool = redis.ConnectionPool(
             host=os.getenv("REDIS_HOST", "localhost"),
             port=int(os.getenv("REDIS_PORT", "6379")),
             db=int(os.getenv("REDIS_DB", "0")),
             password=os.getenv("REDIS_PASSWORD"),
+            decode_responses=True,
+            max_connections=10,
+            socket_connect_timeout=5,
+            socket_keepalive=True,
+            health_check_interval=30,
         )
+        self.redis_client = redis.Redis(connection_pool=redis_pool)
         self.command_admin_ids = self._parse_admin_ids()
         self.command_admin_names = self._parse_admin_names()
         self.tastytrade_client = self._init_tastytrade_client()
         self.uw_option_latest_key = os.getenv(
-            "UW_OPTION_LATEST_KEY", "uw:options-trade:latest"
+            "UW_OPTION_LATEST_KEY", "uw:option_trade:latest"
         )
         self.uw_option_history_key = os.getenv(
-            "UW_OPTION_HISTORY_KEY", "uw:options-trade:history"
+            "UW_OPTION_HISTORY_KEY", "uw:option_trade:history"
         )
         self.uw_market_latest_key = os.getenv(
             "UW_MARKET_LATEST_KEY", "uw:market-state:latest"
@@ -48,7 +57,7 @@ class TradeBot(commands.Bot):
             "UW_MARKET_HISTORY_KEY", "uw:market-state:history"
         )
         self.uw_option_stream_channel = os.getenv(
-            "UW_OPTION_STREAM_CHANNEL", "uw:options-trade:stream"
+            "UW_OPTION_STREAM_CHANNEL", "uw:option_trade:stream"
         )
         # Canonical tickers for GEXBot futures endpoints so cache/API reuse shared contracts
         self.ticker_aliases = {
@@ -75,6 +84,8 @@ class TradeBot(commands.Bot):
         self.option_alert_channel_ids = self._init_alert_channels()
         self._uw_listener_task: Optional[asyncio.Task] = None
         self._uw_listener_stop = asyncio.Event()
+        self._market_agg_alert_task: Optional[asyncio.Task] = None
+        self._market_agg_alert_stop = asyncio.Event()
         self._gex_feed_task: Optional[asyncio.Task] = None
         self._gex_feed_stop = asyncio.Event()
         self.gex_feed_enabled = bool(getattr(config, "gex_feed_enabled", False))
@@ -150,9 +161,8 @@ class TradeBot(commands.Bot):
             ]
         self._gexbot_default_symbols = {sym.upper() for sym in default_symbols}
         # Use a path variable and create short-lived connections per query to avoid file locks
-        self.duckdb_path = os.getenv(
-            "DUCKDB_PATH", "/home/rwest/projects/data-pipeline/data/gex_data.db"
-        )
+        default_db_path = str(Path(__file__).parent.parent.parent / "data" / "gex_data.db")
+        self.duckdb_path = os.getenv("DUCKDB_PATH", default_db_path)
         # Register commands defined as methods on the subclass so prefix commands work
         try:
             # Use plain functions (closures) as command callbacks so signature checks pass.
@@ -201,19 +211,6 @@ class TradeBot(commands.Bot):
 
                     # Preflight: ensure the TastyTrade session is authorized to avoid
                     # attempting a live trade when refresh token is invalid.
-                    # Ensure authorized before attempting to fetch positions/close.
-                    try:
-                        if self.tastytrade_client:
-                            await asyncio.to_thread(
-                                self.tastytrade_client.ensure_authorized
-                            )
-                    except TastytradeAuthError as exc:
-                        await self._send_dm_or_warn(
-                            ctx,
-                            f"TastyTrade authentication invalid: {exc}. Update the refresh token or run `!tt auth refresh <token>`.",
-                        )
-                        return
-
                     try:
                         if self.tastytrade_client:
                             await asyncio.to_thread(
@@ -237,30 +234,12 @@ class TradeBot(commands.Bot):
                                 snap["spot_price"] = snap.get("spot_price") or snap.get(
                                     "spot"
                                 )
-                                snap["major_pos_vol"] = (
-                                    snap.get("major_pos_vol")
-                                    if snap.get("major_pos_vol") is not None
-                                    else 0
-                                )
-                                snap["major_neg_vol"] = (
-                                    snap.get("major_neg_vol")
-                                    if snap.get("major_neg_vol") is not None
-                                    else 0
-                                )
-                                snap["major_pos_oi"] = (
-                                    snap.get("major_pos_oi")
-                                    if snap.get("major_pos_oi") is not None
-                                    else 0
-                                )
-                                snap["major_neg_oi"] = (
-                                    snap.get("major_neg_oi")
-                                    if snap.get("major_neg_oi") is not None
-                                    else 0
-                                )
-                                snap["sum_gex_oi"] = (
-                                    snap.get("sum_gex_oi")
-                                    if snap.get("sum_gex_oi") is not None
-                                    else 0
+                                # Normalize numeric fields with default 0
+                                self._normalize_snapshot_fields(
+                                    snap,
+                                    ["major_pos_vol", "major_neg_vol", "major_pos_oi", 
+                                     "major_neg_oi", "sum_gex_oi"],
+                                    default=0
                                 )
                                 snap["max_priors"] = snap.get("max_priors") or []
                                 # Only write to the canonical snapshot key; do NOT create gex:{ticker}:latest
@@ -377,7 +356,7 @@ class TradeBot(commands.Bot):
                         if topic == "trade" or topic in ("buy", "sell"):
                             await self._send_dm_or_warn(
                                 ctx,
-                                "Trading: `!tt buy <symbol> <tp_ticks> [qty] [live]` - market+TP; `!tt sell ...`",
+                                "Trading: `!tt buy <symbol> <qty> <tp_ticks> [live]` - market+TP; `!tt sell ...`",
                             )
                             return
                         if topic == "auth":
@@ -403,17 +382,18 @@ class TradeBot(commands.Bot):
                         "• `!tt future` / `!tt futures` - List available futures\n"
                         "• `!tt orders` / `!tt list-orders` - Show open orders\n\n"
                         "**Trading Commands:**\n"
-                        "• `!tt b/buy <symbol> <tp_ticks> [quantity=1]` - Place market buy order with take profit\n"
-                        "• `!tt s/sell <symbol> <tp_ticks> [quantity=1]` - Place market sell order with take profit\n"
+                        "• `!tt b/buy <symbol> <quantity> <tp_ticks>` - Place market buy order with take profit\n"
+                        "• `!tt s/sell <symbol> <quantity> <tp_ticks>` - Place market sell order with take profit\n"
                         "  - `<symbol>`: Stock ticker (e.g., AAPL) or future (e.g., /NQ:XCME)\n"
-                        "  - `<tp_ticks>`: Take profit distance in ticks (0.25 for stocks, varies for futures)\n"
-                        "  - `[quantity]`: Number of shares/contracts (default 1)\n\n"
+                        "  - `<quantity>`: Number of shares/contracts\n"
+                        "  - `<tp_ticks>`: Take profit distance in ticks (0.25 for stocks, 1.0 for futures)\n\n"
                         "**Examples:**\n"
                         "• `!tt` - Show my account balances\n"
                         "• `!tt status` - Check if my account is frozen or in margin call\n"
                         "• `!tt account 123456789` - Switch to account 123456789\n"
-                        "• `!tt buy AAPL 4` - Buy 1 share of AAPL, TP 1 point above\n"
-                        "• `!tt sell /NQ:XCME 20 5` - Sell 5 NQ contracts, TP 5 points below\n\n"
+                        "• `!tt buy AAPL 1 4` - Buy 1 share of AAPL, TP 4 ticks (1 point) above\n"
+                        "• `!tt sell /NQ:XCME 5 20` - Sell 5 NQ contracts, TP 20 points below\n"
+                        "• `!tt b mnq 5 20` - Buy 5 MNQ contracts, TP 20 points above\n\n"
                         "**Order Management:**\n"
                         "• `!tt cancel <order_id>` - Cancel an order by ID\n"
                         "• `!tt replace <order_id> <price>` - Replace existing order price (limit)\n"
@@ -430,18 +410,23 @@ class TradeBot(commands.Bot):
                 if subcommand in ["b", "s", "buy", "sell"] and len(args) >= 3:
                     action = "BUY" if subcommand in ["b", "buy"] else "SELL"
                     symbol = args[1].upper()
-                    try:
-                        tp_ticks = float(args[2])
-                    except ValueError:
-                        await self._send_dm_or_warn(ctx, "Invalid TP ticks.")
-                        return
+                    # Parse quantity (default 1 if not provided)
                     quantity = 1
-                    if len(args) >= 4:
+                    if len(args) >= 3:
                         try:
-                            quantity = int(args[3])
+                            quantity = int(args[2])
                         except ValueError:
                             await self._send_dm_or_warn(ctx, "Invalid quantity.")
                             return
+                    # Parse TP ticks (required, now at position 3)
+                    if len(args) < 4:
+                        await self._send_dm_or_warn(ctx, "Missing TP ticks. Usage: !tt b/s <symbol> <quantity> <tp_ticks> [live]")
+                        return
+                    try:
+                        tp_ticks = float(args[3])
+                    except ValueError:
+                        await self._send_dm_or_warn(ctx, "Invalid TP ticks.")
+                        return
                     # dry-run flag: optional 5th arg 'live' to execute against production.
                     # Default to configured client setting (from .env) to avoid forcing manual flag.
                     dry_run = True
@@ -462,8 +447,6 @@ class TradeBot(commands.Bot):
                     # Determine whether to try and fetch a market snapshot for futures
                     # Accept leading slash (/NQZ5), product code (NQ), or explicit contract (NQZ25)
                     try:
-                        import re
-
                         lookup_feed = None
                         s_up = symbol.upper() if symbol else ""
                         # Explicit product mapping
@@ -753,27 +736,6 @@ class TradeBot(commands.Bot):
                                 ctx, "Unable to fetch auth status"
                             )
                             return
-                        def _format_session_exp(exp):
-                            if not exp:
-                                return "n/a"
-                            from datetime import datetime, timezone
-                            if isinstance(exp, str):
-                                try:
-                                    exp_dt = datetime.fromisoformat(exp)
-                                except Exception:
-                                    return exp
-                            else:
-                                exp_dt = exp
-                            if exp_dt.tzinfo is None:
-                                exp_dt = exp_dt.replace(tzinfo=timezone.utc)
-                            # Human readable
-                            now = datetime.now(timezone.utc)
-                            delta = exp_dt - now
-                            days = delta.days
-                            hours = delta.seconds // 3600
-                            minutes = (delta.seconds % 3600) // 60
-                            rel = f"in {days}d {hours}h {minutes}m" if delta.total_seconds() > 0 else f"expired {abs(days)}d {abs(hours)}h ago"
-                            return f"{exp_dt.strftime('%Y-%m-%d %H:%M:%S %Z')} ({rel})"
 
                         msg = (
                             f"TastyTrade Auth Status:\n"
@@ -782,7 +744,7 @@ class TradeBot(commands.Bot):
                             f"Accounts: {', '.join(status.get('accounts') or [])}\n"
                             f"Use Sandbox: {status.get('use_sandbox')}\n"
                             f"Dry Run: {status.get('dry_run')}\n"
-                            f"Session Expiration: {_format_session_exp(status.get('session_expiration'))}\n"
+                            f"Session Expiration: {self._format_session_expiration(status.get('session_expiration'))}\n"
                             f"Refresh Token Hash: {status.get('refresh_token_hash')}\n"
                             f"Needs Reauth: {status.get('needs_reauth')}\n"
                         )
@@ -973,6 +935,12 @@ class TradeBot(commands.Bot):
             self._uw_listener_task = asyncio.create_task(
                 self._listen_option_trade_stream()
             )
+        if not self._market_agg_alert_task:
+            self._market_agg_alert_stop = asyncio.Event()
+            self._market_agg_alert_task = asyncio.create_task(
+                self._listen_market_agg_alerts()
+            )
+            print("Market agg alert listener started")
         if self._should_run_gex_feed() and not self._gex_feed_task:
             self._gex_feed_stop.clear()
             self._gex_feed_task = asyncio.create_task(self._run_gex_feed_loop())
@@ -1003,8 +971,6 @@ class TradeBot(commands.Bot):
         print(f"Processing alert message: {message.content}")
 
         # Check authorization for automated trades
-        from services.auth_service import AuthService
-
         if not AuthService.verify_user_for_automated_trades(str(message.author.id)):
             print(f"User {message.author.id} not authorized for automated trades")
             try:
@@ -1204,7 +1170,10 @@ class TradeBot(commands.Bot):
                     if now < start:
                         await self._sleep_with_stop((start - now).total_seconds())
                         continue
-                symbols = self.gex_feed_symbols or (self.gex_feed_symbol,)
+                # Include symbols from both gex_feed_symbols and channel map
+                base_symbols = set(self.gex_feed_symbols or (self.gex_feed_symbol,))
+                map_symbols = set(self.gex_feed_channel_map.keys())
+                symbols = sorted(base_symbols | map_symbols)
                 tasks = []
                 for sym in symbols:
                     sym_norm = (sym or self.gex_feed_symbol).upper()
@@ -1265,6 +1234,7 @@ class TradeBot(commands.Bot):
     ) -> None:
         tracker = RollingWindowTracker(window_seconds=self.gex_feed_window_seconds)
         messages: Dict[int, discord.Message] = {}
+        last_message_time: Optional[datetime] = None
         pubsub = await self._create_gex_pubsub()
         if not pubsub:
             print("GEX feed: pubsub unavailable, skipping session")
@@ -1278,19 +1248,38 @@ class TradeBot(commands.Bot):
                 # No message yet; small sleep to avoid tight loop
                 await asyncio.sleep(0.01)
                 continue
+            
+            # Populate wall ladders for display
+            ticker = self.ticker_aliases.get(symbol, symbol)
+            snapshot_key = f"{self.redis_snapshot_prefix}{ticker.upper()}"
+            await self._populate_wall_ladders(data, ticker, None, snapshot_key)
+            
             delta_map = self._build_feed_delta_map(tracker, data, now)
-            content = self.format_gex_short(
-                data,
-                include_time=True,
-                time_format="%I:%M:%S %p %Z",
-                delta_block=delta_map,
-            )
+            # Use compact formatting for feed
+            content = self.format_gex_small(data)
+            
+            # Check if we need to refresh (delete and recreate messages)
+            should_refresh = False
             if not messages:
+                should_refresh = True
+            elif last_message_time:
+                minutes_elapsed = (now - last_message_time).total_seconds() / 60
+                if minutes_elapsed >= self.gex_feed_refresh_minutes:
+                    should_refresh = True
+            
+            if should_refresh:
+                # Delete old messages if they exist
+                if messages:
+                    await self._delete_feed_messages(messages)
+                    messages = {}
+                # Post new messages
                 messages = await self._post_feed_messages(channels, content)
+                last_message_time = now
                 await self._gex_feed_metrics.record_update(
                     now, delta_map, refresh=True
                 )
             else:
+                # Edit existing messages
                 await self._edit_feed_messages(messages, content)
                 await self._gex_feed_metrics.record_update(
                     now, delta_map, refresh=False
@@ -2226,6 +2215,53 @@ class TradeBot(commands.Bot):
             names = {"skint0552"}
         return names
 
+    def _normalize_snapshot_fields(
+        self, snap: dict, fields: List[str], default: Any = 0
+    ) -> None:
+        """Normalize snapshot fields with default value if None.
+        
+        Args:
+            snap: Snapshot dictionary to modify in-place
+            fields: List of field names to normalize
+            default: Default value to use for None fields
+        """
+        for field in fields:
+            if snap.get(field) is None:
+                snap[field] = default
+
+    def _format_session_expiration(self, exp: Any) -> str:
+        """Format session expiration timestamp with human-readable delta.
+        
+        Args:
+            exp: Expiration timestamp (string or datetime)
+            
+        Returns:
+            Formatted expiration string with relative time
+        """
+        if not exp:
+            return "n/a"
+        if isinstance(exp, str):
+            try:
+                exp_dt = datetime.fromisoformat(exp)
+            except Exception:
+                return exp
+        else:
+            exp_dt = exp
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+        # Human readable
+        now = datetime.now(timezone.utc)
+        delta = exp_dt - now
+        days = delta.days
+        hours = delta.seconds // 3600
+        minutes = (delta.seconds % 3600) // 60
+        rel = (
+            f"in {days}d {hours}h {minutes}m"
+            if delta.total_seconds() > 0
+            else f"expired {abs(days)}d {abs(hours)}h ago"
+        )
+        return f"{exp_dt.strftime('%Y-%m-%d %H:%M:%S %Z')} ({rel})"
+
     def _init_tastytrade_client(self) -> Optional[TastyTradeClient]:
         creds = getattr(self.config, "tastytrade_credentials", None)
         if not creds or not creds.client_secret or not creds.refresh_token:
@@ -2326,17 +2362,14 @@ class TradeBot(commands.Bot):
         return channels
 
     def _is_allowed_channel(self, channel) -> bool:
-        if not self.allowed_channel_ids:
-            return True
-        if channel is None:
-            return True
-        channel_id = getattr(channel, "id", None)
-        if channel_id is None:
+        """Check if channel is allowed for commands."""
+        if not self.allowed_channel_ids or not channel:
             return True
         # Allow DMs for privileged commands
         if getattr(channel, "type", None) == discord.ChannelType.private:
             return True
-        return int(channel_id) in self.allowed_channel_ids
+        channel_id = getattr(channel, "id", None)
+        return channel_id and int(channel_id) in self.allowed_channel_ids
 
     async def _ensure_status_channel_access(self, ctx) -> bool:
         if not self._is_privileged_user(ctx):
@@ -2390,21 +2423,107 @@ class TradeBot(commands.Bot):
             except Exception:
                 pass
 
-    async def _broadcast_option_trade(self, payload: dict) -> None:
-        if not self.option_alert_channel_ids:
+    async def _listen_market_agg_alerts(self):
+        """Listen for market aggregation ratio shift alerts."""
+        pubsub = self.redis_client.pubsub(ignore_subscribe_messages=True)
+        try:
+            pubsub.subscribe("market_agg:alerts")
+        except Exception as exc:
+            print(f"Failed to subscribe to market_agg alerts: {exc}")
             return
-        message = self.format_option_trade_alert(payload)
-        for channel_id in self.option_alert_channel_ids:
-            if not channel_id:
-                continue
+        try:
+            while not self._market_agg_alert_stop.is_set():
+                message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
+                if not message:
+                    await asyncio.sleep(0.1)
+                    continue
+                if message.get("type") != "message":
+                    continue
+                data = message.get("data")
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8")
+                try:
+                    alert_payload = json.loads(data)
+                except Exception as exc:
+                    print(f"Failed to decode market_agg alert: {exc}")
+                    continue
+                try:
+                    await self._broadcast_market_agg_alert(alert_payload)
+                except Exception as exc:
+                    print(f"Failed to broadcast market_agg alert: {exc}")
+        finally:
+            try:
+                pubsub.close()
+            except Exception:
+                pass
+
+    async def _broadcast_market_agg_alert(self, alert: dict) -> None:
+        """Broadcast market aggregation alert to Discord channels."""
+        # Get alert message using formatting service
+        try:
+            # Import dynamically to avoid circular dependency
+            import sys
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+            from services.market_agg_alert_service import MarketAggAlertService
+            
+            alert_service = MarketAggAlertService(None)  # Don't need redis_client for formatting
+            message_text = alert_service.format_alert_message(alert)
+        except Exception as exc:
+            print(f"Failed to format alert message: {exc}")
+            # Fallback to simple format
+            message_text = (
+                f"⚠️ **Market Alert**\n"
+                f"Type: `{alert.get('alert_type')}`\n"
+                f"Put/Call Ratio: `{alert.get('current_ratio', 0):.3f}`"
+            )
+        
+        # Send to both channels
+        channel_ids = alert.get("discord_channels", [1425136266676146236, 1429940127899324487, 1440464526695731391])
+        for channel_id in channel_ids:
             try:
                 channel = self.get_channel(channel_id)
                 if channel is None:
                     channel = await self.fetch_channel(channel_id)
                 if channel:
-                    await channel.send(message)
+                    await channel.send(message_text)
+                else:
+                    print(f"Failed to find channel {channel_id}")
             except Exception as exc:
-                print(f"Failed to send UW alert to {channel_id}: {exc}")
+                print(f"Failed to send market_agg alert to {channel_id}: {exc}")
+
+    async def _broadcast_option_trade(self, payload: dict) -> None:
+        # Check if payload has specific channel routing
+        discord_channel_id = payload.get("discord_channel_id")
+        
+        if discord_channel_id:
+            # Use specific channel from UWMessageService routing
+            try:
+                channel = self.get_channel(discord_channel_id)
+                if channel is None:
+                    channel = await self.fetch_channel(discord_channel_id)
+                if channel:
+                    message = self.format_option_trade_alert(payload)
+                    await channel.send(message)
+                else:
+                    print(f"Failed to find channel {discord_channel_id}")
+            except Exception as exc:
+                print(f"Failed to send UW alert to {discord_channel_id}: {exc}")
+        else:
+            # Fallback to broadcasting to all configured channels
+            if not self.option_alert_channel_ids:
+                return
+            message = self.format_option_trade_alert(payload)
+            for channel_id in self.option_alert_channel_ids:
+                if not channel_id:
+                    continue
+                try:
+                    channel = self.get_channel(channel_id)
+                    if channel is None:
+                        channel = await self.fetch_channel(channel_id)
+                    if channel:
+                        await channel.send(message)
+                except Exception as exc:
+                    print(f"Failed to send UW alert to {channel_id}: {exc}")
 
     async def _fetch_market_snapshot(self) -> Optional[dict]:
         try:

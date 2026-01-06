@@ -33,7 +33,8 @@ async def test_end_to_end_entry_and_exit(
     channel_id = "1255265167113978008"
 
     # patch compute quantity after import (consistent with earlier tests)
-    monkeypatch.setattr(AutomatedOptionsService, "_compute_quantity", lambda self, ad, cid: 2)
+    # _compute_quantity now returns a tuple: (qty, buying_power, est_notional)
+    monkeypatch.setattr(AutomatedOptionsService, "_compute_quantity", lambda self, ad, cid: (2, 10000.0, 150.0))
 
     # Execute
     result = await svc.process_alert(message, channel_id, user_id)

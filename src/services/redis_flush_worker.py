@@ -152,6 +152,7 @@ class RedisFlushWorker:
         keys = list(self.redis_client.client.scan_iter(match=self.settings.key_pattern))
         if not keys:
             gex_summary = self._flush_gex_snapshots()
+            uw_summary = self._flush_uw_messages()
             self._last_summary = {
                 "timestamp": datetime.utcnow().isoformat(),
                 "samples": 0,
@@ -159,6 +160,7 @@ class RedisFlushWorker:
                 "duration": 0.0,
             }
             self._last_summary.update(gex_summary)
+            self._last_summary.update(uw_summary)
             return
         last_hash = self.settings.last_hash
         new_records: List[Tuple[str, int, float]] = []
@@ -192,6 +194,7 @@ class RedisFlushWorker:
             last_updates[key] = samples[-1][0]
         if not new_records:
             gex_summary = self._flush_gex_snapshots()
+            uw_summary = self._flush_uw_messages()
             duration = time.perf_counter() - start_time
             summary = {
                 "timestamp": datetime.utcnow().isoformat(),
@@ -200,6 +203,7 @@ class RedisFlushWorker:
                 "duration": duration,
             }
             summary.update(gex_summary)
+            summary.update(uw_summary)
             self._last_summary = summary
             return
         df = pd.DataFrame(new_records, columns=["key", "ts", "value"])
@@ -210,6 +214,7 @@ class RedisFlushWorker:
         self._write_depth_outputs(df)
         self._write_parquet(df)
         gex_summary = self._flush_gex_snapshots()
+        uw_summary = self._flush_uw_messages()
         if last_updates:
             self.redis_client.client.hset(last_hash, mapping=last_updates)
         duration = time.perf_counter() - start_time
@@ -220,6 +225,7 @@ class RedisFlushWorker:
             "duration": duration,
         }
         summary.update(gex_summary)
+        summary.update(uw_summary)
         self._last_summary = summary
         LOGGER.info(
             "Redis flush worker: %s samples from %s keys in %.2fs",
@@ -782,3 +788,131 @@ class RedisFlushWorker:
         summary.setdefault("duration", 0.0)
         summary.setdefault("timestamp", None)
         return summary
+
+    def _flush_uw_messages(self) -> Dict[str, int]:
+        """Flush UW messages from Redis to DuckDB."""
+        try:
+            from pathlib import Path
+            uw_db_path = config_settings.data_path / "uw_messages.db"
+            uw_db_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Collect market_agg history
+            market_agg_count = 0
+            market_agg_key = "uw:market_agg:history"
+            market_agg_raw = self.redis_client.client.lrange(market_agg_key, 0, -1)
+            if market_agg_raw:
+                market_agg_records = []
+                for raw in market_agg_raw:
+                    try:
+                        data = json.loads(raw)
+                        record = {
+                            "received_at": data.get("received_at"),
+                            "date": data.get("data", {}).get("date"),
+                            "call_premium": data.get("data", {}).get("call_premium"),
+                            "put_premium": data.get("data", {}).get("put_premium"),
+                            "call_premium_otm_only": data.get("data", {}).get("call_premium_otm_only"),
+                            "put_premium_otm_only": data.get("data", {}).get("put_premium_otm_only"),
+                            "delta": data.get("data", {}).get("delta"),
+                            "gamma": data.get("data", {}).get("gamma"),
+                            "theta": data.get("data", {}).get("theta"),
+                            "vega": data.get("data", {}).get("vega"),
+                        }
+                        market_agg_records.append(record)
+                    except Exception as e:
+                        LOGGER.warning(f"Failed to parse market_agg record: {e}")
+                
+                if market_agg_records:
+                    df = pd.DataFrame(market_agg_records)
+                    conn = duckdb.connect(str(uw_db_path))
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS market_agg_state (
+                            received_at TIMESTAMP,
+                            date VARCHAR,
+                            call_premium DOUBLE,
+                            put_premium DOUBLE,
+                            call_premium_otm_only DOUBLE,
+                            put_premium_otm_only DOUBLE,
+                            delta DOUBLE,
+                            gamma DOUBLE,
+                            theta DOUBLE,
+                            vega DOUBLE
+                        )
+                        """
+                    )
+                    conn.register("market_agg_flush", df)
+                    conn.execute("INSERT INTO market_agg_state SELECT * FROM market_agg_flush")
+                    conn.close()
+                    market_agg_count = len(df)
+                    # Clear history after flush
+                    self.redis_client.client.delete(market_agg_key)
+            
+            # Collect option_trade history
+            option_trade_count = 0
+            option_trade_key = "uw:option_trade:history"
+            option_trade_raw = self.redis_client.client.lrange(option_trade_key, 0, -1)
+            if option_trade_raw:
+                option_trade_records = []
+                for raw in option_trade_raw:
+                    try:
+                        data = json.loads(raw)
+                        record = {
+                            "received_at": data.get("received_at"),
+                            "topic": data.get("topic"),
+                            "topic_symbol": data.get("topic_symbol"),
+                            "is_index_option": data.get("data", {}).get("is_index_option"),
+                            "ticker": data.get("data", {}).get("ticker"),
+                            "option_chain_id": data.get("data", {}).get("option_chain_id"),
+                            "type": data.get("data", {}).get("type"),
+                            "strike": data.get("data", {}).get("strike"),
+                            "expiry": data.get("data", {}).get("expiry"),
+                            "dte": data.get("data", {}).get("dte"),
+                            "cost_basis": data.get("data", {}).get("cost_basis"),
+                            "volume": data.get("data", {}).get("volume"),
+                            "price": data.get("data", {}).get("price"),
+                            "tags": json.dumps(data.get("data", {}).get("tags", [])),
+                        }
+                        option_trade_records.append(record)
+                    except Exception as e:
+                        LOGGER.warning(f"Failed to parse option_trade record: {e}")
+                
+                if option_trade_records:
+                    df = pd.DataFrame(option_trade_records)
+                    conn = duckdb.connect(str(uw_db_path))
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS option_trades (
+                            received_at TIMESTAMP,
+                            topic VARCHAR,
+                            topic_symbol VARCHAR,
+                            is_index_option BOOLEAN,
+                            ticker VARCHAR,
+                            option_chain_id BIGINT,
+                            type VARCHAR,
+                            strike DOUBLE,
+                            expiry TIMESTAMP,
+                            dte INTEGER,
+                            cost_basis DOUBLE,
+                            volume BIGINT,
+                            price DOUBLE,
+                            tags VARCHAR
+                        )
+                        """
+                    )
+                    conn.register("option_trade_flush", df)
+                    conn.execute("INSERT INTO option_trades SELECT * FROM option_trade_flush")
+                    conn.close()
+                    option_trade_count = len(df)
+                    # Clear history after flush
+                    self.redis_client.client.delete(option_trade_key)
+            
+            LOGGER.info(
+                f"Flushed {market_agg_count} market_agg and {option_trade_count} option_trade messages to DuckDB"
+            )
+            return {
+                "uw_market_agg": market_agg_count,
+                "uw_option_trades": option_trade_count,
+            }
+        except Exception:
+            LOGGER.exception("Failed to flush UW messages")
+            return {"uw_market_agg": 0, "uw_option_trades": 0}

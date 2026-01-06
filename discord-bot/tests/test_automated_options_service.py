@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.join(os.getcwd(), "src"))
 # Test the automated options service audit logging and returned structure
 from src.services.automated_options_service import AutomatedOptionsService
 from src.services.tastytrade_client import TastytradeAuthError
-from src.services.options_fill_service import InsufficientBuyingPowerError
+# Import InsufficientBuyingPowerError from the same path as the service uses
+from services.options_fill_service import InsufficientBuyingPowerError
 
 
 class FakeRedis:
@@ -143,7 +144,7 @@ async def test_process_alert_insufficient_buying_power(monkeypatch):
 
     notify_calls = []
     monkeypatch.setattr(
-        "services.notifications.notify_operator",
+        "src.services.automated_options_service.notify_operator",
         lambda msg: notify_calls.append(msg) or True,
     )
 
@@ -180,7 +181,7 @@ async def test_process_alert_insufficient_buying_power_from_fill(monkeypatch):
 
     notify_calls = []
     monkeypatch.setattr(
-        "services.notifications.notify_operator",
+        "src.services.automated_options_service.notify_operator",
         lambda msg: notify_calls.append(msg) or True,
     )
 

@@ -17,7 +17,7 @@ US1 — Alert-driven automated entry & partial exit (P1)
 
 - [X] T006 [US1] Implement `AlertParser` in `discord-bot/bot/alert_parser.py` to parse actionable alerts and validate fields. (file: discord-bot/bot/alert_parser.py)
 - [X] T007 [US1] [P] Add unit tests for `AlertParser`: `discord-bot/tests/test_alert_parser.py`. (file: discord-bot/tests/test_alert_parser.py)
-- [ ] T008 [US1] Implement `AutomatedOptionsService.create_entry_order()` in `src/services/automated_options_service.py` with dry-run support. (file: src/services/automated_options_service.py)
+- [X] T008 [US1] Implement `AutomatedOptionsService.create_entry_order()` in `src/services/automated_options_service.py` with dry-run support. (file: src/services/automated_options_service.py)
 - [X] T009 [US1] Implement price discovery as `src/services/price_discovery.py` using tick increments and conversion-to-market when ≤ 1 tick. (file: src/services/price_discovery.py)
 - [X] T010 [US1] Add unit tests for price discovery and `round_to_tick`: `discord-bot/tests/test_round_to_tick.py` and `tests/unit/test_price_discovery.py`. (files: discord-bot/tests/test_round_to_tick.py, tests/unit/test_price_discovery.py)
  - [X] T011 [US1] Implement exit order creation (50% of filled quantity at 100% profit) in `src/services/automated_options_service.py`. (file: src/services/automated_options_service.py)

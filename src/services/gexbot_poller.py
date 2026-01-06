@@ -123,10 +123,10 @@ class GEXBotPoller:
                     await self._refresh_supported_symbols(session)
                 # Always poll the canonical supported symbols (downloaded list); dynamic adds removed
                 # For NQ poller (base symbols include NQ_NDX), prefer a very fast RTH poll of the
-                # key symbols to reduce load: only ['SPX','NQ_NDX'] during RTH; otherwise poll all.
+                # key symbols to reduce load: only ['SPX','NQ_NDX','ES_SPX'] during RTH; otherwise poll all.
                 if "NQ_NDX" in self._base_symbols:
                     symbols = (
-                        ["SPX", "NQ_NDX"]
+                        ["SPX", "NQ_NDX", "ES_SPX"]
                         if self._is_rth_now()
                         else sorted(self._supported_symbols or self._base_symbols)
                     )
@@ -435,6 +435,33 @@ class GEXBotPoller:
         if not symbol:
             return
         key = f"{SNAPSHOT_KEY_PREFIX}{symbol.upper()}"
+        
+        # Don't overwrite good snapshots with incomplete data (after market close)
+        # If net_gex is null/zero and major_pos_vol is zero, this is likely stale/incomplete
+        net_gex = snapshot.get("net_gex")
+        major_pos_vol = snapshot.get("major_pos_vol") or 0
+        major_neg_vol = snapshot.get("major_neg_vol") or 0
+        
+        if net_gex is None and major_pos_vol == 0 and major_neg_vol == 0:
+            # Check if we have a better snapshot already cached
+            if self.redis:
+                try:
+                    existing = self.redis.client.get(key)
+                    if existing:
+                        existing_data = json.loads(existing)
+                        existing_net_gex = existing_data.get("net_gex")
+                        existing_pos_vol = existing_data.get("major_pos_vol") or 0
+                        
+                        # Preserve existing snapshot if it has volume data
+                        if existing_net_gex is not None or existing_pos_vol > 0:
+                            LOGGER.info(
+                                "Preserving existing snapshot for %s (has volume data)",
+                                symbol
+                            )
+                            return
+                except Exception as e:
+                    LOGGER.debug("Failed to check existing snapshot: %s", e)
+        
         if self.redis:
             try:
                 payload = json.dumps(snapshot)

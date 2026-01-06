@@ -5,7 +5,7 @@ from decimal import Decimal
 
 sys.path.insert(0, os.path.join(os.getcwd(), "src"))
 
-from services.options_fill_service import OptionsFillService
+from services.options_fill_service import OptionsFillService, InsufficientBuyingPowerError
 from tastytrade.order import OrderAction
 
 
@@ -70,5 +70,6 @@ def test_place_limit_aborts_on_insufficient_buying_power(monkeypatch):
     monkeypatch.setattr('services.options_fill_service.Account.get', lambda session: [FakeAccount()])
 
     import asyncio
-    res = asyncio.get_event_loop().run_until_complete(svc.place_limit_order(FakeOption(), Decimal('10'), OrderAction.BUY_TO_OPEN, Decimal('1.0')))
-    assert res is None
+    # place_limit_order now raises InsufficientBuyingPowerError instead of returning None
+    with pytest.raises(InsufficientBuyingPowerError):
+        asyncio.get_event_loop().run_until_complete(svc.place_limit_order(FakeOption(), Decimal('10'), OrderAction.BUY_TO_OPEN, Decimal('1.0')))
