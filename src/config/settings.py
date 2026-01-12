@@ -20,6 +20,7 @@ class TastyTradeConfig(BaseSettings):
     tastytrade_refresh_token: str = Field(alias="TASTYTRADE_REFRESH_TOKEN")
     tastytrade_account: Optional[str] = Field(None, alias="TASTYTRADE_ACCOUNT")
     tastytrade_use_sandbox: bool = Field(True, alias="TASTYTRADE_USE_SANDBOX")
+    tastytrade_allocation_percentage: float = Field(10.0, alias="TASTYTRADE_ALLOCATION_PERCENTAGE")
     tastytrade_prod_client_secret: Optional[str] = Field(
         None, alias="TASTYTRADE_PROD_CLIENT_SECRET"
     )

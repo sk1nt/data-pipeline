@@ -5,7 +5,7 @@ import re
 import sys
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
@@ -86,6 +86,8 @@ class TradeBot(commands.Bot):
         self._uw_listener_stop = asyncio.Event()
         self._market_agg_alert_task: Optional[asyncio.Task] = None
         self._market_agg_alert_stop = asyncio.Event()
+        self._market_agg_scheduled_task: Optional[asyncio.Task] = None
+        self._market_agg_scheduled_stop = asyncio.Event()
         self._gex_feed_task: Optional[asyncio.Task] = None
         self._gex_feed_stop = asyncio.Event()
         self.gex_feed_enabled = bool(getattr(config, "gex_feed_enabled", False))
@@ -420,20 +422,32 @@ class TradeBot(commands.Bot):
                             return
                     # Parse TP ticks (required, now at position 3)
                     if len(args) < 4:
-                        await self._send_dm_or_warn(ctx, "Missing TP ticks. Usage: !tt b/s <symbol> <quantity> <tp_ticks> [live]")
+                        await self._send_dm_or_warn(ctx, "Missing TP ticks. Usage: !tt b/s <symbol> <qty> <tp_ticks> [sl_ticks] [live]")
                         return
                     try:
                         tp_ticks = float(args[3])
                     except ValueError:
                         await self._send_dm_or_warn(ctx, "Invalid TP ticks.")
                         return
-                    # dry-run flag: optional 5th arg 'live' to execute against production.
+                    # Parse optional SL ticks (position 4) - 0 means no stop loss
+                    sl_ticks = 0.0
+                    live_arg_idx = 4  # Default position for live/dry flag
+                    if len(args) >= 5:
+                        # Check if arg[4] is a number (SL ticks) or a mode flag
+                        try:
+                            sl_ticks = float(args[4])
+                            live_arg_idx = 5  # SL provided, live flag moves to position 5
+                        except ValueError:
+                            # Not a number, treat as live/dry flag
+                            sl_ticks = 0.0
+                            live_arg_idx = 4
+                    # dry-run flag: 'live' to execute against production.
                     # Default to configured client setting (from .env) to avoid forcing manual flag.
                     dry_run = True
-                    if len(args) >= 5:
-                        if args[4].lower() in ("live", "execute", "send"):
+                    if len(args) > live_arg_idx:
+                        if args[live_arg_idx].lower() in ("live", "execute", "send"):
                             dry_run = False
-                        elif args[4].lower() in ("dry", "dryrun", "test"):
+                        elif args[live_arg_idx].lower() in ("dry", "dryrun", "test"):
                             dry_run = True
                     else:
                         # Default to client-level dry_run if client configured
@@ -487,6 +501,7 @@ class TradeBot(commands.Bot):
                             action,
                             quantity,
                             tp_ticks,
+                            sl_ticks=sl_ticks,
                             dry_run=dry_run,
                             market_price=market_price,
                         )
@@ -941,6 +956,12 @@ class TradeBot(commands.Bot):
                 self._listen_market_agg_alerts()
             )
             print("Market agg alert listener started")
+        if not self._market_agg_scheduled_task:
+            self._market_agg_scheduled_stop.clear()
+            self._market_agg_scheduled_task = asyncio.create_task(
+                self._scheduled_market_agg_updates()
+            )
+            print("Market agg scheduled updates started")
         if self._should_run_gex_feed() and not self._gex_feed_task:
             self._gex_feed_stop.clear()
             self._gex_feed_task = asyncio.create_task(self._run_gex_feed_loop())
@@ -949,20 +970,26 @@ class TradeBot(commands.Bot):
     async def on_message(self, message):
         if message.author == self.user:
             return
-        if not self._is_allowed_channel(message.channel):
-            return
-
-        # Check for alert messages
+        
+        # Debug: log all messages
+        channel_id = getattr(message.channel, "id", None)
+        print(f"Message received: channel_id={channel_id}, author={message.author.id}, content={message.content[:50]}")
+        
+        # Check for alert messages first (authorization happens inside _process_alert_message)
         # Ignore replies — only first messages trigger alerts
         try:
             is_reply = getattr(message, "reference", None) is not None
         except Exception:
             is_reply = False
-        if is_reply:
-            return
-
-        if message.content.startswith("Alert"):
+        
+        if not is_reply and message.content.startswith("Alert"):
+            print(f"Alert detected! Processing...")
             await self._process_alert_message(message)
+            return  # Don't process as command after handling alert
+        
+        # For non-alert messages, check if channel is allowed for commands
+        if not self._is_allowed_channel(message.channel):
+            return
 
         await super().on_message(message)
 
@@ -1049,6 +1076,56 @@ class TradeBot(commands.Bot):
 
     async def ping(self, ctx):
         await ctx.send("Pong!")
+
+    async def test_market(self, ctx, test_type: str = "both"):
+        """Test market aggregation messages. Usage: !test_market [scheduled|alert|both]"""
+        if not await self._ensure_privileged(ctx):
+            await ctx.send("⛔ Unauthorized: privileged command.")
+            return
+        
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+        from services.market_agg_alert_service import MarketAggAlertService
+        from decimal import Decimal
+        
+        alert_service = MarketAggAlertService(None)
+        
+        # Sample market data for testing
+        test_data = {
+            "date": "2026-01-09",
+            "call_premium": "12345678.90",
+            "put_premium": "9876543.21",
+            "call_volume": 500000,
+            "put_volume": 650000,
+            "put_call_ratio": "1.30",
+        }
+        
+        if test_type in ("scheduled", "both"):
+            # Test scheduled update
+            update = alert_service.create_scheduled_update(test_data)
+            if update:
+                message_text = alert_service.format_alert_message(update)
+                await ctx.send("**Testing Scheduled Update:**")
+                await ctx.send(message_text)
+        
+        if test_type in ("alert", "both"):
+            # Test sentiment change alert
+            alert = {
+                "timestamp": "2026-01-09T14:30:00Z",
+                "alert_type": "SENTIMENT_CHANGE",
+                "current_ratio": 1.30,
+                "previous_ratio": 0.75,
+                "from_regime": "long",
+                "to_regime": "short",
+                "date": test_data["date"],
+                "call_premium": test_data["call_premium"],
+                "put_premium": test_data["put_premium"],
+                "call_volume": test_data["call_volume"],
+                "put_volume": test_data["put_volume"],
+            }
+            message_text = alert_service.format_alert_message(alert)
+            await ctx.send("**Testing Sentiment Change Alert:**")
+            await ctx.send(message_text)
 
     def _should_run_gex_feed(self) -> bool:
         if not self.gex_feed_enabled:
@@ -1150,12 +1227,42 @@ class TradeBot(commands.Bot):
 
     async def _run_gex_feed_loop(self):
         try:
+            import sys
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+            from lib.market_hours import is_rth, is_weekend, is_market_holiday, get_next_market_open
+            
             while not self._gex_feed_stop.is_set():
                 print("GEX feed loop tick")
                 if not self._should_run_gex_feed():
                     await asyncio.sleep(60)
                     continue
+                
                 now = datetime.now(self.display_zone)
+                
+                # Check if it's a weekend or holiday
+                if is_weekend(now) or is_market_holiday(now):
+                    print(f"GEX feed: market closed (weekend/holiday), sleeping until next market open")
+                    next_open = get_next_market_open(now)
+                    sleep_seconds = (next_open - now).total_seconds()
+                    await self._sleep_with_stop(min(sleep_seconds, 3600))  # Check at least every hour
+                    continue
+                
+                # Check if we're in RTH (9:30 AM - 4:00 PM ET)
+                if not is_rth(now):
+                    # Wait until market opens
+                    start = now.replace(hour=9, minute=30, second=0, microsecond=0)
+                    if now.time() >= time(16, 0):  # After market close
+                        next_open = get_next_market_open(now)
+                        sleep_seconds = (next_open - now).total_seconds()
+                        print(f"GEX feed: after market close, sleeping until next open")
+                        await self._sleep_with_stop(min(sleep_seconds, 3600))
+                    else:  # Before market open
+                        sleep_seconds = (start - now).total_seconds()
+                        print(f"GEX feed: before market open, sleeping {sleep_seconds:.0f}s")
+                        await self._sleep_with_stop(sleep_seconds)
+                    continue
+                
+                # We're in RTH, proceed with feed
                 start = now.replace(hour=9, minute=35, second=0, microsecond=0)
                 end = now.replace(hour=16, minute=0, second=0, microsecond=0)
                 session_end = end
@@ -2490,6 +2597,101 @@ class TradeBot(commands.Bot):
                     print(f"Failed to find channel {channel_id}")
             except Exception as exc:
                 print(f"Failed to send market_agg alert to {channel_id}: {exc}")
+
+    async def _scheduled_market_agg_updates(self):
+        """Send scheduled Put/Call Ratio updates every 30 minutes starting at 10AM."""
+        from datetime import datetime, timezone
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+        from services.market_agg_alert_service import MarketAggAlertService
+        from lib.market_hours import is_rth, is_weekend, is_market_holiday, get_next_market_open
+        
+        print("Scheduled market agg updates started")
+        
+        while not self._market_agg_scheduled_stop.is_set():
+            try:
+                # Get current time in ET
+                now_utc = datetime.now(timezone.utc)
+                # Convert to ET (UTC-5 for EST, UTC-4 for EDT)
+                import zoneinfo
+                et_tz = zoneinfo.ZoneInfo("America/New_York")
+                now_et = now_utc.astimezone(et_tz)
+                
+                # Skip if weekend or holiday
+                if is_weekend(now_et) or is_market_holiday(now_et):
+                    print(f"Market agg: skipping update (weekend/holiday)")
+                    next_open = get_next_market_open(now_et)
+                    sleep_seconds = (next_open - now_et).total_seconds()
+                    await asyncio.sleep(min(sleep_seconds, 3600))  # Check at least every hour
+                    continue
+                
+                # Skip if outside RTH
+                if not is_rth(now_et):
+                    # Sleep until market opens or next check time
+                    await asyncio.sleep(300)  # Check every 5 minutes when market closed
+                    continue
+                
+                # Check if we're at 10:00, 10:30, 11:00, etc. (every 30 minutes starting at 10AM)
+                if now_et.hour >= 10 and now_et.hour < 16:  # Market hours 10AM-4PM ET
+                    # Check if it's on the hour or half-hour
+                    if now_et.minute in (0, 30) and now_et.second < 10:
+                        # Fetch latest market agg data
+                        market_data = await self._fetch_market_agg_data()
+                        if market_data:
+                            alert_service = MarketAggAlertService(None)
+                            update = alert_service.create_scheduled_update(market_data)
+                            if update:
+                                message_text = alert_service.format_alert_message(update)
+                                channel_ids = [1425136266676146236, 1429940127899324487, 1440464526695731391]
+                                for channel_id in channel_ids:
+                                    try:
+                                        channel = self.get_channel(channel_id)
+                                        if channel is None:
+                                            channel = await self.fetch_channel(channel_id)
+                                        if channel:
+                                            await channel.send(message_text)
+                                    except Exception as exc:
+                                        print(f"Failed to send scheduled update to {channel_id}: {exc}")
+                                print(f"Sent scheduled market agg update at {now_et.strftime('%I:%M %p ET')}")
+                        
+                        # Sleep until next opportunity (slightly past the minute mark to avoid double sends)
+                        await asyncio.sleep(60)
+                    else:
+                        # Sleep until next check
+                        await asyncio.sleep(30)
+                else:
+                    # Outside market hours, check every 5 minutes
+                    await asyncio.sleep(300)
+            except Exception as exc:
+                print(f"Error in scheduled market agg updates: {exc}")
+                await asyncio.sleep(60)
+
+    async def _fetch_market_agg_data(self) -> Optional[dict]:
+        """Fetch latest market aggregation data from Redis."""
+        try:
+            # Try getting from the UW stream key
+            raw = await asyncio.to_thread(
+                self.redis_client.get, "uw:market_agg:latest"
+            )
+            if not raw:
+                # Fallback to legacy key
+                raw = await asyncio.to_thread(
+                    self.redis_client.get, self.uw_market_latest_key
+                )
+            if not raw:
+                return None
+            
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            data = json.loads(raw)
+            
+            # Extract the actual data if it's wrapped
+            if "data" in data and isinstance(data["data"], dict):
+                return data["data"]
+            return data
+        except Exception as exc:
+            print(f"Failed to fetch market agg data: {exc}")
+            return None
 
     async def _broadcast_option_trade(self, payload: dict) -> None:
         # Check if payload has specific channel routing

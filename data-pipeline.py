@@ -315,7 +315,7 @@ class ServiceManager:
             )
         if not self.rts and self.redis_client:
             self.rts = RedisTimeSeriesClient(self.redis_client.client)
-        if self.redis_client and self.rts and self.lookup_service is None:
+        if not self.lookup_service and self.redis_client and self.rts:
             self.lookup_service = LookupService(self.redis_client, self.rts)
 
     def start_service(self, name: str) -> None:
@@ -506,7 +506,7 @@ class ServiceManager:
         symbol_trade_counts[normalized_source] = (
             symbol_trade_counts.get(normalized_source, 0) + 1
         )
-        self.last_trade_ts = payload.get("timestamp") or datetime.utcnow().isoformat()
+        self.last_trade_ts = payload.get("timestamp") or datetime.now(timezone.utc).isoformat()
         self.last_trade_timestamps[normalized_source] = self.last_trade_ts
         self._maybe_persist_metrics()
 
@@ -598,7 +598,7 @@ class ServiceManager:
                 symbol_depth_counts.get(normalized_source, 0) + 1
             )
             self.last_depth_ts = (
-                payload.get("timestamp") or datetime.utcnow().isoformat()
+                payload.get("timestamp") or datetime.now(timezone.utc).isoformat()
             )
             self.last_depth_timestamps[normalized_source] = self.last_depth_ts
         self._record_depth_snapshot(symbol, normalized_source, payload)
@@ -618,7 +618,7 @@ class ServiceManager:
             "symbol": symbol,
             "price": price,
             "size": size,
-            "timestamp": payload.get("timestamp") or datetime.utcnow().isoformat(),
+            "timestamp": payload.get("timestamp") or datetime.now(timezone.utc).isoformat(),
             "ts_ms": timestamp_ms,
             "source": "tastytrade",
         }
@@ -688,7 +688,7 @@ class ServiceManager:
         )
         return {
             "symbol": symbol,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "bid": {
                 "tasty_price": tasty_bid_price,
                 "schwab_price": schwab_bid_price,
@@ -771,28 +771,14 @@ class ServiceManager:
 
 service_manager = ServiceManager()
 
-UW_OPTION_LATEST_KEY = "uw:options-trade:latest"
-UW_OPTION_HISTORY_KEY = "uw:options-trade:history"
-UW_MARKET_LATEST_KEY = "uw:market-state:latest"
-UW_MARKET_HISTORY_KEY = "uw:market-state:history"
-UW_OPTION_STREAM_CHANNEL = "uw:options-trade:stream"
-UW_MARKET_STREAM_CHANNEL = "uw:market-state:stream"
-UW_HISTORY_LIMIT = 200
-UW_CACHE_TTL_SECONDS = 900
+# Redis channel for TastyTrade market data
+TASTYTRADE_TRADE_CHANNEL = "market_data:tastytrade:trades"
+
+# ML Trade bot constants (kept for potential future use)
 ML_TRADE_LATEST_KEY = "trade:ml-bot:latest"
 ML_TRADE_HISTORY_KEY = "trade:ml-bot"
 ML_TRADE_STREAM_CHANNEL = "trade:ml-bot:stream"
 ML_TRADE_HISTORY_LIMIT = 500
-TASTYTRADE_TRADE_CHANNEL = "market_data:tastytrade:trades"
-SUPPORTED_WEBHOOK_TOPICS = {
-    "options-trade",
-    "market-state",
-}
-TOPIC_ALIASES = {
-    # Alias used by Unusual Whales streaming payloads
-    "option_trades_super_algo": "options-trade",
-}
-TOPIC_SYMBOL_SEPARATORS = (":", "|")
 
 
 @asynccontextmanager
@@ -810,9 +796,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Data Pipeline", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://unusualwhales.com"],
+    allow_origins=["https://unusualwhales.com", "http://192.168.168.151:8877"],
     allow_methods=["POST", "OPTIONS"],
-    allow_headers=["*"],
+    allow_headers=["Content-Type"],
+    allow_credentials=True,
 )
 
 
@@ -831,8 +818,8 @@ async def health() -> Dict[str, str]:
 @app.get("/status")
 async def status(request: Request) -> Dict[str, Any]:
     """Expose the aggregated ServiceManager telemetry."""
-    # Log status access via dedicated status logger
-    logging.getLogger("data_pipeline.status").info(
+    # Log status access via dedicated status logger at DEBUG level
+    logging.getLogger("data_pipeline.status").debug(
         "Status endpoint requested from %s", getattr(request.client, "host", "unknown")
     )
     return service_manager.status()
@@ -979,7 +966,7 @@ STATUS_PAGE = """
 @app.get("/status.html", response_class=HTMLResponse)
 async def status_page(request: Request) -> str:
     """Serve a lightweight HTML dashboard for ops users."""
-    logging.getLogger("data_pipeline.status").info(
+    logging.getLogger("data_pipeline.status").debug(
         "Status page requested from %s", getattr(request.client, "host", "unknown")
     )
     return STATUS_PAGE
@@ -1098,88 +1085,51 @@ async def gex_history_endpoint(request: Request, background_tasks: BackgroundTas
     }
 
 
-@app.api_route(
-    "/uw", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
-)
+@app.api_route("/uw", methods=["POST", "OPTIONS"])
 async def universal_webhook(request: Request):
-    """Accept UW webhook payloads including websocket array format."""
+    """Accept UW Phoenix websocket messages in array format.
+    
+    Expected format: [joinRef, ref, topic, eventType, payload]
+    - topic: "market_agg_socket" or "option_trades_super_algo" or "option_trades_super_algo:SPX"
+    - eventType: event type from Phoenix (e.g., "update", "new_data")
+    - payload: message data object
+    """
     raw_body = await request.body()
 
-    raw_payload: Any
     try:
-        raw_payload = json.loads(raw_body) if raw_body else {}
-    except json.JSONDecodeError:
-        raw_payload = {
-            "__raw_text__": raw_body.decode("utf-8", errors="replace"),
-        }
+        raw_payload = json.loads(raw_body) if raw_body else []
+    except json.JSONDecodeError as e:
+        LOGGER.error("Failed to parse JSON body: %s", e)
+        return {"status": "error", "reason": "invalid_json"}
 
-    if not raw_payload and request.method == "GET":
-        raw_payload = dict(request.query_params.multi_items())
-
-    # Check if this is a websocket array format message
-    # Format: [null,null,"message_type",\"topic\",{\"data\":{...}}]
-    if isinstance(raw_payload, list) and len(raw_payload) >= 5:
-        try:
-            from src.services.uw_message_service import UWMessageService
-            # Get the RedisClient wrapper, not the raw connection
-            redis_client_wrapper = service_manager.redis_client
-            if not redis_client_wrapper:
-                raise HTTPException(status_code=503, detail="Redis unavailable")
-            uw_service = UWMessageService(redis_client_wrapper)
-            result = uw_service.process_raw_message(raw_payload)
-            if result:
-                return result
-            else:
-                return {"status": "error", "reason": "failed_to_parse_uw_message"}
-        except Exception as e:
-            LOGGER.exception("Failed to process UW websocket message: %s", e)
-            return {"status": "error", "reason": str(e)}
-
-    # Legacy webhook format handling
-    payload = _coerce_webhook_payload(raw_payload)
-
-    topic = _extract_webhook_topic(payload)
-    normalized_topic, topic_symbol = _normalize_topic(topic)
-
-    if not normalized_topic:
-        LOGGER.info("/uw temporarily accepting payload without topic: %s", payload)
-        return {
-            "status": "received",
-            "topic": "unknown",
-            "note": "topic missing; captured for review",
-        }
-
-    redis_client = _get_redis_client()
-
-    stamped_payload: Dict[str, Any] = {
-        "topic": normalized_topic,
-        "received_at": datetime.now(timezone.utc).isoformat(),
-        "data": payload,
-        "method": request.method,
-    }
-    if topic_symbol and isinstance(payload, dict):
-        payload.setdefault("symbol", topic_symbol)
-        payload.setdefault("ticker", topic_symbol)
-        nested = payload.get("data")
-        if isinstance(nested, dict):
-            nested.setdefault("symbol", topic_symbol)
-            nested.setdefault("ticker", topic_symbol)
-        stamped_payload["symbol"] = topic_symbol
-        stamped_payload["ticker"] = topic_symbol
-
-    if normalized_topic in SUPPORTED_WEBHOOK_TOPICS:
-        if normalized_topic == "options-trade":
-            _cache_option_trade(redis_client, stamped_payload)
-        elif normalized_topic == "market-state":
-            _cache_market_state(redis_client, stamped_payload)
-    else:
-        LOGGER.info(
-            "/uw temporarily accepting unsupported topic %s via %s",
-            normalized_topic,
-            request.method,
+    # Validate Phoenix websocket array format: [joinRef, ref, topic, eventType, payload]
+    if not isinstance(raw_payload, list) or len(raw_payload) != 5:
+        LOGGER.warning(
+            "/uw received invalid format, expected 5-element array, got: %s (len=%s)",
+            type(raw_payload).__name__,
+            len(raw_payload) if isinstance(raw_payload, list) else "N/A"
         )
+        return {"status": "error", "reason": "invalid_format"}
 
-    return {"status": "received", "topic": normalized_topic}
+    topic = raw_payload[2] if len(raw_payload) > 2 else None
+    LOGGER.info("/uw received Phoenix message, topic=%s", topic)
+
+    try:
+        from src.services.uw_message_service import UWMessageService
+        redis_client_wrapper = service_manager.redis_client
+        if not redis_client_wrapper:
+            raise HTTPException(status_code=503, detail="Redis unavailable")
+        
+        uw_service = UWMessageService(redis_client_wrapper)
+        result = uw_service.process_raw_message(raw_payload)
+        
+        if result:
+            return result
+        else:
+            return {"status": "error", "reason": "failed_to_parse_uw_message"}
+    except Exception as e:
+        LOGGER.exception("Failed to process UW Phoenix message: %s", e)
+        return {"status": "error", "reason": str(e)}
 
 
 @app.get("/lookup/trades")
@@ -1388,72 +1338,6 @@ async def _trigger_queue_processing() -> None:
         LOGGER.exception("Background import processing failed")
 
 
-def _normalize_string(value: Optional[Any]) -> str:
-    """Trim and stringify optionally missing payload values."""
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    return str(value).strip()
-
-
-def _coerce_webhook_payload(raw_payload: Any) -> Dict[str, Any]:
-    """Normalize webhook payloads into a dict so topics can be extracted."""
-    if isinstance(raw_payload, dict):
-        return raw_payload
-
-    if isinstance(raw_payload, list):
-        topic = raw_payload[2] if len(raw_payload) > 2 else None
-        event_type = raw_payload[3] if len(raw_payload) > 3 else None
-        data = raw_payload[4] if len(raw_payload) > 4 else None
-
-        coerced: Dict[str, Any] = {"__raw__": raw_payload}
-        if isinstance(topic, str) and topic.strip():
-            coerced["topic"] = topic.strip()
-        if isinstance(event_type, str) and event_type.strip():
-            coerced["event_type"] = event_type.strip()
-        if data is not None:
-            coerced["data"] = data if isinstance(data, dict) else {"value": data}
-        return coerced
-
-    return {"__raw_payload__": raw_payload}
-
-
-def _extract_webhook_topic(payload: Dict[str, Any]) -> Optional[str]:
-    """Pull the topic/object indicator out of a webhook payload."""
-    candidate_fields = ("topic", "object", "type", "feed", "kind")
-    for field in candidate_fields:
-        value = payload.get(field)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    nested = payload.get("payload") or payload.get("data")
-    if isinstance(nested, dict):
-        for field in candidate_fields:
-            value = nested.get(field)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return None
-
-
-def _normalize_topic(topic: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """Lowercase and map known aliases to canonical webhook topics plus optional symbol."""
-    if not topic:
-        return None, None
-    normalized = topic.strip().lower()
-
-    symbol: Optional[str] = None
-    for sep in TOPIC_SYMBOL_SEPARATORS:
-        if sep in normalized:
-            parts = normalized.split(sep, 1)
-            normalized = parts[0].strip()
-            symbol = (parts[1] or "").strip().upper() or None
-            break
-
-    canonical = TOPIC_ALIASES.get(normalized, normalized)
-    return canonical, symbol
-
-
 def _get_redis_client():
     """Ensure the Redis client exists and return the underlying connection."""
     try:
@@ -1466,30 +1350,14 @@ def _get_redis_client():
     return wrapper.client
 
 
-def _cache_option_trade(redis_conn, payload: Dict[str, Any]) -> None:
-    serialized = json.dumps(payload, default=str)
-    pipe = redis_conn.pipeline()
-    pipe.setex(UW_OPTION_LATEST_KEY, UW_CACHE_TTL_SECONDS, serialized)
-    pipe.lpush(UW_OPTION_HISTORY_KEY, serialized)
-    pipe.ltrim(UW_OPTION_HISTORY_KEY, 0, UW_HISTORY_LIMIT - 1)
-    pipe.execute()
-    try:
-        redis_conn.publish(UW_OPTION_STREAM_CHANNEL, serialized)
-    except Exception:
-        LOGGER.exception("Failed to publish option trade alert")
+def _normalize_string(value: Optional[Any]) -> str:
+    """Trim and stringify optionally missing payload values."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
 
-
-def _cache_market_state(redis_conn, payload: Dict[str, Any]) -> None:
-    serialized = json.dumps(payload, default=str)
-    pipe = redis_conn.pipeline()
-    pipe.setex(UW_MARKET_LATEST_KEY, UW_CACHE_TTL_SECONDS, serialized)
-    pipe.lpush(UW_MARKET_HISTORY_KEY, serialized)
-    pipe.ltrim(UW_MARKET_HISTORY_KEY, 0, UW_HISTORY_LIMIT - 1)
-    pipe.execute()
-    try:
-        redis_conn.publish(UW_MARKET_STREAM_CHANNEL, serialized)
-    except Exception:
-        LOGGER.exception("Failed to publish market state update")
 
 
 def _cache_ml_trade(redis_conn, payload: Dict[str, Any]) -> None:
@@ -1540,7 +1408,7 @@ def _timestamp_ms(value: Optional[str]) -> int:
             return int(dt.timestamp() * 1000)
         except ValueError:
             pass
-    return int(datetime.utcnow().timestamp() * 1000)
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
 def parse_args() -> argparse.Namespace:
@@ -1636,6 +1504,7 @@ def main() -> None:
         "port": args.port,
         "log_level": args.log_level.lower(),
         "timeout_keep_alive": args.timeout_keep_alive,
+        "access_log": False,  # Disable HTTP access logging
     }
     
     # Add SSL support if certificates provided

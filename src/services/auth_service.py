@@ -14,7 +14,7 @@ class AuthService:
     # Users allowed to trigger automated trades from alerts
     AUTOMATED_TRADE_USERS = ALERT_USERS
     # Channels allowed to receive automated alerts
-    ALERT_CHANNELS = ["1255265167113978008"]
+    ALERT_CHANNELS = ["1255265167113978008", "1429940127899324487"]
 
     @staticmethod
     def verify_user_for_futures(discord_id: str) -> bool:

@@ -24,8 +24,8 @@ class MarketAggAlertService:
     
     # Alert thresholds
     FAST_SHIFT_THRESHOLD = 0.15  # 15% change in ratio triggers alert
-    TRANSITION_CALL_HEAVY = 0.85  # Ratio below this = call-heavy market
-    TRANSITION_PUT_HEAVY = 1.15   # Ratio above this = put-heavy market
+    TRANSITION_LONG_BIAS = 0.80   # Ratio below this = long bias (call-heavy)
+    TRANSITION_SHORT_BIAS = 1.00  # Ratio above this = short bias (put-heavy)
     
     # Discord channel IDs for alerts
     DISCORD_CHANNELS = [1425136266676146236, 1429940127899324487, 1440464526695731391]
@@ -34,27 +34,33 @@ class MarketAggAlertService:
         """Initialize the alert service with Redis client."""
         self.redis_client = redis_client
         self._last_ratio: Optional[Decimal] = None
-        self._last_regime: Optional[str] = None  # 'call-heavy', 'neutral', 'put-heavy'
+        self._last_regime: Optional[str] = None  # 'long', 'neutral', 'short'
 
     def process_market_agg_update(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process market aggregation update and generate alerts if needed.
         
         Args:
-            data: Market aggregation data with put_premium, call_premium, etc.
+            data: Market aggregation data with put_call_ratio, put_premium, call_premium, etc.
             
         Returns:
             Alert dict if alert triggered, None otherwise
         """
         try:
-            # Extract premiums and calculate ratio
-            put_premium = Decimal(data.get("put_premium", "0"))
-            call_premium = Decimal(data.get("call_premium", "0"))
-            
-            if call_premium == 0:
-                LOGGER.warning("Call premium is zero, cannot calculate ratio")
+            # Use the put_call_ratio field from the message (volume-based ratio)
+            # This is the authoritative ratio for bias detection:
+            # - Below 0.8: Long bias
+            # - 0.8 to 1.0: Neutral  
+            # - Above 1.0: Short bias
+            raw_ratio = data.get("put_call_ratio")
+            if not raw_ratio:
+                LOGGER.warning("Missing put_call_ratio in market_agg data")
                 return None
-                
-            current_ratio = put_premium / call_premium
+            
+            try:
+                current_ratio = Decimal(str(raw_ratio))
+            except Exception as e:
+                LOGGER.warning("Invalid put_call_ratio value '%s': %s", raw_ratio, e)
+                return None
             
             # Get last known ratio from Redis if we don't have it in memory
             if self._last_ratio is None:
@@ -77,17 +83,26 @@ class MarketAggAlertService:
                         data=data,
                     )
             
-            # Check for regime transition
+            # Check for sentiment transition
             current_regime = self._get_regime(current_ratio)
             if self._last_regime and current_regime != self._last_regime:
                 alert = self._create_alert(
-                    alert_type="REGIME_CHANGE",
+                    alert_type="SENTIMENT_CHANGE",
                     current_ratio=current_ratio,
                     previous_ratio=self._last_ratio,
                     from_regime=self._last_regime,
                     to_regime=current_regime,
                     data=data,
                 )
+            
+            # Log state for debugging
+            LOGGER.debug(
+                "Market agg update: ratio=%.3f regime=%s (prev_ratio=%s prev_regime=%s)",
+                current_ratio,
+                current_regime,
+                self._last_ratio,
+                self._last_regime,
+            )
             
             # Update state
             self._last_ratio = current_ratio
@@ -106,11 +121,16 @@ class MarketAggAlertService:
             return None
 
     def _get_regime(self, ratio: Decimal) -> str:
-        """Determine market regime based on put/call ratio."""
-        if ratio < self.TRANSITION_CALL_HEAVY:
-            return "call-heavy"
-        elif ratio > self.TRANSITION_PUT_HEAVY:
-            return "put-heavy"
+        """Determine market regime based on put/call ratio.
+        
+        - Below 0.8: Long bias (calls dominating)
+        - 0.8 to 1.0: Neutral
+        - Above 1.0: Short bias (puts dominating)
+        """
+        if ratio < self.TRANSITION_LONG_BIAS:
+            return "long"
+        elif ratio > self.TRANSITION_SHORT_BIAS:
+            return "short"
         else:
             return "neutral"
 
@@ -179,13 +199,74 @@ class MarketAggAlertService:
         except Exception as exc:
             LOGGER.warning("Failed to save last ratio to Redis: %s", exc)
 
+    def create_scheduled_update(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a scheduled Put/Call Ratio update (non-alert)."""
+        try:
+            raw_ratio = data.get("put_call_ratio")
+            if not raw_ratio:
+                return None
+            
+            current_ratio = Decimal(str(raw_ratio))
+            current_regime = self._get_regime(current_ratio)
+            
+            update = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "alert_type": "SCHEDULED_UPDATE",
+                "current_ratio": float(current_ratio),
+                "regime": current_regime,
+                "date": data.get("date"),
+                "call_premium": data.get("call_premium"),
+                "put_premium": data.get("put_premium"),
+                "call_volume": data.get("call_volume"),
+                "put_volume": data.get("put_volume"),
+                "discord_channels": self.DISCORD_CHANNELS,
+            }
+            return update
+        except Exception as exc:
+            LOGGER.exception("Failed to create scheduled update: %s", exc)
+            return None
+
     def format_alert_message(self, alert: Dict[str, Any]) -> str:
         """Format alert for Discord display."""
         alert_type = alert["alert_type"]
         current_ratio = alert["current_ratio"]
         previous_ratio = alert.get("previous_ratio")
         
-        if alert_type == "FAST_SHIFT":
+        if alert_type == "SCHEDULED_UPDATE":
+            # Format like GEX feed with ANSI color codes
+            regime = alert.get("regime", "unknown")
+            date = alert.get("date", "N/A")
+            
+            # ANSI color codes
+            reset = "\u001b[0m"
+            dim_white = "\u001b[2;37m"
+            yellow = "\u001b[2;33m"
+            green = "\u001b[2;32m"
+            red = "\u001b[2;31m"
+            
+            # Choose color based on regime
+            ratio_color = green if regime == "long" else (red if regime == "short" else yellow)
+            
+            call_prem = float(alert['call_premium'])
+            put_prem = float(alert['put_premium'])
+            call_vol = int(alert['call_volume'])
+            put_vol = int(alert['put_volume'])
+            
+            return (
+                f"```ansi\n"
+                f"Put/Call Ratio: {dim_white}{date}{reset}\n"
+                f"\n"
+                f"Ratio               {ratio_color}{current_ratio:.3f}{reset}\n"
+                f"Sentiment           {ratio_color}{regime.upper()}{reset}\n"
+                f"\n"
+                f"Call Premium        {green}${call_prem:,.0f}{reset}\n"
+                f"Put Premium         {red}${put_prem:,.0f}{reset}\n"
+                f"\n"
+                f"Call Volume         {green}{call_vol:,}{reset}\n"
+                f"Put Volume          {red}{put_vol:,}{reset}\n"
+                f"```"
+            )
+        elif alert_type == "FAST_SHIFT":
             direction = alert.get("direction", "UNKNOWN")
             change_pct = alert.get("change_pct", 0)
             emoji = "🔴" if direction == "PUTS" else "🟢"
@@ -197,12 +278,12 @@ class MarketAggAlertService:
                 f"Put Premium: `${float(alert['put_premium']):,.0f}`\n"
                 f"Date: `{alert['date']}`"
             )
-        elif alert_type == "REGIME_CHANGE":
+        elif alert_type == "SENTIMENT_CHANGE":
             from_regime = alert.get("from_regime", "unknown")
             to_regime = alert.get("to_regime", "unknown")
             emoji = "⚠️"
             return (
-                f"{emoji} **REGIME CHANGE ALERT**\n"
+                f"{emoji} **SENTIMENT CHANGE ALERT**\n"
                 f"Market shifted from **{from_regime.upper()}** to **{to_regime.upper()}**\n"
                 f"Put/Call Ratio: `{previous_ratio:.3f}` → `{current_ratio:.3f}`\n"
                 f"Call Premium: `${float(alert['call_premium']):,.0f}`\n"

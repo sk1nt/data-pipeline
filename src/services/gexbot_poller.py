@@ -121,17 +121,19 @@ class GEXBotPoller:
                 interval_seconds = self._current_interval_seconds()
                 if self._auto_refresh_symbols and self._needs_supported_refresh():
                     await self._refresh_supported_symbols(session)
-                # Always poll the canonical supported symbols (downloaded list); dynamic adds removed
+                # Only poll configured symbols; intersect with supported list when available.
+                effective_symbols = self._effective_symbols()
                 # For NQ poller (base symbols include NQ_NDX), prefer a very fast RTH poll of the
                 # key symbols to reduce load: only ['SPX','NQ_NDX','ES_SPX'] during RTH; otherwise poll all.
                 if "NQ_NDX" in self._base_symbols:
+                    fast_set = {"SPX", "NQ_NDX", "ES_SPX"}
                     symbols = (
-                        ["SPX", "NQ_NDX", "ES_SPX"]
+                        sorted(fast_set & set(effective_symbols))
                         if self._is_rth_now()
-                        else sorted(self._supported_symbols or self._base_symbols)
+                        else effective_symbols
                     )
                 else:
-                    symbols = sorted(self._supported_symbols or self._base_symbols)
+                    symbols = effective_symbols
                 LOGGER.debug(
                     "poll-loop symbols=%s interval=%.3fs", symbols, interval_seconds
                 )
@@ -169,6 +171,14 @@ class GEXBotPoller:
                 except asyncio.TimeoutError:
                     continue
         LOGGER.info("GEXBot poller stopped")
+
+    def _effective_symbols(self) -> List[str]:
+        """Return the configured symbols, filtered by supported list if present."""
+        if self._supported_symbols:
+            filtered = sorted(self._base_symbols & self._supported_symbols)
+            if filtered:
+                return filtered
+        return sorted(self._base_symbols)
 
     def _current_interval_seconds(self) -> float:
         """Return the effective poll interval (seconds), clamped to >0."""

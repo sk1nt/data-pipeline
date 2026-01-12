@@ -9,15 +9,23 @@ from services.options_fill_service import OptionsFillService, InsufficientBuying
 from services.tastytrade_client import tastytrade_client, TastytradeAuthError
 from config.settings import config
 from services.notifications import notify_operator
-from lib.logging import get_logger
+
+# Setup logger
+try:
+    from src.lib.trading_logger import get_options_logger, log_trade_event
+    logger = get_options_logger()
+except ImportError:
+    from lib.logging import get_logger
+    logger = get_logger(__name__)
+    def log_trade_event(*args, **kwargs):
+        pass
+
 from lib.redis_client import get_redis_client
 
 try:
     from tastytrade.account import Account  # type: ignore
 except Exception:  # pragma: no cover - optional dependency path
     Account = None  # type: ignore
-
-logger = get_logger(__name__)
 
 
 class AutomatedOptionsService:
@@ -182,7 +190,7 @@ class AutomatedOptionsService:
             self.tastytrade_client.ensure_authorized()
         except TastytradeAuthError as exc:
             msg = f"TastyTrade authentication invalid: {exc}. Please update the refresh token."
-            print(msg)
+            logger.error(msg)
             raise TastytradeAuthError(msg) from exc
 
         # Calculate quantity based on allocation and account balances
@@ -225,7 +233,7 @@ class AutomatedOptionsService:
             )
         except TastytradeAuthError as exc:
             msg = f"TastyTrade authentication invalid while placing order: {exc}. Please update your refresh token."
-            print(msg)
+            logger.error(msg)
             # Audit auth failure
             try:
                 redis_client = get_redis_client()
@@ -263,7 +271,7 @@ class AutomatedOptionsService:
             }
         except Exception as exc:
             # Generic failure while placing order — audit and return
-            print(f"Unhandled error placing order: {exc}")
+            logger.exception("Unhandled error placing order: %s", exc)
             self._audit_failure(
                 user_id=user_id,
                 channel_id=channel_id,
@@ -313,7 +321,7 @@ class AutomatedOptionsService:
             )
         except Exception:
             # Non-fatal; we still return success, but log for the operator
-            print("Failed to write audit log to Redis for automated alert")
+            logger.warning("Failed to write audit log to Redis for automated alert")
 
         # If order was not created (result is falsy), log a failure audit entry for troubleshooting
         if not result:
@@ -333,13 +341,13 @@ class AutomatedOptionsService:
 
     def _compute_quantity(self, alert_data: dict, channel_id: str) -> tuple[int, float, float]:
         """Compute contract quantity using allocation, price, and account balances."""
-        alloc_pct = 0.1  # TODO: configurable per trader
+        # Get allocation percentage from config (percentage, e.g., 10.0 = 10%)
+        alloc_pct = config.tastytrade_allocation_percentage / 100.0
         price = float(alert_data.get("price") or 0.0)
         contract_price = max(price, 0.01) * 100  # options are 100x multiplier
-        max_contracts = 10
 
-        buying_power = 10000.0
-        net_liq = 10000.0
+        buying_power = 0.0
+        net_liq = 0.0
         try:
             if Account is not None:
                 session = self.tastytrade_client.get_session()
@@ -356,39 +364,37 @@ class AutomatedOptionsService:
                     if account is None:
                         account = accounts[0]
                     balances = account.get_balances(session)
-                    # Prefer available_trading_funds if present
+                    
+                    # Prioritize derivative buying power for options (matches !tt account logic)
                     buying_power = float(
-                        getattr(balances, "available_trading_funds", None)
-                        or getattr(balances, "derivative_buying_power", None)
-                        or getattr(balances, "equity_buying_power", None)
-                        or getattr(balances, "day_trading_buying_power", None)
-                        or getattr(balances, "net_liquidating_value", 10000.0)
-                        or 10000.0
+                        balances.derivative_buying_power
+                        or balances.equity_buying_power
+                        or balances.day_trading_buying_power
+                        or balances.net_liquidating_value
+                        or 0.0
                     )
-                    net_liq = float(
-                        getattr(balances, "net_liquidating_value", None) or buying_power
-                    )
-        except Exception:
-            # Fallback to defaults if balances are unavailable
-            pass
+                    net_liq = float(balances.net_liquidating_value or buying_power)
+        except Exception as e:
+            # Log failure for debugging and raise - don't proceed with zero balances
+            logger.error("Failed to fetch account balances: %s", e)
+            raise
 
-        alloc_dollars = max(0.0, buying_power * alloc_pct)
+        if buying_power <= 0:
+            raise ValueError(f"No buying power available: {buying_power}")
+
+        alloc_dollars = buying_power * alloc_pct
         qty = int(alloc_dollars // contract_price) if contract_price > 0 else 0
 
         # Adjust for buy alert channels (more conservative sizing)
         if self.alert_parser.is_buy_message(channel_id):
             qty = max(1, int(qty * 0.5))
 
-        # Ensure at least 1 contract and cap to avoid oversizing
+        # Ensure at least 1 contract
         if qty <= 0:
             qty = 1
-        qty = min(qty, max_contracts)
 
-        # Additional safety: avoid exceeding a loose multiple of net liq
+        # No max_contracts cap - let allocation percentage control position size
         est_notional = qty * contract_price
-        if net_liq > 0 and est_notional > net_liq * 10:
-            # Scale down to 10x net liq as a guardrail
-            qty = max(1, int((net_liq * 10) // contract_price))
 
         return qty, float(buying_power), float(est_notional)
 

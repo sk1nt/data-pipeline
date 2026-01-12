@@ -14,6 +14,7 @@ import hashlib
 import time
 from tastytrade.order import (
     NewOrder,
+    NewComplexOrder,
     Leg,
     OrderType,
     OrderTimeInForce,
@@ -739,25 +740,39 @@ class TastyTradeClient:
         """Return an order ID string/int from either SDK objects or raw dict responses.
 
         Common SDK returns:
+          - PlacedOrderResponse object with `order` attribute containing PlacedOrder with `id`
           - PlacedOrder object with attribute `id` (int or str)
           - Raw dict from REST with 'data' -> 'id' or top-level 'id'
         """
         if placed is None:
             return None
-        # If object with attribute 'id'
+        # If PlacedOrderResponse with nested 'order' attribute
+        try:
+            order_obj = getattr(placed, "order", None)
+            if order_obj is not None:
+                oid = getattr(order_obj, "id", None)
+                if oid is not None and oid != -1:
+                    return str(oid)
+        except Exception:
+            pass
+        # If object with attribute 'id' directly
         try:
             oid = getattr(placed, "id", None)
-            if oid is not None:
+            if oid is not None and oid != -1:
                 return str(oid)
         except Exception:
             pass
         # If dict-like response
         try:
             if isinstance(placed, dict):
-                # common shapes: {'data': {'id': 123}} or {'id': 123}
+                # common shapes: {'data': {'order': {'id': 123}}}, {'data': {'id': 123}} or {'id': 123}
                 data = placed.get("data") if placed.get("data") is not None else placed
-                if isinstance(data, dict) and "id" in data:
-                    return str(data["id"])
+                if isinstance(data, dict):
+                    # Check for nested order object
+                    if "order" in data and isinstance(data["order"], dict) and "id" in data["order"]:
+                        return str(data["order"]["id"])
+                    if "id" in data:
+                        return str(data["id"])
                 if "id" in placed:
                     return str(placed["id"])
         except Exception:
@@ -775,17 +790,97 @@ class TastyTradeClient:
             return exp
         return datetime.now(timezone.utc) + timedelta(minutes=20)
 
+    def _extract_futures_product(self, symbol: str) -> str:
+        """Extract product code from futures symbol (e.g., 'NQH6' -> 'NQ', 'MNQH6' -> 'MNQ')."""
+        # Known futures product codes (order matters - check longer ones first)
+        FUTURES_PRODUCTS = ['MNQ', 'MES', 'MYM', 'M2K', 'NQ', 'ES', 'YM', 'RTY']
+        symbol = symbol.lstrip('/').upper()
+        for prod in FUTURES_PRODUCTS:
+            if symbol.startswith(prod):
+                return prod
+        # Fallback: try regex (letters before month code, but be careful with MNQ/NQ ambiguity)
+        import re
+        # Month codes that are NOT commonly part of product names
+        match = re.match(r'^([A-Z]{2,3})([FGHJKMNUVXZ])(\d{1,2})$', symbol)
+        if match:
+            return match.group(1)
+        return symbol[:2] if len(symbol) >= 2 else symbol
+
+    def _get_conflicting_exit_orders(self, session, account, symbol: str, entry_action) -> list:
+        """Find existing exit orders on the same symbol that would conflict with a new entry."""
+        import time
+        conflicting = []
+        try:
+            live_orders = account.get_live_orders(session)
+            LOGGER.debug("Checking %d live orders for conflicts with %s (entry=%s)", 
+                        len(live_orders), symbol, entry_action)
+            
+            # Extract the product code from our symbol
+            our_product = self._extract_futures_product(symbol)
+            
+            for order in live_orders:
+                # Check if this order is on the same underlying symbol
+                underlying = getattr(order, 'underlying_symbol', '')
+                if not underlying:
+                    # Try to get from legs
+                    legs = getattr(order, 'legs', [])
+                    if legs:
+                        underlying = getattr(legs[0], 'symbol', '')
+                
+                # Normalize for comparison (strip leading /)
+                order_symbol = underlying.lstrip('/') if underlying else ''
+                
+                # Extract product code from order symbol
+                order_product = self._extract_futures_product(order_symbol)
+                
+                LOGGER.debug("  Order %s: symbol=%s, product=%s, our_product=%s", 
+                            getattr(order, 'id', '?'), order_symbol, order_product, our_product)
+                
+                # Match if same product (NQ == NQ, MNQ == MNQ)
+                if order_product == our_product:
+                    # Check if this is an exit order (opposite side of our entry)
+                    order_status = getattr(order, 'status', None)
+                    status_val = str(order_status.value).lower() if order_status else ''
+                    LOGGER.debug("    Status: %s", status_val)
+                    
+                    if status_val not in ('filled', 'cancelled', 'rejected', 'expired'):
+                        legs = getattr(order, 'legs', [])
+                        if legs:
+                            leg_action = getattr(legs[0], 'action', None)
+                            LOGGER.debug("    Leg action: %s (entry_action=%s)", leg_action, entry_action)
+                            
+                            # If we're opening with BUY_TO_OPEN, conflicts are SELL/SELL_TO_CLOSE
+                            # If we're opening with SELL_TO_OPEN, conflicts are BUY/BUY_TO_CLOSE
+                            if entry_action in (OrderAction.BUY_TO_OPEN, OrderAction.BUY):
+                                if leg_action in (OrderAction.SELL, OrderAction.SELL_TO_CLOSE, OrderAction.SELL_TO_OPEN):
+                                    LOGGER.debug("    -> CONFLICT (BUY entry vs SELL order)")
+                                    conflicting.append(order)
+                            elif entry_action in (OrderAction.SELL_TO_OPEN, OrderAction.SELL):
+                                if leg_action in (OrderAction.BUY, OrderAction.BUY_TO_CLOSE, OrderAction.BUY_TO_OPEN):
+                                    LOGGER.debug("    -> CONFLICT (SELL entry vs BUY order)")
+                                    conflicting.append(order)
+        except Exception as e:
+            LOGGER.warning("Error getting conflicting orders: %s", e)
+        return conflicting
+
     def place_market_order_with_tp(
         self,
         symbol: str,
         action: str,
         quantity: int,
         tp_ticks: float,
+        sl_ticks: float = 0.0,
         tick_size: float = 0.25,
         dry_run: Optional[bool] = None,
         market_price: Optional[float] = None,
     ) -> str:
-        """Place market entry order, then attach limit TP as bracketed OTO (separate submits)."""
+        """Place market entry order with TP exit (and optional SL via OTOCO bracket).
+        
+        If sl_ticks > 0, uses OTOCO bracket order (entry + TP limit + SL stop).
+        If sl_ticks == 0, uses cancel/restore pattern for TP only.
+        """
+        import time
+        
         with self._lock:
             session = self._ensure_session()
             account = self._ensure_active_account(session)
@@ -800,11 +895,11 @@ class TastyTradeClient:
                 else InstrumentType.EQUITY
             )
 
-            # For futures, set tick_size to 1 (points), for equities 0.25
+            # Default tick sizes - will be refined from SDK if possible
             if inst_type == InstrumentType.FUTURE:
-                tick_size = 1.0
+                tick_size = 0.25  # MNQ/NQ default tick size
             else:
-                tick_size = 0.25
+                tick_size = 0.01  # Equities
 
             # For futures, try to resolve the exact contract symbol the API expects
             if inst_type == InstrumentType.FUTURE:
@@ -815,6 +910,30 @@ class TastyTradeClient:
                 except Exception:
                     # if resolve fails, proceed with the normalized symbol
                     pass
+                    
+                # Query SDK for contract-specific tick size (do this BEFORE calculating TP)
+                try:
+                    sym_lookup = symbol.lstrip("/")
+                    futs = Future.get(session, symbols=[sym_lookup])
+                    if futs:
+                        f = futs[0]
+                        tick_meta = getattr(f, "tick_size", None)
+                        min_tick = getattr(f, "min_tick", None)
+                        LOGGER.debug("SDK returned for %s: tick_size=%s, min_tick=%s", 
+                                    symbol, tick_meta, min_tick)
+                        # Use tick_size if it looks like a point value (0.25, 0.5, etc.)
+                        # Ignore if it looks like a dollar value (5.0 for NQ)
+                        if isinstance(tick_meta, (int, float)) and 0 < tick_meta < 1:
+                            tick_size = float(tick_meta)
+                            LOGGER.debug("Using SDK tick_size for %s: %s", symbol, tick_size)
+                        elif isinstance(min_tick, (int, float)) and 0 < min_tick < 1:
+                            tick_size = float(min_tick)
+                            LOGGER.debug("Using SDK min_tick for %s: %s", symbol, tick_size)
+                        # Otherwise keep default 0.25 for NQ/MNQ
+                except Exception as ex:
+                    LOGGER.debug("SDK tick lookup exception: %s", ex)
+                    # If we cannot resolve tick from SDK, continue with default
+                    pass
 
             # Get current price (approximate from quote) or use provided market_price
             if market_price is not None:
@@ -823,13 +942,16 @@ class TastyTradeClient:
                 current_price = self._get_current_price(session, symbol)
 
             # Determine entry action
+            # For futures on TastyTrade:
+            # - Entries: BUY_TO_OPEN (BTO) / SELL_TO_OPEN (STO)
+            # - Exits (TP): SELL_TO_CLOSE (STC) / BUY_TO_CLOSE (BTC)
             if inst_type == InstrumentType.FUTURE:
                 entry_action = (
                     OrderAction.BUY_TO_OPEN
                     if action.upper() == "BUY"
                     else OrderAction.SELL_TO_OPEN
                 )
-                # TP is opposite close
+                # TP is opposite side - use _TO_CLOSE to properly close the position
                 tp_action = (
                     OrderAction.SELL_TO_CLOSE
                     if action.upper() == "BUY"
@@ -837,47 +959,26 @@ class TastyTradeClient:
                 )
             else:
                 entry_action = (
-                    OrderAction.BUY if action.upper() == "BUY" else OrderAction.SELL
+                    OrderAction.BUY_TO_OPEN if action.upper() == "BUY" else OrderAction.SELL_TO_OPEN
                 )
-                # For equities, reuse entry action but invert for close (simplified; equities don't need _TO_OPEN/CLOSE)
+                # For equities, use _TO_CLOSE for exits
                 tp_action = (
-                    OrderAction.SELL if action.upper() == "BUY" else OrderAction.BUY
+                    OrderAction.SELL_TO_CLOSE if action.upper() == "BUY" else OrderAction.BUY_TO_CLOSE
                 )
 
-            # Calculate TP price directionally
+            # Calculate TP price directionally (tick_size already resolved from SDK above)
+            LOGGER.debug("Calculating TP: current_price=%s, tp_ticks=%s, tick_size=%s", 
+                        current_price, tp_ticks, tick_size)
             if action.upper() == "BUY":  # Long: TP above
                 tp_price = current_price + (tp_ticks * tick_size)
                 round_dir = "up"  # Ceiling to ensure profit
             else:  # Short: TP below
                 tp_price = current_price - (tp_ticks * tick_size)
                 round_dir = "down"  # Floor to ensure profit
-
-            # Determine tick_size from instrument metadata if possible (falls back to provided)
-            try:
-                if (
-                    inst_type == InstrumentType.FUTURE
-                    and isinstance(symbol, str)
-                    and symbol.startswith("/")
-                ):
-                    # Try to query the SDK for contract-specific tick size
-                    # strip leading slash for symbols passed to the SDK
-                    sym_lookup = symbol.lstrip("/")
-                    futs = Future.get(session, symbols=[sym_lookup])
-                    if futs:
-                        f = futs[0]
-                        tick_meta = getattr(f, "tick_size", None) or getattr(
-                            f, "min_tick", None
-                        )
-                        if isinstance(tick_meta, (int, float)) and tick_meta > 0:
-                            tick_size = float(tick_meta)
-            except Exception:
-                # If we cannot resolve tick from SDK, continue with given tick_size
-                pass
+            
+            LOGGER.debug("TP price before rounding: %s", tp_price)
 
             # Round TP price to the instrument's tick size and ensure it is on the correct side
-            import math
-
-            # Use module-level function for tick rounding
             def _round_to_tick(price: float, tick: float, direction: str) -> float:
                 return round_to_tick(price, tick, direction)
 
@@ -915,31 +1016,149 @@ class TastyTradeClient:
                 leg_symbol = f"{prod}{month}{year}"
 
             eff_dry = self._dry_run if dry_run is None else bool(dry_run)
-            market_order_id = None
-            tp_order_id = None
 
-            # Build and send market entry first (single leg)
+            # Calculate SL price if sl_ticks > 0
+            sl_price = None
+            if sl_ticks > 0:
+                if action.upper() == "BUY":  # Long: SL below
+                    sl_price = current_price - (sl_ticks * tick_size)
+                    sl_price = _round_to_tick(sl_price, tick_size, "down")
+                else:  # Short: SL above
+                    sl_price = current_price + (sl_ticks * tick_size)
+                    sl_price = _round_to_tick(sl_price, tick_size, "up")
+                LOGGER.debug("SL price: %s (sl_ticks=%s)", sl_price, sl_ticks)
+
+            # Build entry order
             entry_leg = Leg(
                 instrument_type=inst_type,
                 symbol=leg_symbol,
                 action=entry_action,
                 quantity=quantity,
             )
+            
+            # Build closing leg for TP/SL
+            closing_leg = Leg(
+                instrument_type=inst_type,
+                symbol=leg_symbol,
+                action=tp_action,
+                quantity=quantity,
+            )
+
+            # If SL is specified, use OTOCO bracket order
+            if sl_ticks > 0 and sl_price is not None:
+                LOGGER.info("Using OTOCO bracket order with TP=%s, SL=%s", tp_price, sl_price)
+                
+                # Entry order (trigger)
+                trigger_order = NewOrder(
+                    time_in_force=OrderTimeInForce.DAY,
+                    order_type=OrderType.MARKET,
+                    legs=[entry_leg],
+                )
+                
+                # TP order (limit) - price sign determines credit/debit
+                if tp_action == OrderAction.BUY_TO_CLOSE:
+                    tp_order_price = Decimal(str(-abs(tp_price)))  # Debit for buying
+                else:
+                    tp_order_price = Decimal(str(abs(tp_price)))   # Credit for selling
+                
+                tp_order = NewOrder(
+                    time_in_force=OrderTimeInForce.GTC,
+                    order_type=OrderType.LIMIT,
+                    price=tp_order_price,
+                    legs=[closing_leg],
+                )
+                
+                # SL order (stop)
+                sl_order = NewOrder(
+                    time_in_force=OrderTimeInForce.GTC,
+                    order_type=OrderType.STOP,
+                    stop_trigger=Decimal(str(sl_price)),
+                    legs=[closing_leg],
+                )
+                
+                # Create OTOCO complex order
+                otoco = NewComplexOrder(
+                    trigger_order=trigger_order,
+                    orders=[tp_order, sl_order],
+                )
+                
+                LOGGER.info("Sending OTOCO bracket (dry-run=%s): trigger=%s, TP=%s, SL=%s", 
+                           eff_dry, trigger_order, tp_price, sl_price)
+                
+                try:
+                    resp = account.place_complex_order(session, otoco, dry_run=eff_dry)
+                    order_id = getattr(resp.complex_order, 'id', None) if resp.complex_order else None
+                    LOGGER.info("OTOCO bracket placed, complex_order_id=%s", order_id)
+                    return (
+                        f"{'[DRY-RUN] ' if eff_dry else ''}OTOCO bracket placed: "
+                        f"Market {action} {quantity} {symbol} + TP @ {tp_price:.2f} + SL @ {sl_price:.2f} "
+                        f"(ID: {order_id or 'n/a'})"
+                    )
+                except Exception as exc:
+                    msg = str(exc)
+                    LOGGER.warning("OTOCO bracket failed: %s", msg)
+                    self._raise_on_auth_error(exc)
+                    return f"OTOCO bracket order failed: {msg}"
+
+            # No SL - use original cancel/restore pattern for TP only
             entry_order = NewOrder(
                 time_in_force=OrderTimeInForce.DAY,
                 order_type=OrderType.MARKET,
                 legs=[entry_leg],
             )
 
+            # Step 1: Do a dry-run first to check buying power (unless already in dry-run mode)
+            if not eff_dry:
+                LOGGER.info("Checking buying power with dry-run...")
+                try:
+                    dry_result = account.place_order(session, entry_order, dry_run=True)
+                    # Check for errors in dry-run response
+                    if hasattr(dry_result, 'errors') and dry_result.errors:
+                        error_msgs = [str(e) for e in dry_result.errors]
+                        LOGGER.warning("Dry-run failed: %s", error_msgs)
+                        return f"Order rejected (insufficient BP or other error): {'; '.join(error_msgs)}"
+                except Exception as e:
+                    error_msg = str(e)
+                    if 'buying_power' in error_msg.lower() or 'margin' in error_msg.lower():
+                        LOGGER.warning("Insufficient buying power: %s", error_msg)
+                        return f"Order rejected - insufficient buying power: {error_msg}"
+                    # Other errors might be transient, continue
+                    LOGGER.debug("Dry-run check exception (continuing): %s", e)
+
+            # Step 2: Find and cancel conflicting exit orders
+            conflicting_orders = self._get_conflicting_exit_orders(session, account, symbol, entry_action)
+            cancelled_orders_info = []  # Store info to restore later
+            
+            if conflicting_orders:
+                LOGGER.info("Found %d conflicting exit orders to temporarily cancel", len(conflicting_orders))
+                for order in conflicting_orders:
+                    order_id = getattr(order, 'id', None)
+                    if order_id and order_id != -1:
+                        # Save order details for restoration
+                        order_info = {
+                            'price': getattr(order, 'price', None),
+                            'legs': getattr(order, 'legs', []),
+                            'time_in_force': getattr(order, 'time_in_force', OrderTimeInForce.GTC),
+                            'order_type': getattr(order, 'order_type', OrderType.LIMIT),
+                        }
+                        cancelled_orders_info.append(order_info)
+                        
+                        if not eff_dry:
+                            try:
+                                account.delete_order(session, order_id)
+                                LOGGER.info("Cancelled conflicting order %s", order_id)
+                            except Exception as e:
+                                LOGGER.warning("Failed to cancel order %s: %s", order_id, e)
+                
+                # Wait briefly for API to process cancellations before placing new order
+                if not eff_dry and cancelled_orders_info:
+                    time.sleep(0.3)
+
+            # Step 3: Place the entry order
             LOGGER.info("Sending market entry (dry-run=%s): %s", eff_dry, entry_order)
+            market_order_id = None
             try:
-                order_json = entry_order.model_dump_json(
-                    exclude_none=True, by_alias=True
-                )
-                LOGGER.debug("Market entry JSON: %s", order_json)
-                placed_entry = account.place_order(
-                    session, entry_order, dry_run=eff_dry
-                )
+                placed_entry = account.place_order(session, entry_order, dry_run=eff_dry)
                 market_order_id = self._extract_order_id(placed_entry)
                 if market_order_id is None:
                     LOGGER.warning(
@@ -947,70 +1166,165 @@ class TastyTradeClient:
                         eff_dry,
                         repr(placed_entry),
                     )
+                    # Restore cancelled orders before returning
+                    self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
                     return "Market entry submitted but no ID returned (check logs)."
             except Exception as exc:
                 msg = str(exc)
                 LOGGER.warning("Market entry failed: %s", msg)
+                # Restore cancelled orders before raising
+                self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
                 self._raise_on_auth_error(exc)
                 raise
 
-            # Build TP as a separate limit order (legging in to satisfy API rules)
-            # Sign the price so the API infers price_effect correctly
-            price_sign = (
-                -1
-                if tp_action
-                in {OrderAction.BUY, OrderAction.BUY_TO_CLOSE, OrderAction.BUY_TO_OPEN}
-                else 1
-            )
-            tp_price_signed = Decimal(str(tp_price)) * Decimal(price_sign)
+            # Step 4: Wait for market order to fill and get actual fill price
+            actual_fill_price = None
+            if not eff_dry:
+                max_wait_seconds = 5
+                poll_interval = 0.3
+                filled = False
+                for _ in range(int(max_wait_seconds / poll_interval)):
+                    try:
+                        order_resp = session._get(
+                            f"/accounts/{account.account_number}/orders/{market_order_id}"
+                        )
+                        order_data = order_resp if isinstance(order_resp, dict) else {}
+                        status = order_data.get("status", "")
+                        if status.lower() == "filled":
+                            filled = True
+                            # Debug: log the order data structure to understand it
+                            LOGGER.debug("Order response keys: %s", list(order_data.keys()) if order_data else 'empty')
+                            
+                            # Try to get the actual fill price from the order response
+                            # Check legs for fill price
+                            legs_data = order_data.get("legs", [])
+                            if legs_data and isinstance(legs_data, list):
+                                LOGGER.debug("Legs data: %s", legs_data)
+                                for leg in legs_data:
+                                    fill_info = leg.get("fills", [])
+                                    if fill_info and isinstance(fill_info, list):
+                                        for fill in fill_info:
+                                            fp = fill.get("fill_price") or fill.get("price")
+                                            if fp:
+                                                actual_fill_price = float(fp)
+                                                break
+                            
+                            # Try various field names for fill price
+                            if not actual_fill_price:
+                                for field in ['average_fill_price', 'avg_fill_price', 'filled_price', 
+                                              'fill_price', 'price', 'executed_price']:
+                                    val = order_data.get(field)
+                                    if val:
+                                        try:
+                                            actual_fill_price = float(val)
+                                            LOGGER.debug("Found fill price in field '%s': %s", field, actual_fill_price)
+                                            break
+                                        except (ValueError, TypeError):
+                                            pass
+                            
+                            LOGGER.info("Market entry order %s filled at %s", market_order_id, actual_fill_price)
+                            break
+                        elif status.lower() in ("rejected", "cancelled", "expired"):
+                            LOGGER.warning("Market entry order %s status: %s", market_order_id, status)
+                            # Restore cancelled orders
+                            self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
+                            return f"Market entry order {status} - orders restored"
+                    except Exception as e:
+                        LOGGER.debug("Error polling order status: %s", e)
+                    time.sleep(poll_interval)
+                
+                if not filled:
+                    LOGGER.warning("Market order %s not confirmed filled after %ss, proceeding anyway", 
+                                  market_order_id, max_wait_seconds)
+
+            # Step 5: Recalculate TP price based on actual fill price (if available)
+            if actual_fill_price:
+                # Recalculate TP based on actual fill, not quote price
+                if action.upper() == "BUY":  # Long: TP above fill
+                    tp_price = actual_fill_price + (tp_ticks * tick_size)
+                else:  # Short: TP below fill
+                    tp_price = actual_fill_price - (tp_ticks * tick_size)
+                
+                # Round to tick
+                def _round_to_tick_local(price: float, tick: float, direction: str) -> float:
+                    return round_to_tick(price, tick, direction)
+                
+                round_dir = "up" if action.upper() == "BUY" else "down"
+                tp_price = _round_to_tick_local(tp_price, tick_size, round_dir)
+                LOGGER.info("Recalculated TP based on fill price %s: new TP = %s", actual_fill_price, tp_price)
+
+            # Step 6: Place the new TP order
+            # TastyTrade price sign determines price_effect:
+            # - Negative price = Debit (paying money, used for BUY orders)
+            # - Positive price = Credit (receiving money, used for SELL orders)
             tp_leg = Leg(
                 instrument_type=inst_type,
                 symbol=leg_symbol,
                 action=tp_action,
                 quantity=quantity,
             )
+            # For BUY_TO_CLOSE, we pay money (debit) -> negative price
+            # For SELL_TO_CLOSE, we receive money (credit) -> positive price
+            if tp_action == OrderAction.BUY_TO_CLOSE:
+                order_price = Decimal(str(-abs(tp_price)))  # Negative for debit
+            else:
+                order_price = Decimal(str(abs(tp_price)))   # Positive for credit
+            
             tp_order = NewOrder(
                 time_in_force=OrderTimeInForce.GTC,
                 order_type=OrderType.LIMIT,
-                price=tp_price_signed,
+                price=order_price,
                 legs=[tp_leg],
             )
 
-            LOGGER.info(
-                "Sending TP limit (dry-run=%s): %s @ %s", eff_dry, tp_order, tp_price
-            )
+            LOGGER.info("Sending TP limit (dry-run=%s): %s @ %s (order_price=%s)", eff_dry, tp_order, tp_price, order_price)
+            tp_order_id = None
             try:
-                # Attach bracket/OTO reference for TP leg; use raw POST to include bracket-order-id
-                tp_payload = tp_order.model_dump(exclude_none=True, by_alias=True)
-                tp_payload["bracket-order-id"] = market_order_id
-                tp_json = json.dumps(tp_payload, default=str)
-                tp_url = f"/accounts/{account.account_number}/orders"
-                if eff_dry:
-                    tp_url += "/dry-run"
-                placed_tp = session._post(tp_url, data=tp_json)
+                placed_tp = account.place_order(session, tp_order, dry_run=eff_dry)
                 tp_order_id = self._extract_order_id(placed_tp)
-                if tp_order_id is None:
-                    LOGGER.warning(
-                        "TP order returned no ID (dry_run=%s): %s",
-                        eff_dry,
-                        repr(placed_tp),
-                    )
             except Exception as exc:
                 msg = str(exc)
-                LOGGER.warning(
-                    "TP order failed (entry_id=%s): %s", market_order_id, msg
-                )
-                self._raise_on_auth_error(exc)
-                # Entry already placed; surface TP failure but keep entry ID
+                LOGGER.warning("TP order failed (entry_id=%s): %s", market_order_id, msg)
+                # Still restore cancelled orders
+                self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
                 return (
                     f"[{'DRY-RUN' if eff_dry else 'LIVE'}] Placed {action.lower()} entry {quantity} {symbol} @ market "
-                    f"(ID: {market_order_id}) but TP failed: {msg}"
+                    f"(ID: {market_order_id}) but TP failed: {msg}. Restored {len(cancelled_orders_info)} exit orders."
                 )
+
+            # Step 6: Restore previously cancelled exit orders at their original levels
+            restored_count = self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
 
             return (
                 f"[{'DRY-RUN' if eff_dry else 'LIVE'}] Placed {action.lower()} entry {quantity} {symbol} @ market "
-                f"(ID: {market_order_id}) + TP limit @ {tp_price:.2f} (ID: {tp_order_id or 'n/a'})"
+                f"(ID: {market_order_id}) + TP @ {tp_price:.2f} (ID: {tp_order_id or 'n/a'}). "
+                f"Restored {restored_count} exit orders."
             )
+
+    def _restore_cancelled_orders(self, session, account, cancelled_orders_info: list, dry_run: bool) -> int:
+        """Restore previously cancelled orders at their original levels."""
+        restored = 0
+        for order_info in cancelled_orders_info:
+            if dry_run:
+                restored += 1
+                continue
+            try:
+                legs = order_info.get('legs', [])
+                if not legs:
+                    continue
+                # Recreate the order
+                new_order = NewOrder(
+                    time_in_force=order_info.get('time_in_force', OrderTimeInForce.GTC),
+                    order_type=order_info.get('order_type', OrderType.LIMIT),
+                    price=order_info.get('price'),
+                    legs=legs,
+                )
+                account.place_order(session, new_order, dry_run=False)
+                restored += 1
+                LOGGER.info("Restored exit order at price %s", order_info.get('price'))
+            except Exception as e:
+                LOGGER.warning("Failed to restore order: %s", e)
+        return restored
 
     def _normalize_symbol(self, symbol: str) -> str:
         symbol = symbol.upper().strip()

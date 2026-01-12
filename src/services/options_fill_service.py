@@ -16,6 +16,16 @@ from tastytrade.order import (
 # Import via absolute paths so the module works when `src` is on sys.path
 from services.tastytrade_client import tastytrade_client, TastytradeAuthError
 
+# Trading-specific logger
+try:
+    from src.lib.trading_logger import get_options_logger, log_trade_event
+    logger = get_options_logger()
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
+    def log_trade_event(*args, **kwargs):
+        pass
+
 
 class InsufficientBuyingPowerError(Exception):
     """Raised when estimated notional exceeds available buying power."""
@@ -48,12 +58,13 @@ class OptionsFillService:
             if data.bid and data.ask:
                 return (data.bid + data.ask) / 2
         except TastytradeAuthError as e:
-            print(
-                f"TastyTrade auth error while fetching market data for {option_symbol}: {e}"
+            logger.error(
+                "TastyTrade auth error while fetching market data for %s: %s",
+                option_symbol, e
             )
             raise
         except Exception as e:
-            print(f"Error fetching market data for {option_symbol}: {e}")
+            logger.error("Error fetching market data for %s: %s", option_symbol, e)
         return None
 
     def _select_account(self, accounts):
@@ -99,7 +110,7 @@ class OptionsFillService:
             # If options are closing only, we should not submit opening orders
             if getattr(trading_status, "is_options_closing_only", False):
                 # opening orders are not allowed; abort
-                print("Trading status indicates options are closing-only; aborting order")
+                logger.warning("Trading status indicates options are closing-only; aborting order")
                 return None
         except Exception:
             # Non-fatal; continue if trading status is unavailable
@@ -122,7 +133,7 @@ class OptionsFillService:
                 msg = (
                     f"Insufficient buying power for order: est_notional={est_notional} buying_power={buying_power}"
                 )
-                print(msg)
+                logger.warning(msg)
                 raise InsufficientBuyingPowerError(msg)
         except InsufficientBuyingPowerError:
             raise
@@ -131,25 +142,19 @@ class OptionsFillService:
             pass
 
         leg = option.build_leg(quantity, action)
-        # Determine appropriate price effect for the order based on action
-        desired_price_effect = (
-            PriceEffect.DEBIT
-            if action in (OrderAction.BUY_TO_OPEN, OrderAction.BUY_TO_CLOSE)
-            else PriceEffect.CREDIT
-        )
+        # Determine appropriate price sign for the order based on action
+        # The TastyTrade SDK uses price sign to determine price_effect:
+        # - Negative price = DEBIT (for BUY orders)
+        # - Positive price = CREDIT (for SELL orders)
+        is_buy = action in (OrderAction.BUY_TO_OPEN, OrderAction.BUY_TO_CLOSE)
+        signed_price = -abs(price) if is_buy else abs(price)
+        
         order = NewOrder(
             time_in_force=OrderTimeInForce.DAY,
             order_type=OrderType.LIMIT,
             legs=[leg],
-            price=price,
-            price_effect=desired_price_effect,
+            price=signed_price,
         )
-        # Ensure the model has our desired price effect; rebuild if the SDK normalized it away
-        try:
-            if order.model_dump().get('price_effect') != desired_price_effect:
-                order = order.model_copy(update={"price_effect": desired_price_effect})
-        except Exception:
-            pass
 
         try:
             # Use retry wrapper for transient errors
@@ -166,21 +171,20 @@ class OptionsFillService:
                 )
 
             response = attempt_place_order()
-            return str(response.order.id) if hasattr(response, "order") else None
+            order_id = str(response.order.id) if hasattr(response, "order") else None
+            if order_id:
+                logger.info("Order placed successfully: order_id=%s, price=%s", order_id, price)
+            return order_id
         except TastytradeAuthError as e:
-            print(f"TastyTrade auth error while placing order: {e}")
+            logger.error("TastyTrade auth error while placing order: %s", e)
             raise
         except Exception as e:
             # If the error suggests we can't buy for a credit, it means price_effect is wrong
             # Options cannot use MARKET orders - must always be LIMIT
             msg = str(e)
-            print(f"Error placing order: {msg}")
+            logger.error("Error placing order: %s", msg)
             if "cant_buy_for_credit" in msg.lower() or "cannot buy" in msg.lower():
-                try:
-                    logger = __import__("logging").getLogger(__name__)
-                    logger.warning("Order failed; TastyTrade rejected price_effect. Not retrying to avoid duplicate rejections.")
-                except Exception:
-                    pass
+                logger.warning("Order failed; TastyTrade rejected price_effect. Not retrying to avoid duplicate rejections.")
                 # Don't retry with market order - options don't support market orders on TastyTrade
                 # The price_effect logic above should have been correct, so this is a broker constraint
                 raise Exception(f"TastyTrade rejected order (price_effect issue): {msg}")
@@ -199,10 +203,45 @@ class OptionsFillService:
                     if str(order.id) == order_id and order.status.value == "Filled":
                         return True
         except TastytradeAuthError as e:
-            print(f"TastyTrade auth error while checking order {order_id}: {e}")
+            logger.error("TastyTrade auth error while checking order %s: %s", order_id, e)
             raise
         except Exception as e:
-            print(f"Error checking order status: {e}")
+            logger.error("Error checking order status for %s: %s", order_id, e)
+        return False
+
+    async def check_order_cancelled(self, order_id: str) -> bool:
+        """Check if an order was cancelled (user or system)."""
+        try:
+            self.tastytrade_client.ensure_authorized()
+            session = self.tastytrade_client.get_session()
+            accounts = Account.get(session)
+            account = self._select_account(accounts)
+            if account:
+                # Check live orders first
+                orders = account.get_live_orders(session)
+                for order in orders:
+                    if str(order.id) == order_id:
+                        # Common cancelled status values: Cancelled, Canceled, Rejected
+                        status = order.status.value if hasattr(order.status, 'value') else str(order.status)
+                        if status in ("Cancelled", "Canceled", "Rejected"):
+                            logger.info("Order %s was cancelled/rejected: %s", order_id, status)
+                            return True
+                        return False
+                # If not in live orders, check order history
+                try:
+                    history = account.get_order(session, order_id)
+                    if history:
+                        status = history.status.value if hasattr(history.status, 'value') else str(history.status)
+                        if status in ("Cancelled", "Canceled", "Rejected"):
+                            logger.info("Order %s was cancelled/rejected: %s", order_id, status)
+                            return True
+                except Exception:
+                    pass
+        except TastytradeAuthError as e:
+            logger.error("TastyTrade auth error while checking order %s: %s", order_id, e)
+            raise
+        except Exception as e:
+            logger.error("Error checking if order cancelled %s: %s", order_id, e)
         return False
 
     async def cancel_order(self, order_id: str) -> bool:
@@ -218,12 +257,13 @@ class OptionsFillService:
                     return account.delete_order(session, order_id)
 
                 attempt_delete()
+                logger.info("Order canceled: order_id=%s", order_id)
                 return True
         except TastytradeAuthError as e:
-            print(f"TastyTrade auth error while canceling order {order_id}: {e}")
+            logger.error("TastyTrade auth error while canceling order %s: %s", order_id, e)
             raise
         except Exception as e:
-            print(f"Error canceling order {order_id}: {e}")
+            logger.error("Error canceling order %s: %s", order_id, e)
             return False
 
     async def fill_options_order(
@@ -248,7 +288,7 @@ class OptionsFillService:
         target_date = self._normalize_expiry(expiry)
         chain_key = self._find_chain_expiry_key(chain, target_date)
         if chain_key is None:
-            print(f"Expiry {target_date} not found in chain (original input: {expiry})")
+            logger.warning("Expiry %s not found in chain (original input: %s)", target_date, expiry)
             return None
 
         options = [
@@ -258,7 +298,7 @@ class OptionsFillService:
             and opt.option_type.value.lower() == option_type
         ]
         if not options:
-            print(f"Option not found: {symbol} {strike} {option_type} {expiry}")
+            logger.warning("Option not found: %s %s %s %s", symbol, strike, option_type, expiry)
             return None
 
         option = options[0]
@@ -310,14 +350,10 @@ class OptionsFillService:
                 metrics.incr("price_discovery_attempts")
             except Exception:
                 pass
-            print(f"Attempt {attempt + 1}: Placing order at {current_price} (aggressive={convert_to_market})")
-            try:
-                logger = __import__("logging").getLogger(__name__)
-                logger.info(
-                    "Attempt %s: placing order at %s (aggressive=%s)", attempt + 1, current_price, convert_to_market
-                )
-            except Exception:
-                pass
+            logger.info(
+                "Price discovery attempt %s: placing order at %s (aggressive=%s)",
+                attempt + 1, current_price, convert_to_market
+            )
             # Note: TastyTrade does not support market orders for options, always use limit
             order_id = await self.place_limit_order(
                 option, Decimal(str(quantity)), order_action, current_price
@@ -327,24 +363,70 @@ class OptionsFillService:
 
             # Wait for fill (use shorter timeout during price discovery to react quickly)
             await asyncio.sleep(min(self.timeout_seconds, 20))
+            
+            # Check if order was filled
             if await self.check_order_filled(order_id):
-                print(f"Order filled on attempt {attempt + 1}")
+                logger.info("Order filled on attempt %s at price %s", attempt + 1, current_price)
 
-                # Create profit-taking order if filled
+                # Log the entry fill to audit trail
+                log_trade_event(
+                    event_type="entry_filled",
+                    symbol=option.symbol,
+                    action=action,
+                    quantity=int(quantity),
+                    price=float(current_price),
+                    order_id=order_id,
+                    status="success",
+                    details={"attempt": attempt + 1},
+                )
+
+                # Create profit-taking order if filled (pass entry price directly)
                 if order_action == OrderAction.BUY_TO_OPEN:
                     await self.create_profit_exit(
-                        option, Decimal(str(quantity)), order_id
+                        option, Decimal(str(quantity)), order_id, entry_price=current_price
                     )
 
                 # Return both the order id and price used for the filled entry
                 return {"order_id": order_id, "entry_price": str(current_price)}
+            
+            # Check if order was user-cancelled - stop price discovery if so
+            if await self.check_order_cancelled(order_id):
+                logger.warning(
+                    "Order %s was cancelled by user, stopping price discovery",
+                    order_id
+                )
+                log_trade_event(
+                    event_type="entry_cancelled",
+                    symbol=option.symbol,
+                    action=action,
+                    quantity=int(quantity),
+                    price=float(current_price),
+                    order_id=order_id,
+                    status="cancelled",
+                    details={"attempt": attempt + 1, "reason": "user_cancelled"},
+                )
+                return None
+            
             if attempt < self.max_retries:
                 await self.cancel_order(order_id)
                 # If we were converting to market, we stop iterating; else attempts_iter will move forward
                 attempt += 1
 
         # Leave as DAY order
-        print("Order not filled, leaving as DAY order")
+        logger.info(
+            "Order not filled after price discovery, leaving as DAY order: order_id=%s, price=%s",
+            order_id, current_price
+        )
+        log_trade_event(
+            event_type="entry_pending",
+            symbol=option.symbol,
+            action=action,
+            quantity=int(quantity),
+            price=float(current_price),
+            order_id=order_id,
+            status="pending",
+            details={"reason": "left_as_day_order"},
+        )
         return {"order_id": order_id, "entry_price": str(current_price)}
 
     def _normalize_expiry(self, expiry: str) -> date:
@@ -418,10 +500,121 @@ class OptionsFillService:
         return None
 
     async def create_profit_exit(
-        self, option: Option, quantity: Decimal, entry_order_id: str
+        self,
+        option: Option,
+        quantity: Decimal,
+        entry_order_id: str,
+        entry_price: Optional[Decimal] = None,
     ):
-        """Create a limit exit order at 100% profit."""
-        # Try to determine entry price from the existing order
+        """
+        Create a limit exit order for 50% of quantity at 100% profit.
+
+        Args:
+            option: The Option instrument to exit
+            quantity: Total quantity from entry order
+            entry_order_id: ID of the entry order (for lookup if entry_price not provided)
+            entry_price: Known entry price (preferred, avoids API lookup)
+
+        Returns:
+            Order ID of the exit order, or None if failed
+        """
+        logger.info(
+            "Creating profit exit for %s, qty=%s, entry_order=%s, entry_price=%s",
+            option.symbol, quantity, entry_order_id, entry_price
+        )
+
+        # If entry_price not provided, try to look it up from the order
+        if entry_price is None:
+            entry_price = await self._lookup_entry_price(entry_order_id)
+
+        if entry_price is None:
+            logger.warning(
+                "Could not determine entry price for profit exit, order_id=%s",
+                entry_order_id
+            )
+            return None
+        # Compute exit at 100% profit (2x) and round to tick increment/0.01
+        profit_multiplier = Decimal("2.0")
+        exit_price = (entry_price * profit_multiplier).quantize(
+            self.tick_increment, rounding=ROUND_HALF_UP
+        )
+
+        # Place an exit for 50% of the filled quantity (rounded up to avoid 0)
+        try:
+            qty_int = int(quantity)
+        except Exception:
+            qty_int = 0
+
+        exit_qty = max(0, (qty_int + 1) // 2)  # 50% rounded up
+        if exit_qty <= 0:
+            logger.warning("Exit quantity is 0, skipping profit exit")
+            return None
+
+        logger.info(
+            "Placing profit exit: symbol=%s, qty=%s (of %s), exit_price=%s (entry=%s)",
+            option.symbol, exit_qty, quantity, exit_price, entry_price
+        )
+
+        # Retry exit order placement up to 3 times
+        max_exit_retries = 3
+        for attempt in range(max_exit_retries):
+            try:
+                exit_order_id = await self.place_limit_order(
+                    option, Decimal(str(exit_qty)), OrderAction.SELL_TO_CLOSE, exit_price
+                )
+                if exit_order_id:
+                    logger.info(
+                        "Profit exit order placed: order_id=%s, price=%s",
+                        exit_order_id, exit_price
+                    )
+                    log_trade_event(
+                        event_type="exit_placed",
+                        symbol=option.symbol,
+                        action="STC",
+                        quantity=exit_qty,
+                        price=float(exit_price),
+                        order_id=exit_order_id,
+                        status="success",
+                        details={"entry_price": str(entry_price), "profit_target": "100%"},
+                    )
+                    return exit_order_id
+                else:
+                    logger.warning(
+                        "Exit order placement returned None, attempt %s/%s",
+                        attempt + 1, max_exit_retries
+                    )
+            except Exception as exc:
+                logger.error(
+                    "Error placing profit exit (attempt %s/%s): %s",
+                    attempt + 1, max_exit_retries, exc
+                )
+                if attempt < max_exit_retries - 1:
+                    await asyncio.sleep(1)  # Brief delay before retry
+
+        logger.error(
+            "Failed to place profit exit after %s attempts for %s",
+            max_exit_retries, option.symbol
+        )
+        log_trade_event(
+            event_type="exit_failed",
+            symbol=option.symbol,
+            action="STC",
+            quantity=exit_qty,
+            price=float(exit_price),
+            status="failed",
+            details={"reason": "max_retries_exceeded"},
+        )
+        return None
+
+    async def _lookup_entry_price(self, entry_order_id: str) -> Optional[Decimal]:
+        """
+        Look up the entry price from an existing order.
+
+        Tries multiple sources in order of preference:
+        1. Fill price from leg fills (most accurate)
+        2. Order price
+        3. Leg price
+        """
         try:
             self.tastytrade_client.ensure_authorized()
             session = self.tastytrade_client.get_session()
@@ -429,58 +622,44 @@ class OptionsFillService:
             account = self._select_account(accounts)
             if not account:
                 return None
+
             orders = account.get_live_orders(session)
             entry_order = None
             for o in orders:
                 if str(getattr(o, "id", "")) == str(entry_order_id):
                     entry_order = o
                     break
-            entry_price = None
-            if entry_order:
-                # Prefer actual fill price from leg fills if present (most accurate)
-                try:
-                    legs = getattr(entry_order, "legs", []) or []
-                    if legs and getattr(legs[0], "fills", None):
-                        fills = getattr(legs[0], "fills") or []
-                        if fills and getattr(fills[0], "fill_price", None) is not None:
-                            entry_price = Decimal(str(fills[0].fill_price))
-                except Exception:
-                    entry_price = None
-                # Fallback to order.price if no fill price available
-                if entry_price is None:
-                    try:
-                        if getattr(entry_order, "price", None) is not None:
-                            entry_price = Decimal(str(entry_order.price))
-                    except Exception:
-                        entry_price = None
-                # Fallback: try to use leg price
-                if entry_price is None:
-                    try:
-                        if legs and getattr(legs[0], "price", None) is not None:
-                            entry_price = Decimal(str(legs[0].price))
-                    except Exception:
-                        entry_price = None
-            if entry_price is None:
-                # Could not find the entry price; abort gracefully
+
+            if not entry_order:
+                logger.debug("Entry order %s not found in live orders", entry_order_id)
                 return None
-            # Compute exit at 100% profit (2x) and round to tick increment/0.01
-            profit_multiplier = Decimal("2.0")
-            exit_price = (entry_price * profit_multiplier).quantize(
-                self.tick_increment, rounding=ROUND_HALF_UP
-            )
-            # Place an exit for 50% of the filled quantity (rounded down)
+
+            # Prefer actual fill price from leg fills if present (most accurate)
             try:
-                qty_int = int(quantity)
+                legs = getattr(entry_order, "legs", []) or []
+                if legs and getattr(legs[0], "fills", None):
+                    fills = getattr(legs[0], "fills") or []
+                    if fills and getattr(fills[0], "fill_price", None) is not None:
+                        return Decimal(str(fills[0].fill_price))
             except Exception:
-                qty_int = 0
-            # 50% exit: round up to avoid 0 for small sizes (i.e., 1 -> 1)
-            exit_qty = max(0, (qty_int + 1) // 2)
-            if exit_qty <= 0:
-                # No exit to place (quantity too small)
-                return None
-            return await self.place_limit_order(
-                option, Decimal(str(exit_qty)), OrderAction.SELL_TO_CLOSE, exit_price
-            )
+                pass
+
+            # Fallback to order.price
+            try:
+                if getattr(entry_order, "price", None) is not None:
+                    return Decimal(str(entry_order.price))
+            except Exception:
+                pass
+
+            # Fallback to leg price
+            try:
+                legs = getattr(entry_order, "legs", []) or []
+                if legs and getattr(legs[0], "price", None) is not None:
+                    return Decimal(str(legs[0].price))
+            except Exception:
+                pass
+
+            return None
         except Exception as exc:
-            print(f"Error creating profit exit {exc}")
+            logger.error("Error looking up entry price: %s", exc)
             return None
