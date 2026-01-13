@@ -1185,50 +1185,33 @@ class TastyTradeClient:
                 filled = False
                 for _ in range(int(max_wait_seconds / poll_interval)):
                     try:
-                        order_resp = session._get(
-                            f"/accounts/{account.account_number}/orders/{market_order_id}"
-                        )
-                        order_data = order_resp if isinstance(order_resp, dict) else {}
-                        status = order_data.get("status", "")
-                        if status.lower() == "filled":
+                        # Use SDK's get_order to get a properly typed PlacedOrder object
+                        placed_order = account.get_order(session, int(market_order_id))
+                        status = getattr(placed_order, 'status', None)
+                        status_str = status.value if hasattr(status, 'value') else str(status) if status else ""
+                        
+                        if status_str.lower() == "filled":
                             filled = True
-                            # Debug: log the order data structure to understand it
-                            LOGGER.debug("Order response keys: %s", list(order_data.keys()) if order_data else 'empty')
-                            
-                            # Try to get the actual fill price from the order response
-                            # Check legs for fill price
-                            legs_data = order_data.get("legs", [])
-                            if legs_data and isinstance(legs_data, list):
-                                LOGGER.debug("Legs data: %s", legs_data)
-                                for leg in legs_data:
-                                    fill_info = leg.get("fills", [])
-                                    if fill_info and isinstance(fill_info, list):
-                                        for fill in fill_info:
-                                            fp = fill.get("fill_price") or fill.get("price")
-                                            if fp:
-                                                actual_fill_price = float(fp)
-                                                break
-                            
-                            # Try various field names for fill price
-                            if not actual_fill_price:
-                                for field in ['average_fill_price', 'avg_fill_price', 'filled_price', 
-                                              'fill_price', 'price', 'executed_price']:
-                                    val = order_data.get(field)
-                                    if val:
-                                        try:
-                                            actual_fill_price = float(val)
-                                            LOGGER.debug("Found fill price in field '%s': %s", field, actual_fill_price)
-                                            break
-                                        except (ValueError, TypeError):
-                                            pass
+                            # Extract fill price from legs using typed SDK objects
+                            legs = getattr(placed_order, 'legs', []) or []
+                            for leg in legs:
+                                fills = getattr(leg, 'fills', None) or []
+                                for fill in fills:
+                                    fp = getattr(fill, 'fill_price', None)
+                                    if fp is not None:
+                                        actual_fill_price = float(fp)
+                                        LOGGER.debug("Found fill_price from SDK FillInfo: %s", actual_fill_price)
+                                        break
+                                if actual_fill_price:
+                                    break
                             
                             LOGGER.info("Market entry order %s filled at %s", market_order_id, actual_fill_price)
                             break
-                        elif status.lower() in ("rejected", "cancelled", "expired"):
-                            LOGGER.warning("Market entry order %s status: %s", market_order_id, status)
+                        elif status_str.lower() in ("rejected", "cancelled", "expired"):
+                            LOGGER.warning("Market entry order %s status: %s", market_order_id, status_str)
                             # Restore cancelled orders
                             self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
-                            return f"Market entry order {status} - orders restored"
+                            return f"Market entry order {status_str} - orders restored"
                     except Exception as e:
                         LOGGER.debug("Error polling order status: %s", e)
                     time.sleep(poll_interval)
