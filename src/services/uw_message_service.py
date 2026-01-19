@@ -131,12 +131,17 @@ class UWMessageService:
         # Determine Discord notification routing
         discord_channel = self._get_discord_channel_for_trade(message)
         
+        # Include extracted ticker in data for Discord formatting
+        data_dict = message.data.model_dump()
+        if message.data.ticker:
+            data_dict["ticker"] = message.data.ticker
+        
         stamped = {
             "received_at": now.isoformat(),
             "message_type": message.message_type,
             "topic": message.topic,
             "topic_symbol": message.topic_symbol,
-            "data": message.data.model_dump(),
+            "data": data_dict,
             "discord_channel_id": discord_channel,  # Add channel routing
         }
 

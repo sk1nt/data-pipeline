@@ -125,8 +125,9 @@ def test_parse_option_trade_stock_message():
     message = parse_uw_websocket_message(raw_message)
     assert message.message_type == "option_trades_super_algo"
     assert message.topic == "option_trades_super_algo"
-    assert message.topic_symbol is None  # No symbol in topic
+    assert message.topic_symbol == "AAPL"  # Now extracted from option_chain_id
     assert message.data.option_chain_id == "AAPL250221P00175000"
+    assert message.data.ticker == "AAPL"  # Ticker extracted from OCC symbol
     assert message.data.is_stock_option is True  # Has sector
     assert message.data.price == "2.50"
 
@@ -233,7 +234,7 @@ def test_service_process_option_trade_stock(uw_service, mock_redis_client):
 
     assert result["status"] == "success"
     assert result["message_type"] == "option_trade"
-    assert result["symbol"] is None  # No symbol in topic for stock options
+    assert result["symbol"] == "AAPL"  # Now extracted from option_chain_id
     assert result["is_index"] is False
     assert result["discord_notification"] is True
     assert result["discord_channel_id"] == 1425136266676146236  # General options channel
