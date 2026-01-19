@@ -173,8 +173,16 @@ class GEXBotPoller:
         LOGGER.info("GEXBot poller stopped")
 
     def _effective_symbols(self) -> List[str]:
-        """Return the configured symbols, filtered by supported list if present."""
+        """Return the configured symbols, filtered by supported list if present.
+        
+        When base_symbols is empty and auto_refresh_symbols is enabled, poll all
+        supported symbols instead of an empty list.
+        """
         if self._supported_symbols:
+            # If no base symbols configured but we have a supported list,
+            # poll all supported symbols (this is the main poller's mode)
+            if not self._base_symbols and self._auto_refresh_symbols:
+                return sorted(self._supported_symbols)
             filtered = sorted(self._base_symbols & self._supported_symbols)
             if filtered:
                 return filtered

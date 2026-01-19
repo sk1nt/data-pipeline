@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+import os
 import sys
 import threading
 import time
@@ -349,10 +350,14 @@ class ServiceManager:
         ):
             if self.gex_poller:
                 return
+            # Main poller: if GEXBOT_POLL_SYMBOLS is not set in .env, use empty list
+            # to auto-refresh from API and poll all supported symbols (minus NQ exclusions).
+            # This allows `!gex <any_symbol>` to work for all stocks/indexes.
+            base_symbols = settings.gex_symbol_list if os.getenv("GEXBOT_POLL_SYMBOLS") else []
             self.gex_poller = GEXBotPoller(
                 GEXBotPollerSettings(
                     api_key=settings.gexbot_api_key,
-                    symbols=[],
+                    symbols=base_symbols,
                     interval_seconds=settings.gex_poll_interval_seconds,
                     aggregation_period=settings.gex_poll_aggregation,
                     # Main poller should poll at 5s during RTH regardless of .env
