@@ -975,6 +975,13 @@ class TradeBot(commands.Bot):
         channel_id = getattr(message.channel, "id", None)
         print(f"Message received: channel_id={channel_id}, author={message.author.id}, content={message.content[:50]}")
         
+        # Handle DM shorthand commands (b5, s5, etc.) for privileged users
+        is_dm = isinstance(message.channel, discord.DMChannel)
+        if is_dm:
+            handled = await self._handle_dm_shorthand(message)
+            if handled:
+                return
+        
         # Check for alert messages first (authorization happens inside _process_alert_message)
         # Ignore replies — only first messages trigger alerts
         try:
@@ -993,20 +1000,123 @@ class TradeBot(commands.Bot):
 
         await super().on_message(message)
 
+    async def _handle_dm_shorthand(self, message) -> bool:
+        """Handle DM shorthand commands like b5, s5 for quick MNQ trades.
+        
+        Shortcuts:
+          b<qty> = !tt b mnq <qty> 35  (buy MNQ with 35 tick TP)
+          s<qty> = !tt s mnq <qty> 35  (sell MNQ with 35 tick TP)
+          roth   = !tt account 5WT31787 (switch to Roth IRA)
+          ira    = !tt account 5WT31673 (switch to Traditional IRA)
+        
+        Returns True if handled, False otherwise.
+        """
+        content = message.content.strip().lower()
+        
+        # Check if user is privileged first (applies to all shortcuts)
+        # Create a mock context-like object for the privilege check
+        if not self._is_privileged_user_by_message(message):
+            # Only respond if it looks like a shorthand command
+            if re.match(r'^([bs]\d+|roth|ira)$', content):
+                await message.channel.send("You are not authorized for shorthand commands.")
+                return True
+            return False
+        
+        # Account switching shortcuts
+        account_shortcuts = {
+            "roth": "5WT31787",
+            "ira": "5WT31673",
+        }
+        if content in account_shortcuts:
+            if not self.tastytrade_client:
+                await message.channel.send("TastyTrade client is not configured.")
+                return True
+            target = account_shortcuts[content]
+            try:
+                success = await asyncio.to_thread(
+                    self.tastytrade_client.set_active_account, target
+                )
+                if success:
+                    await message.channel.send(f"Switched to {content.upper()} account ({target})")
+                else:
+                    await message.channel.send(f"Account {target} not found.")
+            except Exception as e:
+                await message.channel.send(f"Failed to switch account: {e}")
+            return True
+        
+        # Match patterns: b5, s10, b1, s2, etc.
+        match = re.match(r'^([bs])(\d+)$', content)
+        if not match:
+            return False
+        
+        action_char = match.group(1)
+        quantity = int(match.group(2))
+        action = "BUY" if action_char == "b" else "SELL"
+        symbol = "MNQ"
+        tp_ticks = 35.0
+        
+        if not self.tastytrade_client:
+            await message.channel.send("TastyTrade client is not configured.")
+            return True
+        
+        # Get dry_run setting from client
+        try:
+            dry_run = bool(getattr(self.tastytrade_client, "_dry_run", True))
+        except Exception:
+            dry_run = True
+        
+        # Fetch market price for futures if available
+        market_price = None
+        try:
+            lookup_feed = self.ticker_aliases.get(symbol.upper(), symbol.upper())
+            snap = await self.get_gex_snapshot(lookup_feed)
+            if snap and isinstance(snap.get("spot_price"), (int, float)):
+                market_price = float(snap.get("spot_price"))
+        except Exception:
+            pass
+        
+        try:
+            result = await asyncio.to_thread(
+                self.tastytrade_client.place_market_order_with_tp,
+                symbol,
+                action,
+                quantity,
+                tp_ticks,
+                sl_ticks=0.0,
+                dry_run=dry_run,
+                market_price=market_price,
+            )
+            await message.channel.send(f"{action_char.upper()}{quantity} MNQ: {result}")
+        except TastytradeAuthError as e:
+            await message.channel.send(f"TastyTrade auth invalid: {e}")
+        except Exception as e:
+            await message.channel.send(f"Order failed: {e}")
+        
+        return True
+
     async def _process_alert_message(self, message):
         """Process an alert message from Discord."""
         print(f"Processing alert message: {message.content}")
+        
+        channel_id = str(getattr(message.channel, "id", ""))
+        user_id = str(message.author.id)
 
-        # Check authorization for automated trades
-        if not AuthService.verify_user_for_automated_trades(str(message.author.id)):
-            print(f"User {message.author.id} not authorized for automated trades")
+        # Check BOTH user AND channel authorization for automated trades
+        if not AuthService.verify_user_and_channel_for_automated_trades(user_id, channel_id):
+            # Provide specific feedback
+            user_ok = AuthService.verify_user_for_automated_trades(user_id)
+            channel_ok = AuthService.verify_channel_for_automated_trades(channel_id)
+            if not user_ok:
+                reason = "You are not authorized to send automated trade alerts."
+            elif not channel_ok:
+                reason = "This channel is not authorized for automated trade alerts."
+            else:
+                reason = "Automated trade alerts not permitted here."
+            print(f"Alert rejected: user={user_id} ({user_ok}), channel={channel_id} ({channel_ok})")
             try:
-                await message.channel.send(
-                    "You are not authorized to send automated trade alerts."
-                )
+                await message.channel.send(reason)
             except Exception as send_exc:
-                # Likely missing permissions; fallback to DM attempt or quiet log
-                print(f"Failed to send unauthorized message: {send_exc}")
+                print(f"Failed to send rejection message: {send_exc}")
             return
 
         # Import here to avoid circular imports
@@ -2400,6 +2510,19 @@ class TradeBot(commands.Bot):
             return True
         return False
 
+    def _is_privileged_user_by_message(self, message) -> bool:
+        """Check if message author is privileged (works with Message objects)."""
+        try:
+            author_id = int(message.author.id)
+        except Exception:
+            author_id = None
+        if author_id is not None and author_id in self.command_admin_ids:
+            return True
+        author_name = getattr(message.author, "name", "") or ""
+        if author_name.lower() in self.command_admin_names:
+            return True
+        return False
+
     async def _ensure_privileged(self, ctx) -> bool:
         if self._is_privileged_user(ctx):
             return True
@@ -3623,70 +3746,177 @@ class TradeBot(commands.Bot):
         return lines
 
     def format_option_trade_alert(self, payload: dict) -> str:
+        """Format UW option_trades_super_algo message for Discord with ANSI colors."""
         data = payload.get("data") or payload
-        timestamp = data.get("timestamp") or payload.get("received_at") or "N/A"
-        if isinstance(timestamp, str):
-            timestamp = timestamp.replace("T", " ").replace("Z", " UTC")
-        transaction_types = (
-            data.get("transaction_type") or data.get("transaction_types") or []
-        )
-        if isinstance(transaction_types, str):
-            transaction_types = [transaction_types]
-        ticker = data.get("ticker") or data.get("symbol") or "UNKNOWN"
-        side = data.get("side") or data.get("direction") or "N/A"
-        call_put = data.get("call_put") or data.get("option_type") or ""
-        strike = data.get("strike") or data.get("strike_price") or "N/A"
-        contract = data.get("contract") or "n/a"
-        dte = data.get("dte") or data.get("days_to_expiration") or "N/A"
-        stock_spot = data.get("stock_spot") or data.get("underlying_price") or "N/A"
-        bid_range = data.get("bid_ask_range") or data.get("bid_range") or "N/A"
-        option_spot = data.get("option_spot") or data.get("option_price") or "N/A"
-        size = data.get("size") or data.get("contracts") or "N/A"
-        premium = data.get("premium") or data.get("notional") or "N/A"
-        volume = data.get("volume") or "N/A"
-        oi = data.get("oi") or data.get("open_interest") or "N/A"
-        chain_bid = data.get("chain_bid") or data.get("bid") or "N/A"
-        chain_ask = data.get("chain_ask") or data.get("ask") or "N/A"
-        legs = data.get("legs") or []
-        code = data.get("code") or "N/A"
-        flags = data.get("flags") or []
+        
+        # ANSI color codes
+        ansi = {
+            "reset": "\u001b[0m",
+            "bold": "\u001b[1m",
+            "dim": "\u001b[2m",
+            "dim_white": "\u001b[2;37m",
+            "yellow": "\u001b[33m",
+            "green": "\u001b[32m",
+            "red": "\u001b[31m",
+            "cyan": "\u001b[36m",
+            "magenta": "\u001b[35m",
+            "bright_green": "\u001b[1;32m",
+            "bright_red": "\u001b[1;31m",
+            "bright_yellow": "\u001b[1;33m",
+            "bright_cyan": "\u001b[1;36m",
+        }
+        
+        def colorize(code, text):
+            return f"{code}{text}{ansi['reset']}"
+        
+        # Parse timestamp
+        executed_at = data.get("executed_at") or payload.get("received_at") or ""
+        if isinstance(executed_at, str):
+            try:
+                dt = datetime.fromisoformat(executed_at.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                local_dt = dt.astimezone(self.display_zone)
+                formatted_time = local_dt.strftime("%m/%d %I:%M:%S %p")
+            except Exception:
+                formatted_time = executed_at.replace("T", " ").replace("Z", "")[:19]
+        else:
+            formatted_time = "N/A"
+        
+        # Extract ticker from option_chain_id (OCC format: SYMBOL + YYMMDD + C/P + strike)
+        option_chain_id = data.get("option_chain_id") or ""
+        ticker = data.get("ticker") or payload.get("topic_symbol") or ""
+        if not ticker and option_chain_id:
+            # Parse OCC symbol - find where letters end and digits begin
+            for i, char in enumerate(option_chain_id):
+                if char.isdigit():
+                    ticker = option_chain_id[:i] if i > 0 else "UNK"
+                    break
+        ticker = ticker or "UNKNOWN"
+        
+        # Parse option details from OCC symbol
+        call_put = ""
+        strike = ""
+        expiry = ""
+        if len(option_chain_id) >= 15:
+            # OCC format: SYMBOL + YYMMDD + C/P + 8-digit strike
+            ticker_len = len(ticker)
+            date_part = option_chain_id[ticker_len:ticker_len+6]  # YYMMDD
+            cp_char = option_chain_id[ticker_len+6:ticker_len+7]  # C or P
+            strike_part = option_chain_id[ticker_len+7:]  # 8-digit strike
+            
+            call_put = "CALL" if cp_char == "C" else "PUT" if cp_char == "P" else ""
+            try:
+                strike = f"${int(strike_part) / 1000:.0f}"
+                expiry = f"20{date_part[:2]}-{date_part[2:4]}-{date_part[4:6]}"
+            except Exception:
+                pass
+        
+        # Determine sentiment from tags
         tags = data.get("tags") or []
-        uw_info = data.get("unusual_whales") or {}
-        uw_id = uw_info.get("alert_id") or "n/a"
-        uw_score = uw_info.get("score")
-
-        legs_text = (
-            ", ".join(
-                f"{leg.get('ratio', 1)}x{leg.get('strike')} {leg.get('type')}"
-                for leg in legs
-                if isinstance(leg, dict)
-            )
-            or "n/a"
-        )
-        flags_text = ", ".join(flags) if flags else "n/a"
-        tags_text = ", ".join(tags) if tags else "n/a"
-        tx_text = ", ".join(transaction_types) if transaction_types else "unknown"
-
-        uw_line = f"UW alert {uw_id}"
-        if uw_score is not None:
-            uw_line += f" score {uw_score}"
-
+        is_bullish = "bullish" in tags
+        is_bearish = "bearish" in tags
+        is_ask_side = "ask_side" in tags
+        is_bid_side = "bid_side" in tags
+        
+        # Sentiment indicator with color
+        if is_bullish:
+            sentiment = colorize(ansi["bright_green"], "▲ BULLISH")
+            sentiment_color = ansi["green"]
+        elif is_bearish:
+            sentiment = colorize(ansi["bright_red"], "▼ BEARISH")
+            sentiment_color = ansi["red"]
+        else:
+            sentiment = colorize(ansi["yellow"], "◆ NEUTRAL")
+            sentiment_color = ansi["yellow"]
+        
+        # Side indicator
+        if is_ask_side:
+            side = colorize(ansi["green"], "ASK")
+        elif is_bid_side:
+            side = colorize(ansi["red"], "BID")
+        else:
+            side = colorize(ansi["dim_white"], "MID")
+        
+        # Format premium
+        premium_raw = data.get("premium") or "0"
+        try:
+            premium_val = float(premium_raw)
+            if premium_val >= 1_000_000:
+                premium_fmt = f"${premium_val/1_000_000:.2f}M"
+            elif premium_val >= 1_000:
+                premium_fmt = f"${premium_val/1_000:.1f}K"
+            else:
+                premium_fmt = f"${premium_val:.0f}"
+            premium_display = colorize(ansi["bright_yellow"], premium_fmt)
+        except Exception:
+            premium_display = str(premium_raw)
+        
+        # Format price and size
+        price = data.get("price") or "N/A"
+        size = data.get("size") or "N/A"
+        underlying_price = data.get("underlying_price") or "N/A"
+        
+        # Greeks
+        delta = data.get("delta") or ""
+        gamma = data.get("gamma") or ""
+        iv = data.get("implied_volatility") or ""
+        
+        # Volume and OI
+        volume = data.get("volume") or "N/A"
+        oi = data.get("open_interest") or "N/A"
+        
+        # Sector info
+        sector = data.get("sector") or ""
+        industry = data.get("industry_type") or ""
+        
+        # Exchange
+        exchange = data.get("exchange") or ""
+        
+        # Build header line with sentiment
+        cp_display = colorize(ansi["cyan"] if call_put == "CALL" else ansi["magenta"], call_put) if call_put else ""
+        header = f"{sentiment}  {colorize(ansi['bright_cyan'], ticker)} {cp_display} {strike}  {formatted_time}"
+        
+        # Build formatted lines
         lines = [
-            f"UW option alert  {timestamp}",
-            f"ticker          {ticker}",
-            f"types           {tx_text}",
-            f"contract        {contract}",
-            f"side/strike     {side} {strike} {call_put}  dte {dte}",
-            f"stock spot      {stock_spot}  bid-ask {bid_range}",
-            f"option spot     {option_spot}  size {size}",
-            f"premium         {premium}  volume {volume}  oi {oi}",
-            f"chain bid/ask   {chain_bid} / {chain_ask}",
-            f"legs            {legs_text}",
-            f"code            {code}",
-            f"flags           {flags_text}",
-            f"tags            {tags_text}",
-            uw_line,
+            header,
+            "─" * 45,
+            f"Premium     {premium_display}  ({size} × ${price})",
+            f"Side        {side}  Underlying ${underlying_price}",
+            f"Expiry      {expiry}  OI {oi}  Vol {volume}",
         ]
+        
+        # Add Greeks if available
+        if delta or gamma or iv:
+            greeks_parts = []
+            if delta:
+                greeks_parts.append(f"Δ {delta}")
+            if gamma:
+                greeks_parts.append(f"Γ {gamma}")
+            if iv:
+                try:
+                    iv_pct = f"{float(iv)*100:.1f}%"
+                except Exception:
+                    iv_pct = iv
+                greeks_parts.append(f"IV {iv_pct}")
+            lines.append(f"Greeks      {colorize(ansi['dim_white'], '  '.join(greeks_parts))}")
+        
+        # Add sector if available
+        if sector:
+            sector_line = sector
+            if industry:
+                sector_line += f" / {industry}"
+            lines.append(f"Sector      {colorize(ansi['dim_white'], sector_line)}")
+        
+        # Add exchange
+        if exchange:
+            lines.append(f"Exchange    {colorize(ansi['dim_white'], exchange)}")
+        
+        # Add tags (excluding sentiment/side already shown)
+        display_tags = [t for t in tags if t not in ("bullish", "bearish", "ask_side", "bid_side")]
+        if display_tags:
+            lines.append(f"Tags        {colorize(ansi['dim_white'], ', '.join(display_tags))}")
+        
         return "```ansi\n" + "\n".join(lines) + "\n```"
 
     def format_market_snapshot(self, payload: dict) -> str:

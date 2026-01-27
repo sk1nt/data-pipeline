@@ -807,8 +807,12 @@ class TastyTradeClient:
         return symbol[:2] if len(symbol) >= 2 else symbol
 
     def _get_conflicting_exit_orders(self, session, account, symbol: str, entry_action) -> list:
-        """Find existing exit orders on the same symbol that would conflict with a new entry."""
-        import time
+        """Find existing exit orders on the same symbol that would conflict with a new entry.
+        
+        TastyTrade does not allow simultaneous buy and sell orders on the same symbol.
+        This method identifies orders that need to be cancelled before placing a new entry,
+        then restored afterward.
+        """
         conflicting = []
         try:
             live_orders = account.get_live_orders(session)
@@ -877,7 +881,12 @@ class TastyTradeClient:
         """Place market entry order with TP exit (and optional SL via OTOCO bracket).
         
         If sl_ticks > 0, uses OTOCO bracket order (entry + TP limit + SL stop).
-        If sl_ticks == 0, uses cancel/restore pattern for TP only.
+        If sl_ticks == 0, places entry + separate TP limit order.
+        
+        TastyTrade does not allow simultaneous buy and sell orders on the same symbol.
+        If there are existing exit orders (e.g., from a previous entry), they are
+        temporarily cancelled, the new entry + TP are placed, then the old exits
+        are restored. This allows scaling into a position while preserving all TP levels.
         """
         import time
         
@@ -1108,6 +1117,8 @@ class TastyTradeClient:
             )
 
             # Step 1: Do a dry-run first to check buying power (unless already in dry-run mode)
+            # Note: dry-run may fail with "illegal_buy_and_sell" if there are conflicting exit orders,
+            # but we'll handle that by canceling them temporarily below
             if not eff_dry:
                 LOGGER.info("Checking buying power with dry-run...")
                 try:
@@ -1122,37 +1133,35 @@ class TastyTradeClient:
                     if 'buying_power' in error_msg.lower() or 'margin' in error_msg.lower():
                         LOGGER.warning("Insufficient buying power: %s", error_msg)
                         return f"Order rejected - insufficient buying power: {error_msg}"
-                    # Other errors might be transient, continue
+                    # "illegal_buy_and_sell" is expected if we have exit orders - we'll cancel them below
                     LOGGER.debug("Dry-run check exception (continuing): %s", e)
 
-            # Step 2: Find and cancel conflicting exit orders
-            conflicting_orders = self._get_conflicting_exit_orders(session, account, symbol, entry_action)
-            cancelled_orders_info = []  # Store info to restore later
-            
-            if conflicting_orders:
-                LOGGER.info("Found %d conflicting exit orders to temporarily cancel", len(conflicting_orders))
-                for order in conflicting_orders:
+            # Step 2: Cancel any conflicting exit orders (TastyTrade doesn't allow buy+sell on same symbol)
+            cancelled_orders_info = []
+            conflicting = self._get_conflicting_exit_orders(session, account, symbol, entry_action)
+            if conflicting:
+                LOGGER.info("Found %d conflicting exit orders to cancel temporarily", len(conflicting))
+                for order in conflicting:
                     order_id = getattr(order, 'id', None)
-                    if order_id and order_id != -1:
-                        # Save order details for restoration
+                    if not order_id:
+                        continue
+                    try:
+                        # Save order info for restoration
+                        legs = getattr(order, 'legs', [])
                         order_info = {
+                            'id': order_id,
                             'price': getattr(order, 'price', None),
-                            'legs': getattr(order, 'legs', []),
-                            'time_in_force': getattr(order, 'time_in_force', OrderTimeInForce.GTC),
                             'order_type': getattr(order, 'order_type', OrderType.LIMIT),
+                            'time_in_force': getattr(order, 'time_in_force', OrderTimeInForce.GTC),
+                            'legs': legs,
                         }
                         cancelled_orders_info.append(order_info)
                         
                         if not eff_dry:
-                            try:
-                                account.delete_order(session, order_id)
-                                LOGGER.info("Cancelled conflicting order %s", order_id)
-                            except Exception as e:
-                                LOGGER.warning("Failed to cancel order %s: %s", order_id, e)
-                
-                # Wait briefly for API to process cancellations before placing new order
-                if not eff_dry and cancelled_orders_info:
-                    time.sleep(0.3)
+                            account.delete_order(session, int(order_id))
+                            LOGGER.info("Cancelled conflicting order %s (price=%s)", order_id, order_info['price'])
+                    except Exception as e:
+                        LOGGER.warning("Failed to cancel order %s: %s", order_id, e)
 
             # Step 3: Place the entry order
             LOGGER.info("Sending market entry (dry-run=%s): %s", eff_dry, entry_order)
@@ -1211,7 +1220,7 @@ class TastyTradeClient:
                             LOGGER.warning("Market entry order %s status: %s", market_order_id, status_str)
                             # Restore cancelled orders
                             self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
-                            return f"Market entry order {status_str} - orders restored"
+                            return f"Market entry order {status_str} - exit orders restored"
                     except Exception as e:
                         LOGGER.debug("Error polling order status: %s", e)
                     time.sleep(poll_interval)
@@ -1275,13 +1284,13 @@ class TastyTradeClient:
                     f"(ID: {market_order_id}) but TP failed: {msg}. Restored {len(cancelled_orders_info)} exit orders."
                 )
 
-            # Step 6: Restore previously cancelled exit orders at their original levels
+            # Step 7: Restore previously cancelled exit orders at their original levels
             restored_count = self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
 
             return (
                 f"[{'DRY-RUN' if eff_dry else 'LIVE'}] Placed {action.lower()} entry {quantity} {symbol} @ market "
-                f"(ID: {market_order_id}) + TP @ {tp_price:.2f} (ID: {tp_order_id or 'n/a'}). "
-                f"Restored {restored_count} exit orders."
+                f"(ID: {market_order_id}) + TP @ {tp_price:.2f} (ID: {tp_order_id or 'n/a'})"
+                + (f". Restored {restored_count} exit orders." if restored_count > 0 else "")
             )
 
     def _restore_cancelled_orders(self, session, account, cancelled_orders_info: list, dry_run: bool) -> int:
@@ -1295,7 +1304,7 @@ class TastyTradeClient:
                 legs = order_info.get('legs', [])
                 if not legs:
                     continue
-                # Recreate the order
+                # Recreate the order with original price and settings
                 new_order = NewOrder(
                     time_in_force=order_info.get('time_in_force', OrderTimeInForce.GTC),
                     order_type=order_info.get('order_type', OrderType.LIMIT),

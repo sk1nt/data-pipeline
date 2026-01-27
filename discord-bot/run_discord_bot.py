@@ -34,6 +34,11 @@ async def main():
     logging.getLogger("discord.client").setLevel(lib_log_level)
     logging.getLogger("discord.gateway").setLevel(lib_log_level)
     logging.getLogger("discord.http").setLevel(lib_log_level)
+    # HTTP client loggers (httpx/httpcore used by tastytrade)
+    logging.getLogger("httpx").setLevel(lib_log_level)
+    logging.getLogger("httpcore").setLevel(lib_log_level)
+    logging.getLogger("httpcore.http11").setLevel(lib_log_level)
+    logging.getLogger("httpcore.connection").setLevel(lib_log_level)
     config = create_config_from_env()
     bot = TradeBot(config)
 

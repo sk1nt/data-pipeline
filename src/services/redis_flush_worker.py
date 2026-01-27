@@ -755,7 +755,8 @@ class RedisFlushWorker:
                 sum_gex_vol,
                 sum_gex_oi,
                 delta_risk_reversal,
-                max_priors
+                max_priors,
+                NULL AS strikes
             FROM gex_snapshots_flush
             """
         )
@@ -887,7 +888,7 @@ class RedisFlushWorker:
                             topic_symbol VARCHAR,
                             is_index_option BOOLEAN,
                             ticker VARCHAR,
-                            option_chain_id BIGINT,
+                            option_chain_id VARCHAR,
                             type VARCHAR,
                             strike DOUBLE,
                             expiry TIMESTAMP,

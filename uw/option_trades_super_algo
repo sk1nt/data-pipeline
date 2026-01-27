@@ -1,0 +1,47 @@
+[
+    null,
+    null,
+    "option_trades_super_algo",
+    "new_msg",
+    {
+        "data": {
+            "ask_vol": 749,
+            "bid_vol": 97,
+            "delta": "0.422",
+            "ewma_nbbo_ask": "2.79",
+            "ewma_nbbo_bid": "2.65",
+            "exchange": "XBXO",
+            "executed_at": "2026-01-07T20:00:32.287Z",
+            "gamma": "0.041",
+            "id": "674a5743-41a1-48c3-8825-7b94c96b2182",
+            "implied_volatility": "0.525",
+            "industry_type": "Semiconductors",
+            "is_agg": false,
+            "issue_type": "ADR",
+            "marketcap": "122059032151",
+            "mid_vol": 17,
+            "multi_vol": 16,
+            "next_earnings_date": "2026-02-04",
+            "no_side_vol": 0,
+            "open_interest": 227,
+            "option_chain_id": "ARM260116C00118000",
+            "premium": "140000.00",
+            "price": "2.80",
+            "report_flags": [],
+            "rho": "0.011",
+            "sector": "Technology",
+            "size": 500,
+            "stock_multi_vol": 0,
+            "tags": [
+                "ask_side",
+                "bullish"
+            ],
+            "theo": "2.800",
+            "theta": "-0.207",
+            "underlying_price": "115.695",
+            "upstream_condition_detail": "AUTO",
+            "vega": "0.071",
+            "volume": 863
+        }
+    }
+]

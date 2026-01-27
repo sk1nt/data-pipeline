@@ -8,13 +8,28 @@ from models.trader import Trader
 
 
 class AuthService:
-    # Authorized user IDs for different actions
+    """Centralized authorization service for Discord bot permissions.
+    
+    Single source of truth for user/channel allowlists.
+    Redis provides runtime overrides; these defaults are authoritative fallbacks.
+    """
+    
+    # === AUTOMATED TRADING PERMISSIONS ===
+    # Users who can trigger automated trades via "Alert: ..." messages
+    AUTOMATED_TRADE_USERS = [
+        "700068629626224700",   # skint0552
+        "704125082750156840",   # rwest
+    ]
+    # Channels where automated Alert trades are allowed
+    AUTOMATED_TRADE_CHANNELS = [
+        "970439141512871956",   # options-alert
+        "1429940127899324487",  # bot-testing
+    ]
+    
+    # === LEGACY ALIASES (for backwards compatibility) ===
     FUTURES_USERS = ["704125082750156840"]
-    ALERT_USERS = ["700068629626224700", "704125082750156840"]
-    # Users allowed to trigger automated trades from alerts
-    AUTOMATED_TRADE_USERS = ALERT_USERS
-    # Channels allowed to receive automated alerts
-    ALERT_CHANNELS = ["1255265167113978008", "1429940127899324487"]
+    ALERT_USERS = AUTOMATED_TRADE_USERS
+    ALERT_CHANNELS = AUTOMATED_TRADE_CHANNELS
 
     @staticmethod
     def verify_user_for_futures(discord_id: str) -> bool:
