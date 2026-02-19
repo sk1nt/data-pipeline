@@ -22,6 +22,7 @@ from tastytrade.order import (
     InstrumentType,
 )
 from tastytrade.instruments import Future
+from tastytrade.utils import TastytradeError
 
 try:  # pragma: no cover - optional dependency
     from tastytrade.session import Session
@@ -198,7 +199,227 @@ class TastyTradeClient:
             session = self._ensure_session()
             account = self._ensure_active_account(session)
             positions = account.get_positions(session)
-            return [pos.__dict__ for pos in positions]
+            # Use model_dump() for proper Pydantic serialization
+            return [pos.model_dump() if hasattr(pos, 'model_dump') else pos.__dict__ for pos in positions]
+
+    def get_positions_raw(self) -> list:
+        """Get positions via direct REST API call (fallback if SDK fails)."""
+        with self._lock:
+            session = self._ensure_session()
+            account = self._ensure_active_account(session)
+            try:
+                resp = session._get(f"/accounts/{account.account_number}/positions")
+                items = resp.get("data", {}).get("items", [])
+                return items
+            except Exception as exc:
+                LOGGER.warning("get_positions_raw failed: %s", exc)
+                raise
+
+    def flatten_position(
+        self,
+        symbol: str,
+        dry_run: Optional[bool] = None,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
+    ) -> dict:
+        """Flatten (close) an entire position for a symbol.
+        
+        Args:
+            symbol: Product symbol like 'MNQ' or '/MNQ'
+            dry_run: If True, validate order but don't submit
+            max_retries: Number of retries if position not found (API propagation delay)
+            retry_delay: Seconds to wait between retries
+            
+        Returns:
+            Dict with cancelled_orders, position details, and order result
+        """
+        with self._lock:
+            session = self._ensure_session()
+            account = self._ensure_active_account(session)
+            
+            # Normalize symbol (strip leading /)
+            search_symbol = symbol.upper().lstrip("/")
+            
+            # Step 1: Get all positions via SDK (same method as get_positions)
+            pos = None
+            positions = []
+            for attempt in range(max_retries + 1):
+                try:
+                    sdk_positions = account.get_positions(session)
+                    # Convert to dicts for consistent handling
+                    positions = [p.model_dump() if hasattr(p, 'model_dump') else p.__dict__ for p in sdk_positions]
+                    LOGGER.debug("flatten_position: attempt %d, SDK positions: %s", attempt + 1, positions)
+                except Exception as exc:
+                    LOGGER.error("Failed to get positions: %s", exc)
+                    raise RuntimeError(f"Failed to get positions: {exc}")
+                
+                # Find matching position - SDK uses underscored keys
+                for p in positions:
+                    p_symbol = (p.get("symbol") or "").upper().lstrip("/")
+                    p_underlying = (p.get("underlying_symbol") or "").upper().lstrip("/")
+                    LOGGER.debug("flatten_position: checking position symbol=%s underlying=%s against search=%s", 
+                               p_symbol, p_underlying, search_symbol)
+                    if search_symbol in p_symbol or search_symbol in p_underlying:
+                        pos = p
+                        break
+                
+                if pos:
+                    break
+                
+                # Position not found - retry after delay (API propagation can take a few seconds)
+                if attempt < max_retries:
+                    LOGGER.info("flatten_position: position not found for %s, retrying in %.1fs (attempt %d/%d)", 
+                              search_symbol, retry_delay, attempt + 1, max_retries)
+                    time.sleep(retry_delay)
+            
+            if not pos:
+                # List available positions for debugging
+                available_positions = [p.get("symbol", "?") for p in positions]
+                LOGGER.warning("flatten_position: no position found for %s in %d positions: %s", 
+                             search_symbol, len(positions), available_positions)
+                msg = f"No position found for {symbol}"
+                if available_positions:
+                    msg += f" (available: {', '.join(available_positions)})"
+                return {
+                    "status": "no_position",
+                    "message": msg,
+                    "cancelled_orders": 0,
+                }
+            
+            # Get position details (SDK uses underscored keys)
+            pos_symbol = pos.get("symbol", "")  # Full contract like /MNQH6
+            pos_qty = int(float(pos.get("quantity", 0) or 0))
+            # SDK may use quantity_direction or direction - check both
+            pos_direction = pos.get("quantity_direction") or pos.get("direction") or ""
+            # Handle enum values (may be PositionDirection.LONG instead of "Long")
+            if hasattr(pos_direction, 'value'):
+                pos_direction = pos_direction.value
+            pos_direction = str(pos_direction)
+            LOGGER.debug("flatten_position: found position symbol=%s qty=%d direction='%s' raw_pos=%s", 
+                       pos_symbol, pos_qty, pos_direction, pos)
+            
+            if pos_qty == 0:
+                return {
+                    "status": "no_position",
+                    "message": f"Position quantity is zero for {symbol}",
+                    "cancelled_orders": 0,
+                }
+            
+            # Step 2: Cancel all working orders for this product
+            cancelled_orders = []
+            try:
+                live_orders = account.get_live_orders(session)
+                for order in live_orders:
+                    order_status = getattr(order, 'status', None)
+                    status_str = str(order_status.value).lower() if order_status else ''
+                    if status_str in ('filled', 'cancelled', 'rejected', 'expired'):
+                        continue
+                    
+                    # Check if order is for our symbol
+                    order_underlying = getattr(order, 'underlying_symbol', '') or ''
+                    legs = getattr(order, 'legs', [])
+                    order_symbol = ''
+                    if legs:
+                        order_symbol = getattr(legs[0], 'symbol', '') or ''
+                    
+                    if (search_symbol in order_underlying.upper() or 
+                        search_symbol in order_symbol.upper()):
+                        order_id = getattr(order, 'id', None)
+                        if order_id:
+                            try:
+                                session._delete(
+                                    f"/accounts/{account.account_number}/orders/{order_id}"
+                                )
+                                cancelled_orders.append(order_id)
+                                LOGGER.info("Cancelled order %s for flatten", order_id)
+                            except Exception as cancel_exc:
+                                LOGGER.warning("Failed to cancel order %s: %s", order_id, cancel_exc)
+            except Exception as exc:
+                LOGGER.warning("Error cancelling orders during flatten: %s", exc)
+            
+            # Wait for order cancellations to propagate through the risk system
+            if cancelled_orders:
+                LOGGER.info("Waiting for %d cancelled orders to clear...", len(cancelled_orders))
+                time.sleep(0.5)
+            
+            # Step 3: Place market order to close position
+            # SDK returns quantity as always positive with quantity_direction indicating Long/Short
+            # If Long, we SELL to close; if Short, we BUY to close
+            direction_lower = pos_direction.lower()
+            if direction_lower == "long":
+                is_long = True
+            elif direction_lower == "short":
+                is_long = False
+            else:
+                LOGGER.warning("flatten_position: unknown direction '%s', assuming short (BUY_TO_CLOSE)", pos_direction)
+                is_long = False
+            LOGGER.info("flatten_position: is_long=%s (direction='%s'), will %s %d", 
+                       is_long, pos_direction, "SELL" if is_long else "BUY", pos_qty)
+            if is_long:
+                close_action = OrderAction.SELL_TO_CLOSE
+            else:
+                close_action = OrderAction.BUY_TO_CLOSE
+            
+            close_qty = abs(pos_qty)
+            
+            # Build market order
+            leg = Leg(
+                instrument_type=InstrumentType.FUTURE,
+                symbol=pos_symbol,
+                action=close_action,
+                quantity=close_qty,
+            )
+            
+            order = NewOrder(
+                time_in_force=OrderTimeInForce.DAY,
+                order_type=OrderType.MARKET,
+                legs=[leg],
+            )
+            
+            # Determine dry_run
+            if dry_run is None:
+                dry_run = self._dry_run
+            
+            # Try placing the flatten order with retries (margin system may need time to update)
+            last_error = None
+            for order_attempt in range(3):
+                try:
+                    result = account.place_order(session, order, dry_run=dry_run)
+                    order_id = getattr(result, 'order', None)
+                    if order_id:
+                        order_id = getattr(order_id, 'id', None)
+                    
+                    return {
+                        "status": "success",
+                        "position_symbol": pos_symbol,
+                        "position_qty": pos_qty,
+                        "position_direction": pos_direction,
+                        "close_action": str(close_action),
+                        "close_qty": close_qty,
+                        "cancelled_orders": len(cancelled_orders),
+                        "cancelled_order_ids": cancelled_orders,
+                        "order_id": order_id,
+                        "dry_run": dry_run,
+                        "message": f"{'[DRY RUN] ' if dry_run else ''}Flattened {pos_symbol}: {close_action.name} {close_qty}",
+                    }
+                except Exception as exc:
+                    last_error = exc
+                    error_str = str(exc).lower()
+                    # Retry on margin/concentration issues (may resolve after order cancellations propagate)
+                    if 'margin' in error_str or 'concentration' in error_str or 'buying_power' in error_str:
+                        LOGGER.warning("Flatten order attempt %d failed (margin): %s, retrying...", 
+                                     order_attempt + 1, exc)
+                        time.sleep(1.0)
+                        continue
+                    # Non-margin error, don't retry
+                    LOGGER.error("Failed to place flatten order: %s", exc)
+                    self._raise_on_auth_error(exc)
+                    raise RuntimeError(f"Failed to place flatten order: {exc}")
+            
+            # All retries exhausted
+            LOGGER.error("Failed to place flatten order after 3 attempts: %s", last_error)
+            self._raise_on_auth_error(last_error)
+            raise RuntimeError(f"Failed to place flatten order: {last_error}")
 
     def get_orders(self) -> list:
         with self._lock:
@@ -210,7 +431,8 @@ class TastyTradeClient:
             except Exception:
                 raw = session._get(f"/accounts/{account.account_number}/orders")
                 orders = raw.get("data", {}).get("items", [])
-            return [order.__dict__ for order in orders]
+            # Use model_dump() for proper Pydantic serialization
+            return [order.model_dump() if hasattr(order, 'model_dump') else order.__dict__ for order in orders]
 
     def get_futures_list(self) -> list:
         # Try to return a dynamic list via SDK; fallback to reasonable static list
@@ -633,7 +855,17 @@ class TastyTradeClient:
         return short
 
     def _refresh_accounts(self, session: Session) -> None:
-        accounts = Account.get(session)
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                accounts = Account.get(session)
+                break
+            except TastytradeError as e:
+                if "empty_response" in str(e) and attempt < max_retries:
+                    logger.warning("TastyTrade empty_response on Account.get, retry %d/%d", attempt, max_retries)
+                    time.sleep(1)
+                else:
+                    raise
         self._accounts = {acct.account_number: acct for acct in accounts}
         if not self._active_account and accounts:
             self._active_account = accounts[0].account_number
@@ -910,45 +1142,57 @@ class TastyTradeClient:
             else:
                 tick_size = 0.01  # Equities
 
-            # For futures, try to resolve the exact contract symbol the API expects
+            # For futures: resolve symbol, tick_size, and price in ONE SDK call
+            _future_obj = None  # cache the Future object to avoid repeated API calls
             if inst_type == InstrumentType.FUTURE:
                 try:
                     resolved = self._resolve_future_contract_symbol(session, symbol)
                     if resolved:
                         symbol = resolved
                 except Exception:
-                    # if resolve fails, proceed with the normalized symbol
                     pass
-                    
-                # Query SDK for contract-specific tick size (do this BEFORE calculating TP)
+
+                # Single Future.get() call to get tick_size + price data
                 try:
                     sym_lookup = symbol.lstrip("/")
                     futs = Future.get(session, symbols=[sym_lookup])
                     if futs:
-                        f = futs[0]
-                        tick_meta = getattr(f, "tick_size", None)
-                        min_tick = getattr(f, "min_tick", None)
-                        LOGGER.debug("SDK returned for %s: tick_size=%s, min_tick=%s", 
-                                    symbol, tick_meta, min_tick)
-                        # Use tick_size if it looks like a point value (0.25, 0.5, etc.)
-                        # Ignore if it looks like a dollar value (5.0 for NQ)
+                        _future_obj = futs[0]
+                        # Extract tick_size
+                        tick_meta = getattr(_future_obj, "tick_size", None)
+                        min_tick = getattr(_future_obj, "min_tick", None)
                         if isinstance(tick_meta, (int, float)) and 0 < tick_meta < 1:
                             tick_size = float(tick_meta)
-                            LOGGER.debug("Using SDK tick_size for %s: %s", symbol, tick_size)
                         elif isinstance(min_tick, (int, float)) and 0 < min_tick < 1:
                             tick_size = float(min_tick)
-                            LOGGER.debug("Using SDK min_tick for %s: %s", symbol, tick_size)
-                        # Otherwise keep default 0.25 for NQ/MNQ
+                        LOGGER.debug("Future %s: tick_size=%s", symbol, tick_size)
                 except Exception as ex:
-                    LOGGER.debug("SDK tick lookup exception: %s", ex)
-                    # If we cannot resolve tick from SDK, continue with default
-                    pass
+                    LOGGER.debug("SDK Future lookup exception: %s", ex)
 
-            # Get current price (approximate from quote) or use provided market_price
+            # Get current price — use cached Future object (free, no extra API call).
+            # For futures, TastyTrade doesn't serve live quotes via REST — the fill
+            # price from the market order is used to calculate TP (Step 4), which is
+            # more accurate anyway.  Only call _get_current_price for equities.
+            current_price = None
             if market_price is not None:
                 current_price = float(market_price)
             else:
-                current_price = self._get_current_price(session, symbol)
+                # Try price attrs on the Future object we already have (no network call)
+                if _future_obj is not None:
+                    for attr in ('mark_price', 'last_price', 'close_price', 'settlement_price'):
+                        val = getattr(_future_obj, attr, None)
+                        if val is not None and float(val) > 0:
+                            current_price = float(val)
+                            LOGGER.debug("Price from cached Future.%s: %s", attr, current_price)
+                            break
+                # For non-futures, try the full quote lookup
+                if current_price is None and inst_type != InstrumentType.FUTURE:
+                    try:
+                        current_price = self._get_current_price(session, symbol)
+                    except Exception as exc:
+                        LOGGER.warning("Could not fetch current price for %s: %s — will use fill price for TP", symbol, exc)
+                elif current_price is None:
+                    LOGGER.debug("No pre-trade quote for %s — TP will be calculated from fill price", symbol)
 
             # Determine entry action
             # For futures on TastyTrade:
@@ -976,33 +1220,33 @@ class TastyTradeClient:
                 )
 
             # Calculate TP price directionally (tick_size already resolved from SDK above)
-            LOGGER.debug("Calculating TP: current_price=%s, tp_ticks=%s, tick_size=%s", 
-                        current_price, tp_ticks, tick_size)
-            if action.upper() == "BUY":  # Long: TP above
-                tp_price = current_price + (tp_ticks * tick_size)
-                round_dir = "up"  # Ceiling to ensure profit
-            else:  # Short: TP below
-                tp_price = current_price - (tp_ticks * tick_size)
-                round_dir = "down"  # Floor to ensure profit
-            
-            LOGGER.debug("TP price before rounding: %s", tp_price)
-
-            # Round TP price to the instrument's tick size and ensure it is on the correct side
             def _round_to_tick(price: float, tick: float, direction: str) -> float:
                 return round_to_tick(price, tick, direction)
 
-            tp_price = _round_to_tick(tp_price, tick_size, round_dir)
-            # Safety nudge: Ensure TP is strictly profitable
-            if action.upper() == "BUY":
-                if tp_price <= current_price:
-                    tp_price = _round_to_tick(
-                        current_price + tick_size, tick_size, "up"
-                    )
-            else:
-                if tp_price >= current_price:
-                    tp_price = _round_to_tick(
-                        current_price - tick_size, tick_size, "down"
-                    )
+            tp_price = None
+            if current_price is not None:
+                LOGGER.debug("Calculating TP: current_price=%s, tp_ticks=%s, tick_size=%s", 
+                            current_price, tp_ticks, tick_size)
+                if action.upper() == "BUY":  # Long: TP above
+                    tp_price = current_price + (tp_ticks * tick_size)
+                    round_dir = "up"  # Ceiling to ensure profit
+                else:  # Short: TP below
+                    tp_price = current_price - (tp_ticks * tick_size)
+                    round_dir = "down"  # Floor to ensure profit
+                
+                LOGGER.debug("TP price before rounding: %s", tp_price)
+                tp_price = _round_to_tick(tp_price, tick_size, round_dir)
+                # Safety nudge: Ensure TP is strictly profitable
+                if action.upper() == "BUY":
+                    if tp_price <= current_price:
+                        tp_price = _round_to_tick(
+                            current_price + tick_size, tick_size, "up"
+                        )
+                else:
+                    if tp_price >= current_price:
+                        tp_price = _round_to_tick(
+                            current_price - tick_size, tick_size, "down"
+                        )
 
             # Clean symbol for leg (strip exchange if present, ensure no leading / for equities)
             leg_symbol = (
@@ -1028,7 +1272,7 @@ class TastyTradeClient:
 
             # Calculate SL price if sl_ticks > 0
             sl_price = None
-            if sl_ticks > 0:
+            if sl_ticks > 0 and current_price is not None:
                 if action.upper() == "BUY":  # Long: SL below
                     sl_price = current_price - (sl_ticks * tick_size)
                     sl_price = _round_to_tick(sl_price, tick_size, "down")
@@ -1054,7 +1298,7 @@ class TastyTradeClient:
             )
 
             # If SL is specified, use OTOCO bracket order
-            if sl_ticks > 0 and sl_price is not None:
+            if sl_ticks > 0 and sl_price is not None and tp_price is not None:
                 LOGGER.info("Using OTOCO bracket order with TP=%s, SL=%s", tp_price, sl_price)
                 
                 # Entry order (trigger)
@@ -1116,27 +1360,7 @@ class TastyTradeClient:
                 legs=[entry_leg],
             )
 
-            # Step 1: Do a dry-run first to check buying power (unless already in dry-run mode)
-            # Note: dry-run may fail with "illegal_buy_and_sell" if there are conflicting exit orders,
-            # but we'll handle that by canceling them temporarily below
-            if not eff_dry:
-                LOGGER.info("Checking buying power with dry-run...")
-                try:
-                    dry_result = account.place_order(session, entry_order, dry_run=True)
-                    # Check for errors in dry-run response
-                    if hasattr(dry_result, 'errors') and dry_result.errors:
-                        error_msgs = [str(e) for e in dry_result.errors]
-                        LOGGER.warning("Dry-run failed: %s", error_msgs)
-                        return f"Order rejected (insufficient BP or other error): {'; '.join(error_msgs)}"
-                except Exception as e:
-                    error_msg = str(e)
-                    if 'buying_power' in error_msg.lower() or 'margin' in error_msg.lower():
-                        LOGGER.warning("Insufficient buying power: %s", error_msg)
-                        return f"Order rejected - insufficient buying power: {error_msg}"
-                    # "illegal_buy_and_sell" is expected if we have exit orders - we'll cancel them below
-                    LOGGER.debug("Dry-run check exception (continuing): %s", e)
-
-            # Step 2: Cancel any conflicting exit orders (TastyTrade doesn't allow buy+sell on same symbol)
+            # Step 1: Cancel any conflicting exit orders (TastyTrade doesn't allow buy+sell on same symbol)
             cancelled_orders_info = []
             conflicting = self._get_conflicting_exit_orders(session, account, symbol, entry_action)
             if conflicting:
@@ -1163,30 +1387,40 @@ class TastyTradeClient:
                     except Exception as e:
                         LOGGER.warning("Failed to cancel order %s: %s", order_id, e)
 
-            # Step 3: Place the entry order
+            # Step 2: Place the entry order (with retry for conflicting-order race)
             LOGGER.info("Sending market entry (dry-run=%s): %s", eff_dry, entry_order)
             market_order_id = None
-            try:
-                placed_entry = account.place_order(session, entry_order, dry_run=eff_dry)
-                market_order_id = self._extract_order_id(placed_entry)
-                if market_order_id is None:
-                    LOGGER.warning(
-                        "Market entry returned no ID (dry_run=%s): %s",
-                        eff_dry,
-                        repr(placed_entry),
-                    )
-                    # Restore cancelled orders before returning
+            max_entry_retries = 3
+            for entry_attempt in range(1, max_entry_retries + 1):
+                try:
+                    placed_entry = account.place_order(session, entry_order, dry_run=eff_dry)
+                    market_order_id = self._extract_order_id(placed_entry)
+                    if market_order_id is None:
+                        LOGGER.warning(
+                            "Market entry returned no ID (dry_run=%s): %s",
+                            eff_dry,
+                            repr(placed_entry),
+                        )
+                        # Restore cancelled orders before returning
+                        self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
+                        return "Market entry submitted but no ID returned (check logs)."
+                    break  # success — exit retry loop
+                except Exception as exc:
+                    msg = str(exc)
+                    if "illegal_buy_and_sell_on_same_symbol" in msg and entry_attempt < max_entry_retries:
+                        LOGGER.warning(
+                            "Market entry attempt %d/%d hit buy/sell conflict, retrying in 1s: %s",
+                            entry_attempt, max_entry_retries, msg,
+                        )
+                        time.sleep(1)
+                        continue
+                    LOGGER.warning("Market entry failed: %s", msg)
+                    # Restore cancelled orders before raising
                     self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
-                    return "Market entry submitted but no ID returned (check logs)."
-            except Exception as exc:
-                msg = str(exc)
-                LOGGER.warning("Market entry failed: %s", msg)
-                # Restore cancelled orders before raising
-                self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
-                self._raise_on_auth_error(exc)
-                raise
+                    self._raise_on_auth_error(exc)
+                    raise
 
-            # Step 4: Wait for market order to fill and get actual fill price
+            # Step 3: Wait for market order to fill and get actual fill price
             actual_fill_price = None
             if not eff_dry:
                 max_wait_seconds = 5
@@ -1229,7 +1463,7 @@ class TastyTradeClient:
                     LOGGER.warning("Market order %s not confirmed filled after %ss, proceeding anyway", 
                                   market_order_id, max_wait_seconds)
 
-            # Step 5: Recalculate TP price based on actual fill price (if available)
+            # Step 4: Recalculate TP price based on actual fill price (if available)
             if actual_fill_price:
                 # Recalculate TP based on actual fill, not quote price
                 if action.upper() == "BUY":  # Long: TP above fill
@@ -1245,7 +1479,17 @@ class TastyTradeClient:
                 tp_price = _round_to_tick_local(tp_price, tick_size, round_dir)
                 LOGGER.info("Recalculated TP based on fill price %s: new TP = %s", actual_fill_price, tp_price)
 
-            # Step 6: Place the new TP order
+            # Step 5: Place the new TP order (if we have a TP price)
+            if tp_price is None:
+                # No quote and no fill price — can't compute TP, just return entry result
+                LOGGER.warning("No TP price available (no quote or fill price), skipping TP order")
+                restored_count = self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
+                return (
+                    f"[{'DRY-RUN' if eff_dry else 'LIVE'}] Placed {action.lower()} entry {quantity} {symbol} @ market "
+                    f"(ID: {market_order_id}) — TP skipped (no price data)"
+                    + (f". Restored {restored_count} exit orders." if restored_count > 0 else "")
+                )
+
             # TastyTrade price sign determines price_effect:
             # - Negative price = Debit (paying money, used for BUY orders)
             # - Positive price = Credit (receiving money, used for SELL orders)
@@ -1284,7 +1528,7 @@ class TastyTradeClient:
                     f"(ID: {market_order_id}) but TP failed: {msg}. Restored {len(cancelled_orders_info)} exit orders."
                 )
 
-            # Step 7: Restore previously cancelled exit orders at their original levels
+            # Step 6: Restore previously cancelled exit orders at their original levels
             restored_count = self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
 
             return (
@@ -1352,59 +1596,89 @@ class TastyTradeClient:
         return symbol
 
     def _get_current_price(self, session, symbol: str) -> float:
-        # Get quote
-        # Consider both forms: leading '/' or numeric-month contract like 'NQZ25'
-        is_future = False
-        if isinstance(symbol, str) and symbol.startswith("/"):
-            is_future = True
-        else:
-            # detect explicit future contract like NQZ25
-            if isinstance(symbol, str) and re.match(
-                r"^(NQ|MNQ|ES|MES|RTY|YM)[A-Z]\d{1,2}(:\w+)?$", symbol.upper()
-            ):
-                is_future = True
+        """Fetch current price — fast methods first, streamer as last resort."""
+        sym_lookup = symbol.lstrip("/")
 
-        if is_future:
-            # Future: API sometimes expects symbol without exchange suffix or leading '/'.
-            # Try several common variants to avoid 404 responses.
-            variants = []
-            raw = symbol.lstrip("/")
-            variants.append("/" + raw)
-            variants.append(raw)
-            # If symbol contains exchange suffix (like :XCME), strip it
-            if ":" in raw:
-                base = raw.split(":", 1)[0]
-                variants.append("/" + base)
-                variants.append(base)
-            quote_data = None
-            last_exc = None
+        # Method 1 (fast): Get price attributes from the Future instrument via REST
+        try:
+            futs = Future.get(session, symbols=[sym_lookup])
+            if futs:
+                f = futs[0]
+                for attr in ('mark_price', 'last_price', 'close_price', 'settlement_price'):
+                    val = getattr(f, attr, None)
+                    if val is not None and float(val) > 0:
+                        LOGGER.debug("Got price from Future.%s for %s: %s", attr, symbol, val)
+                        return float(val)
+        except Exception as exc:
+            LOGGER.debug("Future instrument price lookup failed for %s: %s", symbol, exc)
+
+        # Method 2 (fast): Legacy REST endpoint fallback
+        is_future = isinstance(symbol, str) and (
+            symbol.startswith("/") or
+            bool(re.match(r"^(NQ|MNQ|ES|MES|RTY|YM)[A-Z]\d{1,2}(:\w+)?$", symbol.upper()))
+        )
+        endpoints = ["/market-data", "/quotes/futures", "/quotes"] if is_future else ["/quotes/equities"]
+        raw = symbol.lstrip("/")
+        variants = [f"/{raw}", raw]
+        if ":" in raw:
+            base = raw.split(":", 1)[0]
+            variants.extend([f"/{base}", base])
+
+        for endpoint in endpoints:
             for v in variants:
                 try:
-                    resp = session._get(f"/quotes/futures?symbol={v}")
-                    quote_data = resp["data"]["items"]
-                    LOGGER.debug("Quote fetch succeeded for variant: %s", v)
-                    break
-                except Exception as exc:
-                    last_exc = exc
-                    LOGGER.debug("Quote fetch failed for variant %s: %s", v, exc)
-            if quote_data is None and last_exc is not None:
-                # Re-raise last exception to bubble up
-                raise last_exc
-        else:
-            # Equity
-            quote_data = session._get(f"/quotes/equities?symbol={symbol}")["data"][
-                "items"
-            ]
-        if quote_data:
-            bid = quote_data[0].get("bid-price")
-            ask = quote_data[0].get("ask-price")
-            if bid is not None and ask is not None:
-                return (bid + ask) / 2
-            # Fall back to last/mark if bid/ask missing
-            for key in ("last-price", "mark-price", "close-price", "last", "mark"):
-                val = quote_data[0].get(key)
-                if val is not None:
-                    return float(val)
+                    resp = session._get(f"{endpoint}?symbol={v}")
+                    items = resp.get("data", {}).get("items", [])
+                    if items:
+                        bid = items[0].get("bid-price")
+                        ask = items[0].get("ask-price")
+                        if bid is not None and ask is not None:
+                            return (float(bid) + float(ask)) / 2.0
+                        for key in ("last-price", "mark-price", "close-price"):
+                            val = items[0].get(key)
+                            if val is not None:
+                                return float(val)
+                except Exception:
+                    continue
+
+        # Method 3 (slow, ~1-2s): DXLinkStreamer one-shot quote — only if fast methods failed
+        try:
+            from tastytrade import DXLinkStreamer
+            from tastytrade.dxfeed import Quote as DXQuote
+            import asyncio
+
+            async def _fetch_quote():
+                async with DXLinkStreamer(session) as streamer:
+                    subs = [sym_lookup]
+                    try:
+                        futs = Future.get(session, symbols=[sym_lookup])
+                        if futs and getattr(futs[0], 'streamer_symbol', None):
+                            subs = [futs[0].streamer_symbol]
+                    except Exception:
+                        pass
+                    await streamer.subscribe(DXQuote, subs)
+                    quote = await asyncio.wait_for(streamer.get_event(DXQuote), timeout=2.0)
+                    bid = getattr(quote, 'bid_price', None)
+                    ask = getattr(quote, 'ask_price', None)
+                    if bid and ask and bid > 0 and ask > 0:
+                        return (float(bid) + float(ask)) / 2.0
+                    raise RuntimeError("No valid bid/ask from streamer")
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    price = pool.submit(lambda: asyncio.run(_fetch_quote())).result(timeout=4)
+            else:
+                price = asyncio.run(_fetch_quote())
+            LOGGER.debug("Got price from DXLink streamer for %s: %s", symbol, price)
+            return price
+        except Exception as exc:
+            LOGGER.debug("DXLink streamer quote failed for %s: %s", symbol, exc)
+
         raise RuntimeError(f"No quote data available for symbol: {symbol}")
 
     def _raise_on_auth_error(self, exc: Exception) -> None:

@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quick Order Panel</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg2: #161b22;
+  --bg3: #21262d;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text2: #8b949e;
+  --green: #3fb950;
+  --green-bg: rgba(63,185,80,.12);
+  --red: #f85149;
+  --red-bg: rgba(248,81,73,.12);
+  --blue: #58a6ff;
+  --yellow: #d29922;
+  --orange: #db6d28;
+  --radius: 8px;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui,-apple-system,sans-serif; font-size:14px; }
+
+/* Header */
+.header { display:flex; align-items:center; justify-content:space-between; padding:10px 16px; background:var(--bg2); border-bottom:1px solid var(--border); }
+.header h1 { font-size:16px; font-weight:600; }
+.header .status { display:flex; gap:8px; align-items:center; font-size:12px; color:var(--text2); }
+.dot { width:8px; height:8px; border-radius:50%; display:inline-block; }
+.dot.ok { background:var(--green); }
+.dot.err { background:var(--red); }
+.dot.warn { background:var(--yellow); }
+
+/* Layout */
+.container { display:grid; grid-template-columns:1fr 1fr; gap:0; height:calc(100vh - 45px); }
+.left-panel, .right-panel { overflow-y:auto; }
+.left-panel { border-right:1px solid var(--border); }
+
+/* Sections */
+.section { padding:12px 16px; border-bottom:1px solid var(--border); }
+.section-title { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--text2); margin-bottom:8px; }
+
+/* Account bar */
+.account-bar { display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
+.account-stat { text-align:center; }
+.account-stat .val { font-size:16px; font-weight:600; font-variant-numeric:tabular-nums; }
+.account-stat .lbl { font-size:10px; color:var(--text2); text-transform:uppercase; }
+.account-switcher { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+.account-switcher select {
+  background:var(--surface); color:var(--text); border:1px solid var(--border);
+  border-radius:6px; padding:6px 10px; font-size:13px; cursor:pointer; min-width:180px;
+}
+.account-switcher select:focus { border-color:var(--accent); outline:none; }
+.account-switcher .acct-type {
+  font-size:11px; color:var(--text2); background:var(--border); border-radius:4px;
+  padding:2px 8px; text-transform:uppercase; letter-spacing:0.5px;
+}
+
+/* Symbol selector */
+.symbol-row { display:flex; gap:6px; }
+.symbol-btn { flex:1; padding:8px 4px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg3); color:var(--text); cursor:pointer; text-align:center; font-size:13px; font-weight:600; transition:all .15s; }
+.symbol-btn:hover { border-color:var(--blue); }
+.symbol-btn.active { background:var(--blue); color:#fff; border-color:var(--blue); }
+
+/* Size selector */
+.size-row { display:flex; gap:6px; align-items:center; }
+.size-btn { width:44px; height:36px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg3); color:var(--text); cursor:pointer; font-size:14px; font-weight:600; transition:all .15s; }
+.size-btn:hover { border-color:var(--blue); }
+.size-btn.active { background:var(--blue); color:#fff; border-color:var(--blue); }
+.size-custom { width:60px; height:36px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg2); color:var(--text); text-align:center; font-size:14px; padding:0 4px; }
+.size-custom:focus { outline:none; border-color:var(--blue); }
+
+/* TP / SL inputs */
+.tp-sl-row { display:flex; gap:12px; }
+.input-group { flex:1; }
+.input-group label { display:block; font-size:11px; color:var(--text2); margin-bottom:4px; }
+.input-group input { width:100%; height:32px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg2); color:var(--text); text-align:center; font-size:13px; padding:0 8px; }
+.input-group input:focus { outline:none; border-color:var(--blue); }
+
+/* Action buttons */
+.action-row { display:flex; gap:8px; }
+.buy-btn, .sell-btn { flex:1; padding:14px 0; border:none; border-radius:var(--radius); font-size:16px; font-weight:700; cursor:pointer; transition:all .15s; letter-spacing:.5px; }
+.buy-btn { background:var(--green); color:#fff; }
+.buy-btn:hover { background:#46c05a; }
+.buy-btn:active { transform:scale(.97); }
+.sell-btn { background:var(--red); color:#fff; }
+.sell-btn:hover { background:#ff6259; }
+.sell-btn:active { transform:scale(.97); }
+.buy-btn:disabled, .sell-btn:disabled { opacity:.4; cursor:not-allowed; }
+
+/* Flatten / Cancel row */
+.utility-row { display:flex; gap:8px; }
+.flat-btn { flex:1; padding:10px 0; border:1px solid var(--orange); border-radius:var(--radius); background:transparent; color:var(--orange); font-size:13px; font-weight:600; cursor:pointer; transition:all .15s; }
+.flat-btn:hover { background:rgba(219,109,40,.15); }
+.cancel-all-btn { flex:1; padding:10px 0; border:1px solid var(--yellow); border-radius:var(--radius); background:transparent; color:var(--yellow); font-size:13px; font-weight:600; cursor:pointer; transition:all .15s; }
+.cancel-all-btn:hover { background:rgba(210,153,34,.15); }
+
+/* Toggle row */
+.toggle-row { display:flex; gap:12px; align-items:center; }
+.toggle { display:flex; align-items:center; gap:6px; cursor:pointer; font-size:12px; }
+.toggle input[type="checkbox"] { accent-color:var(--blue); width:16px; height:16px; }
+
+/* Positions & Orders tables */
+.table-wrap { overflow-x:auto; }
+table { width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
+th { text-align:left; padding:6px 8px; color:var(--text2); font-weight:500; border-bottom:1px solid var(--border); font-size:11px; text-transform:uppercase; letter-spacing:.3px; }
+td { padding:6px 8px; border-bottom:1px solid var(--border); }
+tr:hover { background:var(--bg3); }
+.pnl-pos { color:var(--green); }
+.pnl-neg { color:var(--red); }
+.btn-sm { padding:3px 8px; border:1px solid var(--border); border-radius:4px; background:var(--bg3); color:var(--text); cursor:pointer; font-size:11px; }
+.btn-sm:hover { border-color:var(--red); color:var(--red); }
+.btn-sm.flat { border-color:var(--orange); color:var(--orange); }
+.btn-sm.flat:hover { background:rgba(219,109,40,.15); }
+
+/* Toast */
+.toast-container { position:fixed; top:12px; right:12px; z-index:999; display:flex; flex-direction:column; gap:6px; }
+.toast { padding:10px 16px; border-radius:var(--radius); font-size:13px; animation:slideIn .25s ease-out; max-width:360px; }
+.toast.success { background:var(--green-bg); border:1px solid var(--green); color:var(--green); }
+.toast.error { background:var(--red-bg); border:1px solid var(--red); color:var(--red); }
+.toast.info { background:rgba(88,166,255,.1); border:1px solid var(--blue); color:var(--blue); }
+@keyframes slideIn { from { transform:translateX(100%); opacity:0; } to { transform:translateX(0); opacity:1; } }
+
+/* DRY-RUN banner */
+.dry-run-banner { background:var(--yellow); color:#000; text-align:center; padding:4px; font-size:12px; font-weight:700; letter-spacing:1px; }
+
+/* Confirmation modal */
+.modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; align-items:center; justify-content:center; }
+.modal-overlay.active { display:flex; }
+.modal { background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:24px; width:340px; }
+.modal h3 { margin-bottom:12px; }
+.modal p { color:var(--text2); font-size:13px; margin-bottom:16px; line-height:1.5; }
+.modal .modal-actions { display:flex; gap:8px; justify-content:flex-end; }
+.modal .modal-actions button { padding:8px 16px; border-radius:var(--radius); border:none; cursor:pointer; font-size:13px; font-weight:600; }
+.modal .btn-confirm { background:var(--green); color:#fff; }
+.modal .btn-confirm.sell { background:var(--red); }
+.modal .btn-cancel { background:var(--bg3); color:var(--text); border:1px solid var(--border); }
+
+/* Activity log */
+.log-entry { padding:4px 8px; font-size:11px; color:var(--text2); border-bottom:1px solid var(--border); font-family:'SF Mono',Consolas,monospace; }
+.log-entry .time { color:var(--blue); margin-right:6px; }
+
+/* Responsive */
+@media (max-width: 900px) {
+  .container { grid-template-columns:1fr; }
+  .left-panel { border-right:none; border-bottom:1px solid var(--border); }
+}
+</style>
+</head>
+<body>
+
+<div id="dry-run-banner" class="dry-run-banner" style="display:none">DRY RUN MODE</div>
+
+<div class="header">
+  <h1>Quick Order Panel</h1>
+  <div class="status">
+    <span id="conn-status"><span class="dot err"></span> Disconnected</span>
+    <span style="color:var(--border)">|</span>
+    <span id="acct-label">—</span>
+  </div>
+</div>
+
+<div class="container">
+  <!-- LEFT PANEL: Order entry -->
+  <div class="left-panel">
+    <!-- Account summary -->
+    <div class="section">
+      <div class="section-title">Account</div>
+      <div class="account-switcher">
+        <select id="account-select" title="Switch account"></select>
+        <span class="acct-type" id="acct-type"></span>
+      </div>
+      <div class="account-bar">
+        <div class="account-stat"><div class="val" id="net-liq">—</div><div class="lbl">Net Liq</div></div>
+        <div class="account-stat"><div class="val" id="buying-power">—</div><div class="lbl">Buying Power</div></div>
+        <div class="account-stat"><div class="val" id="cash-bal">—</div><div class="lbl">Cash</div></div>
+      </div>
+    </div>
+
+    <!-- Symbol selector -->
+    <div class="section">
+      <div class="section-title">Symbol</div>
+      <div class="symbol-row" id="symbol-row"></div>
+    </div>
+
+    <!-- Size -->
+    <div class="section">
+      <div class="section-title">Quantity</div>
+      <div class="size-row" id="size-row">
+        <!-- populated by JS -->
+        <input type="number" class="size-custom" id="custom-qty" min="1" max="100" placeholder="Qty">
+      </div>
+    </div>
+
+    <!-- TP / SL -->
+    <div class="section">
+      <div class="tp-sl-row">
+        <div class="input-group">
+          <label>Take Profit (ticks)</label>
+          <input type="number" id="tp-ticks" value="35" min="0" step="1">
+        </div>
+        <div class="input-group">
+          <label>Stop Loss (ticks, 0=none)</label>
+          <input type="number" id="sl-ticks" value="0" min="0" step="1">
+        </div>
+      </div>
+    </div>
+
+    <!-- BUY / SELL -->
+    <div class="section">
+      <div class="action-row">
+        <button class="buy-btn" id="buy-btn" disabled>BUY</button>
+        <button class="sell-btn" id="sell-btn" disabled>SELL</button>
+      </div>
+    </div>
+
+    <!-- Flatten / Cancel -->
+    <div class="section">
+      <div class="utility-row">
+        <button class="flat-btn" id="flatten-btn">FLATTEN</button>
+        <button class="cancel-all-btn" id="cancel-all-btn">CANCEL ALL</button>
+      </div>
+    </div>
+
+    <!-- Toggles -->
+    <div class="section">
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="dry-run-toggle"> Dry Run</label>
+        <label class="toggle"><input type="checkbox" id="confirm-toggle" checked> Confirm Orders</label>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT PANEL: Positions, Orders, Log -->
+  <div class="right-panel">
+    <div class="section">
+      <div class="section-title">Positions</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Symbol</th><th>Qty</th><th>Dir</th><th>P&L</th><th></th></tr></thead>
+          <tbody id="positions-body"><tr><td colspan="5" style="color:var(--text2)">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Open Orders</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Type</th><th>Price</th><th></th></tr></thead>
+          <tbody id="orders-body"><tr><td colspan="7" style="color:var(--text2)">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section" style="flex:1">
+      <div class="section-title">Activity Log</div>
+      <div id="log-container" style="max-height:200px; overflow-y:auto;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Confirmation Modal -->
+<div class="modal-overlay" id="confirm-modal">
+  <div class="modal">
+    <h3 id="modal-title">Confirm Order</h3>
+    <p id="modal-body"></p>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="modal-cancel">Cancel</button>
+      <button class="btn-confirm" id="modal-confirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toasts"></div>
+
+<script>
+// ---- Config ----
+const API_BASE = localStorage.getItem('api_base') || (location.origin + '/api/v1');
+const API_KEY = localStorage.getItem('api_key') || '';
+
+if (!API_KEY) {
+  const key = prompt('Enter Trading API Key:');
+  if (key) { localStorage.setItem('api_key', key); location.reload(); }
+}
+
+const headers = { 'Content-Type': 'application/json', 'X-API-Key': API_KEY };
+
+// ---- State ----
+let state = {
+  symbol: 'MNQ',
+  quantity: 1,
+  symbols: [],
+  presets: [],
+  dryRun: true,
+  confirmOrders: true,
+};
+
+// ---- API helpers ----
+async function api(method, path, body) {
+  try {
+    const opts = { method, headers };
+    if (body) opts.body = JSON.stringify(body);
+    const res = await fetch(API_BASE + path, opts);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || JSON.stringify(err));
+    }
+    return await res.json();
+  } catch (e) {
+    toast(e.message, 'error');
+    throw e;
+  }
+}
+
+// ---- Toast notifications ----
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 5000);
+}
+
+function addLog(msg) {
+  const c = document.getElementById('log-container');
+  const d = document.createElement('div');
+  d.className = 'log-entry';
+  const t = new Date().toLocaleTimeString();
+  d.innerHTML = `<span class="time">${t}</span>${msg}`;
+  c.prepend(d);
+  // Keep max 50 entries
+  while (c.children.length > 50) c.lastChild.remove();
+}
+
+// ---- Confirmation modal ----
+function confirm(title, body, isSell) {
+  return new Promise((resolve) => {
+    document.getElementById('modal-title').textContent = title;
+    document.getElementById('modal-body').textContent = body;
+    const confirmBtn = document.getElementById('modal-confirm');
+    confirmBtn.className = `btn-confirm ${isSell ? 'sell' : ''}`;
+    confirmBtn.textContent = title;
+    document.getElementById('confirm-modal').classList.add('active');
+    const done = (val) => {
+      document.getElementById('confirm-modal').classList.remove('active');
+      document.getElementById('modal-confirm').onclick = null;
+      document.getElementById('modal-cancel').onclick = null;
+      resolve(val);
+    };
+    confirmBtn.onclick = () => done(true);
+    document.getElementById('modal-cancel').onclick = () => done(false);
+  });
+}
+
+// ---- Renderers ----
+function renderSymbols() {
+  const row = document.getElementById('symbol-row');
+  row.innerHTML = '';
+  state.symbols.forEach(s => {
+    const btn = document.createElement('button');
+    btn.className = `symbol-btn ${s.code === state.symbol ? 'active' : ''}`;
+    btn.textContent = s.code;
+    btn.title = s.name;
+    btn.onclick = () => { state.symbol = s.code; renderSymbols(); };
+    row.appendChild(btn);
+  });
+}
+
+function renderSizes() {
+  const row = document.getElementById('size-row');
+  // Remove old preset buttons (keep custom input)
+  row.querySelectorAll('.size-btn').forEach(b => b.remove());
+  const custom = document.getElementById('custom-qty');
+  state.presets.forEach(p => {
+    const btn = document.createElement('button');
+    btn.className = `size-btn ${p.quantity === state.quantity ? 'active' : ''}`;
+    btn.textContent = p.label;
+    btn.onclick = () => {
+      state.quantity = p.quantity;
+      custom.value = '';
+      renderSizes();
+    };
+    row.insertBefore(btn, custom);
+  });
+}
+
+function fmt(n) {
+  if (n == null) return '—';
+  return Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function renderPositions(positions) {
+  const tb = document.getElementById('positions-body');
+  if (!positions || !positions.length) {
+    tb.innerHTML = '<tr><td colspan="5" style="color:var(--text2)">No open positions</td></tr>';
+    return;
+  }
+  tb.innerHTML = positions.map(p => {
+    const sym = p.symbol || p.underlying_symbol || '?';
+    const qty = p.quantity || 0;
+    const dir = p.quantity_direction || p.direction || '';
+    const dirStr = typeof dir === 'object' && dir.value ? dir.value : String(dir);
+    const pnl = p['realized-day-gain'] || p.realized_day_gain || 0;
+    const pnlClass = pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+    return `<tr>
+      <td>${sym}</td>
+      <td>${qty}</td>
+      <td>${dirStr}</td>
+      <td class="${pnlClass}">${fmt(pnl)}</td>
+      <td><button class="btn-sm flat" onclick="doFlatten('${sym}')">Flat</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderOrders(orders) {
+  const tb = document.getElementById('orders-body');
+  if (!orders || !orders.length) {
+    tb.innerHTML = '<tr><td colspan="7" style="color:var(--text2)">No open orders</td></tr>';
+    return;
+  }
+  tb.innerHTML = orders.filter(o => {
+    const st = o.status;
+    const stVal = (typeof st === 'object' && st?.value) ? st.value : String(st || '');
+    return !['Filled','Cancelled','Rejected','Expired'].includes(stVal);
+  }).map(o => {
+    const legs = o.legs || [];
+    const sym = legs.length ? (legs[0].symbol || '') : (o.underlying_symbol || '?');
+    const side = legs.length ? (legs[0].action || '') : '';
+    const sideStr = typeof side === 'object' && side.value ? side.value : String(side);
+    const qty = legs.length ? (legs[0].quantity || '') : '';
+    const type = o.order_type || '';
+    const typeStr = typeof type === 'object' && type.value ? type.value : String(type);
+    const price = o.price || '—';
+    const id = o.id || '';
+    return `<tr>
+      <td>${id}</td>
+      <td>${sym}</td>
+      <td>${sideStr}</td>
+      <td>${qty}</td>
+      <td>${typeStr}</td>
+      <td>${price}</td>
+      <td><button class="btn-sm" onclick="doCancel('${id}')">X</button></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="7" style="color:var(--text2)">No open orders</td></tr>';
+}
+
+// ---- Actions ----
+async function doOrder(action) {
+  const qty = state.quantity;
+  const sym = state.symbol;
+  const tp = parseFloat(document.getElementById('tp-ticks').value) || 0;
+  const sl = parseFloat(document.getElementById('sl-ticks').value) || 0;
+  
+  if (state.confirmOrders) {
+    const ok = await confirm(
+      action + ' ' + qty + ' ' + sym,
+      `${action} ${qty}x ${sym} @ Market\nTP: ${tp} ticks${sl > 0 ? `  SL: ${sl} ticks` : ''}${state.dryRun ? '\n[DRY RUN]' : ''}`,
+      action === 'SELL'
+    );
+    if (!ok) return;
+  }
+  
+  addLog(`${action} ${qty}x ${sym} TP=${tp} SL=${sl}${state.dryRun ? ' [DRY]' : ''}`);
+  try {
+    const res = await api('POST', '/trading/order', {
+      symbol: sym, action, quantity: qty,
+      tp_ticks: tp, sl_ticks: sl,
+      dry_run: state.dryRun,
+    });
+    toast(res.result || 'Order placed', 'success');
+    addLog(`✓ ${res.result}`);
+    refreshData();
+  } catch (e) {
+    addLog(`✗ ${e.message}`);
+  }
+}
+
+async function doFlatten(sym) {
+  sym = sym || state.symbol;
+  if (state.confirmOrders) {
+    const ok = await confirm('Flatten ' + sym, `Close entire ${sym} position and cancel working orders?${state.dryRun ? '\n[DRY RUN]' : ''}`, true);
+    if (!ok) return;
+  }
+  addLog(`FLATTEN ${sym}`);
+  try {
+    const res = await api('POST', '/trading/flatten', { symbol: sym, dry_run: state.dryRun });
+    toast(res.message || 'Position flattened', 'success');
+    addLog(`✓ ${res.message || 'Flattened'}`);
+    refreshData();
+  } catch (e) { addLog(`✗ ${e.message}`); }
+}
+
+async function doCancelAll() {
+  const sym = state.symbol;
+  if (state.confirmOrders) {
+    const ok = await confirm('Cancel All ' + sym, `Cancel all open orders for ${sym}?`, true);
+    if (!ok) return;
+  }
+  addLog(`CANCEL ALL ${sym}`);
+  try {
+    const res = await api('POST', '/trading/cancel-all', { symbol: sym });
+    toast(`Cancelled ${res.count} orders`, 'success');
+    addLog(`✓ Cancelled ${res.count} orders`);
+    refreshData();
+  } catch (e) { addLog(`✗ ${e.message}`); }
+}
+
+async function doCancel(orderId) {
+  addLog(`CANCEL order ${orderId}`);
+  try {
+    await api('POST', '/trading/cancel', { order_id: orderId });
+    toast('Order cancelled', 'success');
+    addLog(`✓ Cancelled ${orderId}`);
+    refreshData();
+  } catch (e) { addLog(`✗ ${e.message}`); }
+}
+
+// ---- Data refresh ----
+async function refreshData() {
+  try {
+    const [acct, pos, ord] = await Promise.all([
+      api('GET', '/trading/account'),
+      api('GET', '/trading/positions'),
+      api('GET', '/trading/orders'),
+    ]);
+    document.getElementById('net-liq').textContent = '$' + fmt(acct.net_liq);
+    document.getElementById('buying-power').textContent = '$' + fmt(acct.buying_power);
+    document.getElementById('cash-bal').textContent = '$' + fmt(acct.cash_balance);
+    document.getElementById('acct-label').textContent = acct.account_number || '';
+    // Update account type badge
+    const acctType = document.getElementById('acct-type');
+    if (acct.account_type) {
+      acctType.textContent = acct.account_type;
+      acctType.style.display = '';
+    } else {
+      acctType.style.display = 'none';
+    }
+    // Sync account dropdown selection
+    const sel = document.getElementById('account-select');
+    if (sel.value !== acct.account_number) {
+      sel.value = acct.account_number;
+    }
+    renderPositions(pos.positions);
+    renderOrders(ord.orders);
+    setConnected(true);
+  } catch (e) {
+    setConnected(false);
+  }
+}
+
+function setConnected(ok) {
+  const el = document.getElementById('conn-status');
+  if (ok) {
+    el.innerHTML = '<span class="dot ok"></span> Connected';
+    document.getElementById('buy-btn').disabled = false;
+    document.getElementById('sell-btn').disabled = false;
+  } else {
+    el.innerHTML = '<span class="dot err"></span> Disconnected';
+    document.getElementById('buy-btn').disabled = true;
+    document.getElementById('sell-btn').disabled = true;
+  }
+}
+
+// ---- Init ----
+async function init() {
+  try {
+    const cfg = await api('GET', '/trading/config');
+    state.symbols = cfg.symbols;
+    state.presets = cfg.size_presets;
+    state.dryRun = cfg.dry_run;
+    document.getElementById('tp-ticks').value = cfg.default_tp_ticks;
+    document.getElementById('sl-ticks').value = cfg.default_sl_ticks;
+    document.getElementById('dry-run-toggle').checked = cfg.dry_run;
+    if (cfg.dry_run) document.getElementById('dry-run-banner').style.display = '';
+    // Populate account switcher
+    if (cfg.accounts && cfg.accounts.length > 0) {
+      populateAccountSwitcher(cfg.accounts);
+    }
+    renderSymbols();
+    renderSizes();
+    setConnected(true);
+    addLog('Panel connected');
+  } catch (e) {
+    setConnected(false);
+    addLog('Failed to connect: ' + e.message);
+    // Fallback defaults
+    state.symbols = [
+      {code:'MNQ', name:'Micro Nasdaq'}, {code:'MES', name:'Micro S&P'},
+      {code:'NQ', name:'E-mini Nasdaq'}, {code:'ES', name:'E-mini S&P'},
+    ];
+    state.presets = [{label:'1',quantity:1},{label:'2',quantity:2},{label:'3',quantity:3},{label:'5',quantity:5},{label:'10',quantity:10}];
+    renderSymbols();
+    renderSizes();
+  }
+  
+  // Wire up buttons
+  document.getElementById('buy-btn').onclick = () => doOrder('BUY');
+  document.getElementById('sell-btn').onclick = () => doOrder('SELL');
+  document.getElementById('flatten-btn').onclick = () => doFlatten();
+  document.getElementById('cancel-all-btn').onclick = () => doCancelAll();
+  document.getElementById('dry-run-toggle').onchange = async (e) => {
+    state.dryRun = e.target.checked;
+    document.getElementById('dry-run-banner').style.display = state.dryRun ? '' : 'none';
+    try { await api('POST', `/trading/dry-run?enabled=${state.dryRun}`); } catch {}
+    addLog(`Dry run: ${state.dryRun ? 'ON' : 'OFF'}`);
+  };
+  document.getElementById('confirm-toggle').onchange = (e) => {
+    state.confirmOrders = e.target.checked;
+  };
+  document.getElementById('custom-qty').oninput = (e) => {
+    const v = parseInt(e.target.value);
+    if (v > 0) {
+      state.quantity = v;
+      renderSizes();
+    }
+  };
+  document.getElementById('account-select').onchange = async (e) => {
+    const acctNum = e.target.value;
+    if (!acctNum) return;
+    addLog(`Switching to account ${acctNum}...`);
+    try {
+      const res = await api('POST', '/trading/switch-account', { account_number: acctNum });
+      toast(`Switched to ${res.account_number}`, 'success');
+      addLog(`✓ ${res.message}`);
+      refreshData();
+    } catch (err) {
+      toast(`Switch failed: ${err.message}`, 'error');
+      addLog(`✗ Switch failed: ${err.message}`);
+    }
+  };
+  
+  // Keyboard shortcuts
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.key === 'b' || e.key === 'B') document.getElementById('buy-btn').click();
+    if (e.key === 's' || e.key === 'S') document.getElementById('sell-btn').click();
+    if (e.key === 'f' || e.key === 'F') document.getElementById('flatten-btn').click();
+    if (e.key === 'Escape') document.getElementById('confirm-modal').classList.remove('active');
+  });
+  
+  // Initial data load + polling
+  refreshData();
+  setInterval(refreshData, 3000);
+}
+
+function populateAccountSwitcher(accounts) {
+  const sel = document.getElementById('account-select');
+  sel.innerHTML = '';
+  accounts.forEach(a => {
+    const opt = document.createElement('option');
+    opt.value = a['account-number'];
+    const desc = a.description && a.description !== 'N/A' ? ` — ${a.description}` : '';
+    opt.textContent = a['account-number'] + desc;
+    sel.appendChild(opt);
+  });
+}
+
+init();
+</script>
+</body>
+</html>

@@ -63,6 +63,9 @@ from src.services.discord_bot_service import DiscordBotService  # noqa: E402
 from src.services.lookup_service import LookupService  # noqa: E402
 from src.services.schwab_streamer import SchwabStreamClient, build_streamer  # noqa: E402
 
+# Trading panel router
+from backend.src.api.trading import router as trading_router  # noqa: E402
+
 LOGGER = logging.getLogger("data_pipeline")
 NOISY_STREAM_LOGGERS = [
     "tastytrade",
@@ -803,9 +806,39 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://unusualwhales.com", "http://192.168.168.151:8877"],
     allow_methods=["POST", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "X-API-Key"],
     allow_credentials=True,
 )
+
+# Mount trading panel API and static page
+app.include_router(trading_router, prefix="/api/v1", tags=["trading"])
+
+
+@app.get("/order-panel")
+async def order_panel():
+    from fastapi.responses import FileResponse
+    panel_path = PROJECT_ROOT / "frontend" / "src" / "order_panel.html"
+    return FileResponse(str(panel_path))
+
+
+@app.get("/gex-monitor")
+async def gex_monitor():
+    from fastapi.responses import FileResponse
+    monitor_path = PROJECT_ROOT / "frontend" / "src" / "gex_monitor.html"
+    return FileResponse(str(monitor_path))
+
+
+@app.get("/gex-monitor/popout")
+async def gex_monitor_popout(w: int = 360, h: int = 1200):
+    """Tiny launcher that opens /gex-monitor as a sized popup window."""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(f"""<!DOCTYPE html><html><head><title>GEX Popout</title></head>
+<body style="background:#0d1117;color:#e6edf3;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh">
+<script>
+var popup = window.open('/gex-monitor','gex_monitor','width={w},height={h},resizable=yes,scrollbars=no,toolbar=no,menubar=no,location=no,status=no');
+if (popup) {{ document.body.innerHTML = '<p style="font-size:13px">GEX Monitor opened — you can close this tab.</p>'; }}
+else {{ document.body.innerHTML = '<p style="font-size:13px">Popup blocked. <a href="/gex-monitor" target="_blank" style="color:#58a6ff">Open manually</a></p>'; }}
+</script></body></html>""")
 
 
 @app.get("/")
@@ -1326,6 +1359,74 @@ async def sierra_chart_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") -
             if (payload.get("symbol") or "").upper() != normalized:
                 continue
             await _send_snapshot(payload)
+    except WebSocketDisconnect:
+        return
+    finally:
+        try:
+            pubsub.close()
+        except Exception:
+            pass
+
+
+@app.websocket("/ws/gex")
+async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") -> None:
+    """Stream full GEX snapshots via Redis pubsub for the GEX monitor page."""
+    await websocket.accept()
+    normalized = (symbol or "NQ_NDX").upper()
+    redis_conn = _get_redis_client()
+    pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
+    pubsub.subscribe(SNAPSHOT_PUBSUB_CHANNEL)
+
+    GEX_FIELDS = (
+        "symbol", "timestamp", "spot", "zero_gamma",
+        "net_gex", "net_gex_oi", "sum_gex_vol", "sum_gex_oi",
+        "major_pos_vol", "major_neg_vol", "major_pos_oi", "major_neg_oi",
+        "delta_risk_reversal", "maxchange", "max_priors",
+    )
+
+    def _extract(payload: Dict[str, Any]) -> Dict[str, Any]:
+        out = {k: payload.get(k) for k in GEX_FIELDS}
+        out["symbol"] = normalized
+        return out
+
+    # Send the latest cached snapshot immediately
+    try:
+        key = f"{SNAPSHOT_KEY_PREFIX}{normalized}"
+        raw = redis_conn.get(key)
+        if raw:
+            try:
+                snapshot = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
+            except Exception:
+                snapshot = None
+            if isinstance(snapshot, dict):
+                await websocket.send_json(_extract(snapshot))
+    except Exception:
+        LOGGER.debug("Failed to send initial /ws/gex snapshot", exc_info=True)
+
+    try:
+        while True:
+            try:
+                message = await asyncio.to_thread(pubsub.get_message, timeout=1.5)
+            except Exception:
+                message = None
+            if not message or message.get("type") != "message":
+                await asyncio.sleep(0.1)
+                continue
+            payload_raw = message.get("data")
+            try:
+                if isinstance(payload_raw, (bytes, bytearray)):
+                    payload = json.loads(payload_raw.decode("utf-8"))
+                elif isinstance(payload_raw, str):
+                    payload = json.loads(payload_raw)
+                elif isinstance(payload_raw, dict):
+                    payload = payload_raw
+                else:
+                    continue
+            except Exception:
+                continue
+            if (payload.get("symbol") or "").upper() != normalized:
+                continue
+            await websocket.send_json(_extract(payload))
     except WebSocketDisconnect:
         return
     finally:

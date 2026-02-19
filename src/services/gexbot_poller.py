@@ -253,13 +253,34 @@ class GEXBotPoller:
                 LOGGER.debug("GEXBot %s request failed: %s", symbol, exc)
                 return None
 
+        async def _maxchange_endpoint() -> Optional[Dict[str, Any]]:
+            url = f"{base_url}/maxchange?key={self.settings.api_key}"
+            try:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        LOGGER.debug(
+                            "GEXBot %s maxchange returned %s",
+                            symbol,
+                            resp.status,
+                        )
+                        return None
+                    return await resp.json()
+            except asyncio.CancelledError:
+                raise
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                LOGGER.debug("GEXBot %s maxchange request failed: %s", symbol, exc)
+                return None
+
         zero = await _endpoint()
         if not zero:
             LOGGER.debug("GEXBot %s returned no data", symbol)
             return None
 
-        result = self._combine_payloads(symbol, zero)
-        result["raw"] = {"zero": zero}
+        # Fetch dedicated maxchange endpoint (more reliable than embedded field)
+        maxchange_data = await _maxchange_endpoint()
+
+        result = self._combine_payloads(symbol, zero, maxchange_data=maxchange_data)
+        result["raw"] = {"zero": zero, "maxchange": maxchange_data}
         return result
 
     async def _record_timeseries(self, snapshot: Dict[str, Any]) -> None:
@@ -277,6 +298,8 @@ class GEXBotPoller:
         self,
         symbol: str,
         zero: Optional[Dict[str, Any]],
+        *,
+        maxchange_data: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         def _first(*values):
             for value in values:
@@ -290,9 +313,15 @@ class GEXBotPoller:
             timestamp = datetime.fromtimestamp(
                 float(timestamp), tz=timezone.utc
             ).isoformat()
-        maxchange_payload = (
-            zero_payload.get("maxchange") if isinstance(zero_payload, dict) else {}
-        )
+
+        # Prefer dedicated maxchange endpoint response, fall back to embedded field
+        maxchange_source = maxchange_data if isinstance(maxchange_data, dict) else None
+        if not maxchange_source:
+            maxchange_source = (
+                zero_payload.get("maxchange") if isinstance(zero_payload, dict) else {}
+            )
+        maxchange_payload = maxchange_source or {}
+
         maxchange_windows: Dict[str, list[float]] = {}
         if isinstance(maxchange_payload, dict):
             for window, data in maxchange_payload.items():

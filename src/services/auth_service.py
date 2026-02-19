@@ -155,9 +155,10 @@ class AuthService:
         except Exception:
             pass
         cfg_channels = getattr(config, "allowed_channel_list", None)
+        channel_str = str(channel_id)
         if cfg_channels:
-            return str(channel_id) in cfg_channels
-        return str(channel_id) in AuthService.ALERT_CHANNELS
+            return channel_str in cfg_channels or channel_str in AuthService.ALERT_CHANNELS
+        return channel_str in AuthService.ALERT_CHANNELS
 
     @staticmethod
     def get_user_permissions(discord_id: str) -> List[str]:

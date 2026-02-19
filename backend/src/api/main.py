@@ -1,9 +1,12 @@
 import logging
 import os
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -11,6 +14,7 @@ from slowapi.util import get_remote_address
 
 from .status import router as status_router
 from .ticks import router as ticks_router
+from .trading import router as trading_router
 
 # Configure logging
 logging.basicConfig(
@@ -46,6 +50,7 @@ app.add_middleware(
 
 app.include_router(ticks_router, prefix="/api/v1", tags=["ticks"])
 app.include_router(status_router, prefix="/api/v1", tags=["status"])
+app.include_router(trading_router, prefix="/api/v1", tags=["trading"])
 
 
 @app.get("/")
@@ -58,6 +63,15 @@ async def root():
 async def health():
     logger.info("Health check performed")
     return {"status": "healthy"}
+
+
+# Serve order panel
+_frontend_dir = Path(__file__).resolve().parents[3] / "frontend" / "src"
+
+
+@app.get("/order-panel")
+async def order_panel():
+    return FileResponse(_frontend_dir / "order_panel.html")
 
 
 if __name__ == "__main__":

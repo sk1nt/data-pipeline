@@ -1,0 +1,988 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GEX Monitor</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg2: #161b22;
+  --bg3: #21262d;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text2: #8b949e;
+  --green: #3fb950;
+  --green-bg: rgba(63,185,80,.12);
+  --green-glow: rgba(63,185,80,.25);
+  --red: #f85149;
+  --red-bg: rgba(248,81,73,.12);
+  --red-glow: rgba(248,81,73,.25);
+  --blue: #58a6ff;
+  --yellow: #d29922;
+  --orange: #db6d28;
+  --radius: 6px;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 13px; overflow-y: auto; overflow-x: hidden;
+}
+
+/* Flash animations */
+@keyframes flash-green {
+  0%, 100% { background: var(--bg); box-shadow: none; }
+  30%, 70% { background: rgba(63,185,80,.35); box-shadow: inset 0 0 60px rgba(63,185,80,.3), 0 0 20px rgba(63,185,80,.2); }
+}
+@keyframes flash-red {
+  0%, 100% { background: var(--bg); box-shadow: none; }
+  30%, 70% { background: rgba(248,81,73,.35); box-shadow: inset 0 0 60px rgba(248,81,73,.3), 0 0 20px rgba(248,81,73,.2); }
+}
+body.flash-green { animation: flash-green 350ms ease-in-out; }
+body.flash-red   { animation: flash-red   350ms ease-in-out; }
+
+/* Header */
+.header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 12px; background: var(--bg2); border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 10;
+}
+.header h1 { font-size: 13px; font-weight: 600; letter-spacing: .3px; }
+.header-right { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text2); }
+.dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.dot.ok { background: var(--green); }
+.dot.err { background: var(--red); }
+.dot.warn { background: var(--yellow); }
+
+/* Metrics grid */
+.metrics {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 1px; background: var(--border);
+}
+.metric {
+  background: var(--bg); padding: 8px 12px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.metric.full-width { grid-column: 1 / -1; }
+.metric .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text2); }
+.metric .val {
+  font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums;
+  transition: color .15s;
+}
+.metric .val.pos { color: var(--green); }
+.metric .val.neg { color: var(--red); }
+.metric .val.neutral { color: var(--yellow); }
+.metric .sub { font-size: 10px; color: var(--text2); margin-top: 1px; }
+
+/* Max change section */
+.maxchange-section {
+  background: var(--bg); padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+.section-title {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .4px;
+  color: var(--text2); margin-bottom: 6px;
+}
+.maxchange-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 3px 0; font-size: 12px; font-variant-numeric: tabular-nums;
+}
+.maxchange-row .interval { color: var(--text2); width: 65px; }
+.maxchange-row .strike { color: var(--text); }
+.maxchange-row .delta { font-weight: 600; transition: color .15s; }
+.maxchange-row.delta-up { background: rgba(63,185,80,.18); transition: background .3s; }
+.maxchange-row.delta-down { background: rgba(248,81,73,.18); transition: background .3s; }
+.maxchange-row.delta-same { background: transparent; transition: background .6s; }
+
+/* Alert flash indicator */
+.alert-bar { height: 3px; background: transparent; transition: background .1s; }
+.alert-bar.green { background: var(--green); }
+.alert-bar.red { background: var(--red); }
+
+/* Header buttons */
+.hdr-btn {
+  background: none; border: none; color: var(--text2); cursor: pointer;
+  font-size: 14px; padding: 2px 4px;
+}
+.hdr-btn:hover { color: var(--text); }
+
+/* Settings panel */
+.settings-panel {
+  display: none; background: var(--bg2); border-top: 1px solid var(--border);
+  padding: 10px 12px;
+}
+.settings-panel.open { display: block; }
+.settings-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px;
+}
+.settings-row label { width: 110px; color: var(--text2); flex-shrink: 0; }
+.settings-row input[type="number"] {
+  width: 70px; height: 26px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text); text-align: center; font-size: 12px; padding: 0 4px;
+}
+.settings-row input[type="number"]:focus { outline: none; border-color: var(--blue); }
+.settings-row input[type="range"] { flex: 1; accent-color: var(--blue); }
+.settings-row .range-val { width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
+.settings-row select, .order-section select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 4px 8px; font-size: 12px;
+}
+.test-btn {
+  background: var(--bg3); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 4px 10px; cursor: pointer; font-size: 11px;
+}
+.test-btn:hover { border-color: var(--blue); }
+
+/* ===== ORDER PANEL SECTION ===== */
+.divider {
+  height: 1px; background: var(--border); margin: 0;
+}
+.order-section {
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+}
+
+/* DRY-RUN banner */
+.dry-run-banner {
+  background: var(--yellow); color: #000; text-align: center;
+  padding: 3px; font-size: 11px; font-weight: 700; letter-spacing: 1px;
+  display: none;
+}
+
+/* Account bar */
+.account-bar {
+  display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+}
+.account-stat { text-align: center; }
+.account-stat .val { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.account-stat .lbl { font-size: 9px; color: var(--text2); text-transform: uppercase; }
+.account-switcher {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 4px;
+}
+.account-switcher select { min-width: 160px; }
+.acct-type {
+  font-size: 10px; color: var(--text2); background: var(--border); border-radius: 4px;
+  padding: 2px 6px; text-transform: uppercase; letter-spacing: .5px;
+}
+
+/* Symbol selector */
+.symbol-row { display: flex; gap: 4px; }
+.symbol-btn {
+  flex: 1; padding: 6px 2px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg3); color: var(--text); cursor: pointer; text-align: center;
+  font-size: 12px; font-weight: 600; transition: all .15s;
+}
+.symbol-btn:hover { border-color: var(--blue); }
+.symbol-btn.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+
+/* Size selector */
+.size-row { display: flex; gap: 4px; align-items: center; }
+.size-btn {
+  width: 38px; height: 30px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg3); color: var(--text); cursor: pointer; font-size: 13px; font-weight: 600;
+  transition: all .15s;
+}
+.size-btn:hover { border-color: var(--blue); }
+.size-btn.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+.size-custom {
+  width: 50px; height: 30px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg2); color: var(--text); text-align: center; font-size: 13px; padding: 0 4px;
+}
+.size-custom:focus { outline: none; border-color: var(--blue); }
+
+/* TP / SL inputs */
+.tp-sl-row { display: flex; gap: 8px; }
+.input-group { flex: 1; }
+.input-group label { display: block; font-size: 10px; color: var(--text2); margin-bottom: 3px; }
+.input-group input {
+  width: 100%; height: 28px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg2); color: var(--text); text-align: center; font-size: 12px; padding: 0 6px;
+}
+.input-group input:focus { outline: none; border-color: var(--blue); }
+
+/* Action buttons */
+.action-row { display: flex; gap: 6px; }
+.buy-btn, .sell-btn {
+  flex: 1; padding: 10px 0; border: none; border-radius: var(--radius);
+  font-size: 14px; font-weight: 700; cursor: pointer; transition: all .15s; letter-spacing: .5px;
+}
+.buy-btn { background: var(--green); color: #fff; }
+.buy-btn:hover { background: #46c05a; }
+.buy-btn:active { transform: scale(.97); }
+.sell-btn { background: var(--red); color: #fff; }
+.sell-btn:hover { background: #ff6259; }
+.sell-btn:active { transform: scale(.97); }
+.buy-btn:disabled, .sell-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* Utility buttons */
+.utility-row { display: flex; gap: 6px; }
+.flat-btn {
+  flex: 1; padding: 7px 0; border: 1px solid var(--orange); border-radius: var(--radius);
+  background: transparent; color: var(--orange); font-size: 11px; font-weight: 600; cursor: pointer;
+}
+.flat-btn:hover { background: rgba(219,109,40,.15); }
+.cancel-all-btn {
+  flex: 1; padding: 7px 0; border: 1px solid var(--yellow); border-radius: var(--radius);
+  background: transparent; color: var(--yellow); font-size: 11px; font-weight: 600; cursor: pointer;
+}
+.cancel-all-btn:hover { background: rgba(210,153,34,.15); }
+
+/* Toggles */
+.toggle-row { display: flex; gap: 10px; align-items: center; }
+.toggle { display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 11px; }
+.toggle input[type="checkbox"] { accent-color: var(--blue); width: 14px; height: 14px; }
+
+/* Tables */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
+th { text-align: left; padding: 4px 6px; color: var(--text2); font-weight: 500; border-bottom: 1px solid var(--border); font-size: 10px; text-transform: uppercase; letter-spacing: .3px; }
+td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
+tr:hover { background: var(--bg3); }
+.pnl-pos { color: var(--green); }
+.pnl-neg { color: var(--red); }
+.btn-sm {
+  padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg3); color: var(--text); cursor: pointer; font-size: 10px;
+}
+.btn-sm:hover { border-color: var(--red); color: var(--red); }
+.btn-sm.flat { border-color: var(--orange); color: var(--orange); }
+.btn-sm.flat:hover { background: rgba(219,109,40,.15); }
+
+/* Activity log */
+.log-container { max-height: 120px; overflow-y: auto; }
+.log-entry { padding: 3px 6px; font-size: 10px; color: var(--text2); border-bottom: 1px solid var(--border); font-family: 'SF Mono', Consolas, monospace; }
+.log-entry .time { color: var(--blue); margin-right: 4px; }
+
+/* Toast */
+.toast-container { position: fixed; top: 12px; right: 12px; z-index: 999; display: flex; flex-direction: column; gap: 6px; }
+.toast { padding: 8px 14px; border-radius: var(--radius); font-size: 12px; animation: slideIn .25s ease-out; max-width: 300px; }
+.toast.success { background: var(--green-bg); border: 1px solid var(--green); color: var(--green); }
+.toast.error { background: var(--red-bg); border: 1px solid var(--red); color: var(--red); }
+.toast.info { background: rgba(88,166,255,.1); border: 1px solid var(--blue); color: var(--blue); }
+@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+/* Confirmation modal */
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 100; align-items: center; justify-content: center; }
+.modal-overlay.active { display: flex; }
+.modal { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 20px; width: 300px; }
+.modal h3 { margin-bottom: 10px; font-size: 14px; }
+.modal p { color: var(--text2); font-size: 12px; margin-bottom: 14px; line-height: 1.5; white-space: pre-line; }
+.modal .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.modal .modal-actions button { padding: 6px 14px; border-radius: var(--radius); border: none; cursor: pointer; font-size: 12px; font-weight: 600; }
+.modal .btn-confirm { background: var(--green); color: #fff; }
+.modal .btn-confirm.sell { background: var(--red); }
+.modal .btn-cancel { background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
+
+/* Footer */
+.footer {
+  padding: 4px 12px; background: var(--bg2); border-top: 1px solid var(--border);
+  font-size: 10px; color: var(--text2); display: flex; justify-content: space-between;
+  position: sticky; bottom: 0; z-index: 10;
+}
+
+/* Connection indicators */
+.conn-pair { display: flex; align-items: center; gap: 10px; }
+.conn-item { display: flex; align-items: center; gap: 4px; }
+</style>
+</head>
+<body>
+
+<!-- DRY RUN BANNER -->
+<div id="dry-run-banner" class="dry-run-banner">DRY RUN MODE</div>
+
+<!-- HEADER -->
+<div class="header">
+  <h1>GEX Monitor + Trading</h1>
+  <div class="header-right">
+    <div class="conn-pair">
+      <span class="conn-item"><span class="dot warn" id="connDot"></span><span id="connLabel">GEX…</span></span>
+      <span class="conn-item"><span class="dot err" id="ttDot"></span><span id="ttLabel">TT</span></span>
+    </div>
+    <button class="hdr-btn" id="popoutBtn" title="Open as popout">&#x2B08;</button>
+    <button class="hdr-btn" id="settingsBtn" title="Settings">&#x2699;</button>
+  </div>
+</div>
+
+<div class="alert-bar" id="alertBar"></div>
+
+<!-- ===== GEX METRICS ===== -->
+<div class="metrics" id="metricsGrid">
+  <div class="metric">
+    <span class="lbl">Spot</span>
+    <span class="val neutral" id="spot">&mdash;</span>
+  </div>
+  <div class="metric">
+    <span class="lbl">Zero Gamma</span>
+    <span class="val neutral" id="zeroGamma">&mdash;</span>
+  </div>
+  <div class="metric">
+    <span class="lbl">Call Wall</span>
+    <span class="val neutral" id="callWall">&mdash;</span>
+  </div>
+  <div class="metric">
+    <span class="lbl">Put Wall</span>
+    <span class="val neutral" id="putWall">&mdash;</span>
+  </div>
+  <div class="metric">
+    <span class="lbl">Net GEX</span>
+    <span class="val neutral" id="netGex">&mdash;</span>
+    <span class="sub" id="netGexDelta"></span>
+  </div>
+  <div class="metric">
+    <span class="lbl">Net GEX (OI)</span>
+    <span class="val neutral" id="netGexOI">&mdash;</span>
+  </div>
+  <div class="metric">
+    <span class="lbl">Delta Risk Rev</span>
+    <span class="val neutral" id="deltaRiskRev">&mdash;</span>
+  </div>
+  <div class="metric">
+    <span class="lbl">GEX &Delta;</span>
+    <span class="val neutral" id="gexDelta">&mdash;</span>
+  </div>
+</div>
+
+<!-- ===== MAXCHANGE ===== -->
+<div class="maxchange-section">
+  <div class="section-title">Largest Delta (Max Change GEX)</div>
+  <div id="maxchangeRows">
+    <div class="maxchange-row"><span class="interval">current</span><span class="strike">&mdash;</span><span class="delta neutral">&mdash;</span></div>
+    <div class="maxchange-row"><span class="interval">1 min</span><span class="strike">&mdash;</span><span class="delta neutral">&mdash;</span></div>
+    <div class="maxchange-row"><span class="interval">5 min</span><span class="strike">&mdash;</span><span class="delta neutral">&mdash;</span></div>
+    <div class="maxchange-row"><span class="interval">10 min</span><span class="strike">&mdash;</span><span class="delta neutral">&mdash;</span></div>
+    <div class="maxchange-row"><span class="interval">15 min</span><span class="strike">&mdash;</span><span class="delta neutral">&mdash;</span></div>
+    <div class="maxchange-row"><span class="interval">30 min</span><span class="strike">&mdash;</span><span class="delta neutral">&mdash;</span></div>
+  </div>
+</div>
+
+<!-- ===== SETTINGS PANEL ===== -->
+<div class="settings-panel" id="settingsPanel">
+  <div class="section-title">GEX Alert Settings</div>
+  <div class="settings-row">
+    <label>GEX Symbol</label>
+    <select id="cfgSymbol">
+      <option value="NQ_NDX" selected>NQ / NDX</option>
+      <option value="ES_SPX">ES / SPX</option>
+      <option value="SPY">SPY</option>
+      <option value="QQQ">QQQ</option>
+      <option value="SPX">SPX</option>
+    </select>
+  </div>
+  <div class="settings-row">
+    <label>Flash Threshold</label>
+    <input type="number" id="cfgThreshold" value="500" min="10" step="50">
+    <span class="range-val" style="width:auto;color:var(--text2)">Bn (abs delta)</span>
+  </div>
+  <div class="settings-row">
+    <label>Flash Count</label>
+    <input type="range" id="cfgFlashCount" min="1" max="10" value="3">
+    <span class="range-val" id="flashCountVal">3</span>
+  </div>
+  <div class="settings-row">
+    <label>Volume</label>
+    <input type="range" id="cfgVolume" min="0" max="100" value="60">
+    <span class="range-val" id="volumeVal">60%</span>
+  </div>
+  <div class="settings-row">
+    <label>Audio Alert</label>
+    <select id="cfgAudioType">
+      <option value="chime">Chime</option>
+      <option value="beep">Beep</option>
+      <option value="alarm">Alarm</option>
+      <option value="none">None</option>
+    </select>
+    <button class="test-btn" id="testAlertBtn">Test</button>
+  </div>
+</div>
+
+<!-- ===== ORDER PANEL ===== -->
+<div class="divider"></div>
+
+<!-- Account -->
+<div class="order-section">
+  <div class="section-title">Account</div>
+  <div class="account-switcher">
+    <select id="account-select" title="Switch account"></select>
+    <span class="acct-type" id="acct-type"></span>
+  </div>
+  <div class="account-bar">
+    <div class="account-stat"><div class="val" id="net-liq">&mdash;</div><div class="lbl">Net Liq</div></div>
+    <div class="account-stat"><div class="val" id="buying-power">&mdash;</div><div class="lbl">BP</div></div>
+    <div class="account-stat"><div class="val" id="cash-bal">&mdash;</div><div class="lbl">Cash</div></div>
+  </div>
+</div>
+
+<!-- Symbol -->
+<div class="order-section">
+  <div class="section-title">Symbol</div>
+  <div class="symbol-row" id="symbol-row"></div>
+</div>
+
+<!-- Quantity -->
+<div class="order-section">
+  <div class="section-title">Quantity</div>
+  <div class="size-row" id="size-row">
+    <input type="number" class="size-custom" id="custom-qty" min="1" max="100" placeholder="Qty">
+  </div>
+</div>
+
+<!-- TP / SL -->
+<div class="order-section">
+  <div class="tp-sl-row">
+    <div class="input-group">
+      <label>Take Profit (ticks)</label>
+      <input type="number" id="tp-ticks" value="35" min="0" step="1">
+    </div>
+    <div class="input-group">
+      <label>Stop Loss (ticks, 0=none)</label>
+      <input type="number" id="sl-ticks" value="0" min="0" step="1">
+    </div>
+  </div>
+</div>
+
+<!-- BUY / SELL -->
+<div class="order-section">
+  <div class="action-row">
+    <button class="buy-btn" id="buy-btn" disabled>BUY</button>
+    <button class="sell-btn" id="sell-btn" disabled>SELL</button>
+  </div>
+</div>
+
+<!-- Flatten / Cancel -->
+<div class="order-section">
+  <div class="utility-row">
+    <button class="flat-btn" id="flatten-btn">FLATTEN</button>
+    <button class="cancel-all-btn" id="cancel-all-btn">CANCEL ALL</button>
+  </div>
+</div>
+
+<!-- Toggles -->
+<div class="order-section">
+  <div class="toggle-row">
+    <label class="toggle"><input type="checkbox" id="dry-run-toggle"> Dry Run</label>
+    <label class="toggle"><input type="checkbox" id="confirm-toggle" checked> Confirm</label>
+  </div>
+</div>
+
+<!-- Positions -->
+<div class="order-section">
+  <div class="section-title">Positions</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Symbol</th><th>Qty</th><th>Dir</th><th>P&amp;L</th><th></th></tr></thead>
+      <tbody id="positions-body"><tr><td colspan="5" style="color:var(--text2)">Loading&hellip;</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Open Orders -->
+<div class="order-section">
+  <div class="section-title">Open Orders</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>ID</th><th>Sym</th><th>Side</th><th>Qty</th><th>Type</th><th>Price</th><th></th></tr></thead>
+      <tbody id="orders-body"><tr><td colspan="7" style="color:var(--text2)">Loading&hellip;</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Activity Log -->
+<div class="order-section">
+  <div class="section-title">Activity Log</div>
+  <div class="log-container" id="log-container"></div>
+</div>
+
+<!-- FOOTER -->
+<div class="footer">
+  <span id="lastUpdate">No data</span>
+  <span id="alertCount">Alerts: 0</span>
+</div>
+
+<!-- Confirmation Modal -->
+<div class="modal-overlay" id="confirm-modal">
+  <div class="modal">
+    <h3 id="modal-title">Confirm Order</h3>
+    <p id="modal-body"></p>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="modal-cancel">Cancel</button>
+      <button class="btn-confirm" id="modal-confirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toasts"></div>
+
+<script>
+(function() {
+  // =====================================================================
+  //  GEX MONITOR SECTION
+  // =====================================================================
+  let ws = null;
+  let reconnectDelay = 1000;
+  let prevMaxchangeCurrent = null;
+  let prevNetGex = null;
+  let alertTotal = 0;
+  let flashQueue = 0;
+  let flashing = false;
+  let audioCtx = null;
+
+  // --- Settings (persisted in localStorage) ---
+  const DEFAULTS = { symbol: 'NQ_NDX', threshold: 500, flashCount: 3, volume: 60, audioType: 'chime' };
+  function loadSettings() {
+    try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('gex_monitor_cfg') || '{}') }; }
+    catch { return { ...DEFAULTS }; }
+  }
+  function saveSettings(s) { localStorage.setItem('gex_monitor_cfg', JSON.stringify(s)); }
+  let cfg = loadSettings();
+
+  // --- DOM refs ---
+  const $ = id => document.getElementById(id);
+  const connDot = $('connDot'), connLabel = $('connLabel');
+  const spot = $('spot'), zeroGamma = $('zeroGamma');
+  const callWall = $('callWall'), putWall = $('putWall');
+  const netGex = $('netGex'), netGexDelta = $('netGexDelta');
+  const netGexOI = $('netGexOI');
+  const gexDeltaEl = $('gexDelta');
+  const alertBar = $('alertBar');
+  const lastUpdate = $('lastUpdate'), alertCount = $('alertCount');
+
+  const cfgSymbol = $('cfgSymbol'), cfgThreshold = $('cfgThreshold');
+  const cfgFlashCount = $('cfgFlashCount'), flashCountVal = $('flashCountVal');
+  const cfgVolume = $('cfgVolume'), volumeVal = $('volumeVal');
+  const cfgAudioType = $('cfgAudioType');
+
+  // --- Init settings UI ---
+  cfgSymbol.value = cfg.symbol;
+  cfgThreshold.value = cfg.threshold;
+  cfgFlashCount.value = cfg.flashCount;
+  flashCountVal.textContent = cfg.flashCount;
+  cfgVolume.value = cfg.volume;
+  volumeVal.textContent = cfg.volume + '%';
+  cfgAudioType.value = cfg.audioType;
+
+  $('settingsBtn').addEventListener('click', function() { $('settingsPanel').classList.toggle('open'); });
+  $('popoutBtn').addEventListener('click', function() {
+    window.open(location.href, 'gex_monitor',
+      'width=360,height=1200,resizable=yes,scrollbars=yes,toolbar=no,menubar=no,location=no,status=no');
+  });
+
+  cfgSymbol.addEventListener('change', function() { cfg.symbol = cfgSymbol.value; saveSettings(cfg); gexReconnect(); });
+  cfgThreshold.addEventListener('change', function() {
+    cfg.threshold = Math.max(10, parseInt(cfgThreshold.value) || 500);
+    cfgThreshold.value = cfg.threshold; saveSettings(cfg);
+  });
+  cfgFlashCount.addEventListener('input', function() {
+    cfg.flashCount = parseInt(cfgFlashCount.value); flashCountVal.textContent = cfg.flashCount; saveSettings(cfg);
+  });
+  cfgVolume.addEventListener('input', function() {
+    cfg.volume = parseInt(cfgVolume.value); volumeVal.textContent = cfg.volume + '%'; saveSettings(cfg);
+  });
+  cfgAudioType.addEventListener('change', function() { cfg.audioType = cfgAudioType.value; saveSettings(cfg); });
+  $('testAlertBtn').addEventListener('click', function() { triggerAlert(300, 'test'); });
+
+  // --- Audio ---
+  function getAudioCtx() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    return audioCtx;
+  }
+  function playChime(positive) {
+    if (cfg.audioType === 'none') return;
+    var ctx = getAudioCtx();
+    var vol = cfg.volume / 100;
+    var gain = ctx.createGain();
+    gain.connect(ctx.destination);
+    gain.gain.setValueAtTime(vol * 0.4, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
+    if (cfg.audioType === 'chime') {
+      var freqs = positive ? [520, 780] : [580, 380];
+      freqs.forEach(function(f, i) {
+        var osc = ctx.createOscillator(); osc.type = 'sine';
+        osc.frequency.setValueAtTime(f, ctx.currentTime + i * 0.12);
+        osc.connect(gain); osc.start(ctx.currentTime + i * 0.12); osc.stop(ctx.currentTime + i * 0.12 + 0.25);
+      });
+    } else if (cfg.audioType === 'beep') {
+      var osc = ctx.createOscillator(); osc.type = 'square';
+      osc.frequency.setValueAtTime(positive ? 880 : 440, ctx.currentTime);
+      osc.connect(gain); osc.start(); osc.stop(ctx.currentTime + 0.15);
+    } else if (cfg.audioType === 'alarm') {
+      for (var i = 0; i < 3; i++) {
+        var osc = ctx.createOscillator(); osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(positive ? 700 : 500, ctx.currentTime + i * 0.1);
+        osc.frequency.setValueAtTime(positive ? 900 : 350, ctx.currentTime + i * 0.1 + 0.05);
+        var g = ctx.createGain();
+        g.gain.setValueAtTime(vol * 0.25, ctx.currentTime + i * 0.1);
+        g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + i * 0.1 + 0.09);
+        osc.connect(g); g.connect(ctx.destination);
+        osc.start(ctx.currentTime + i * 0.1); osc.stop(ctx.currentTime + i * 0.1 + 0.1);
+      }
+    }
+  }
+
+  // --- Flashing ---
+  function doFlash(color, count) {
+    if (flashing) { flashQueue = Math.max(flashQueue, count); return; }
+    flashing = true; var remaining = count;
+    function step() {
+      if (remaining <= 0) { flashing = false; return; }
+      remaining--;
+      document.body.classList.add('flash-' + color);
+      alertBar.className = 'alert-bar ' + color;
+      setTimeout(function() {
+        document.body.classList.remove('flash-' + color);
+        alertBar.className = 'alert-bar';
+        setTimeout(step, 80);
+      }, 220);
+    }
+    step();
+  }
+  function triggerAlert(delta, source) {
+    var positive = delta >= 0;
+    doFlash(positive ? 'green' : 'red', cfg.flashCount);
+    playChime(positive);
+    alertTotal++;
+    alertCount.textContent = 'Alerts: ' + alertTotal;
+    var sign = positive ? '+' : '';
+    toast('GEX \u0394 ' + (positive ? 'POSITIVE' : 'NEGATIVE') + ' (' + sign + fmtBn(delta) + ')',
+          positive ? 'success' : 'error');
+  }
+
+  // --- Formatting ---
+  function fmtPrice(v) { return typeof v === 'number' ? v.toFixed(2) : '\u2014'; }
+  function fmtBn(v) { if (typeof v !== 'number') return '\u2014'; return (Math.abs(v) / 1000).toFixed(4) + 'Bn'; }
+  function valClass(v) { if (typeof v !== 'number') return 'neutral'; return v > 0 ? 'pos' : v < 0 ? 'neg' : 'neutral'; }
+
+  // --- Maxchange ---
+  var MC_KEYS = ['current', 'one', 'five', 'ten', 'fifteen', 'thirty'];
+  var prevDeltas = {}; // track previous delta per row for change coloring
+  function updateMaxchange(maxchange, maxPriors) {
+    var rows = $('maxchangeRows').querySelectorAll('.maxchange-row');
+    MC_KEYS.forEach(function(key, i) {
+      if (i >= rows.length) return;
+      var row = rows[i]; var strike = null, delta = null;
+      if (key === 'current' && maxchange && maxchange.current) { strike = maxchange.current[0]; delta = maxchange.current[1]; }
+      else if (key !== 'current' && maxchange && maxchange[key]) { strike = maxchange[key][0]; delta = maxchange[key][1]; }
+      else if (maxPriors && i > 0 && maxPriors[i - 1]) {
+        var entry = maxPriors[i - 1];
+        if (entry.length >= 3) { strike = entry[1]; delta = entry[2]; }
+        else if (entry.length >= 2) { strike = entry[0]; delta = entry[1]; }
+      }
+      row.querySelector('.strike').textContent = fmtPrice(strike);
+      var deltaEl = row.querySelector('.delta');
+      deltaEl.textContent = fmtBn(delta);
+      deltaEl.className = 'delta ' + valClass(delta);
+      // Flash row green/red on delta change
+      if (typeof delta === 'number' && prevDeltas[key] !== undefined && prevDeltas[key] !== null) {
+        var diff = delta - prevDeltas[key];
+        if (diff > 0) { row.className = 'maxchange-row delta-up'; }
+        else if (diff < 0) { row.className = 'maxchange-row delta-down'; }
+        else { row.className = 'maxchange-row delta-same'; }
+        setTimeout(function(r) { r.className = 'maxchange-row delta-same'; }, 1500, row);
+      }
+      if (typeof delta === 'number') prevDeltas[key] = delta;
+    });
+  }
+
+  // --- GEX snapshot display ---
+  function onSnapshot(data) {
+    spot.textContent = fmtPrice(data.spot); spot.className = 'val neutral';
+    zeroGamma.textContent = fmtPrice(data.zero_gamma); zeroGamma.className = 'val neutral';
+    callWall.textContent = fmtPrice(data.major_pos_vol); callWall.className = 'val neutral';
+    putWall.textContent = fmtPrice(data.major_neg_vol); putWall.className = 'val neutral';
+    netGex.textContent = fmtBn(data.net_gex); netGex.className = 'val ' + valClass(data.net_gex);
+    netGexOI.textContent = fmtBn(data.sum_gex_oi); netGexOI.className = 'val ' + valClass(data.sum_gex_oi);
+    var drr = data.delta_risk_reversal;
+    var drrEl = $('deltaRiskRev');
+    drrEl.textContent = fmtPrice(drr); drrEl.className = 'val ' + valClass(drr);
+    // GEX Delta: change between consecutive net_gex values
+    var curGex = data.net_gex;
+    if (typeof curGex === 'number' && prevNetGex !== null) {
+      var gexDiff = curGex - prevNetGex;
+      gexDeltaEl.textContent = (gexDiff >= 0 ? '+' : '') + fmtBn(gexDiff);
+      gexDeltaEl.className = 'val ' + valClass(gexDiff);
+      if (Math.abs(gexDiff) >= cfg.threshold) triggerAlert(gexDiff, 'gex_delta');
+    } else {
+      gexDeltaEl.textContent = '\u2014'; gexDeltaEl.className = 'val neutral';
+    }
+    if (typeof curGex === 'number') prevNetGex = curGex;
+    updateMaxchange(data.maxchange, data.max_priors);
+    var ts = data.timestamp;
+    if (typeof ts === 'number') ts = new Date(ts * 1000).toLocaleTimeString();
+    else if (typeof ts === 'string') { try { ts = new Date(ts).toLocaleTimeString(); } catch(e) {} }
+    lastUpdate.textContent = 'Updated: ' + (ts || 'now');
+  }
+
+  // --- GEX WebSocket ---
+  function gexConnect() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var url = proto + '//' + location.host + '/ws/gex?symbol=' + encodeURIComponent(cfg.symbol);
+    ws = new WebSocket(url);
+    ws.onopen = function() { connDot.className = 'dot ok'; connLabel.textContent = cfg.symbol; reconnectDelay = 1000; };
+    ws.onclose = function() { connDot.className = 'dot err'; connLabel.textContent = 'GEX \u2717'; setTimeout(gexConnect, reconnectDelay); reconnectDelay = Math.min(reconnectDelay * 1.5, 10000); };
+    ws.onerror = function() { ws.close(); };
+    ws.onmessage = function(evt) { try { onSnapshot(JSON.parse(evt.data)); } catch(e) { console.warn('Bad WS msg', e); } };
+  }
+  function gexReconnect() { prevMaxchangeCurrent = null; prevNetGex = null; if (ws) { ws.onclose = null; ws.close(); } gexConnect(); }
+
+  // =====================================================================
+  //  TASTYTRADE ORDER PANEL SECTION
+  // =====================================================================
+  var API_BASE = localStorage.getItem('api_base') || (location.origin + '/api/v1');
+  var API_KEY = localStorage.getItem('api_key') || '';
+  if (!API_KEY) {
+    var key = prompt('Enter Trading API Key:');
+    if (key) { localStorage.setItem('api_key', key); location.reload(); }
+  }
+  var ttHeaders = { 'Content-Type': 'application/json', 'X-API-Key': API_KEY };
+
+  var orderState = { symbol: 'MNQ', quantity: 2, symbols: [], presets: [], dryRun: true, confirmOrders: true };
+
+  // --- TT API helper ---
+  function ttApi(method, path, body) {
+    var opts = { method: method, headers: ttHeaders };
+    if (body) opts.body = JSON.stringify(body);
+    return fetch(API_BASE + path, opts).then(function(res) {
+      if (!res.ok) {
+        return res.json().catch(function() { return { detail: res.statusText }; }).then(function(err) {
+          throw new Error(err.detail || JSON.stringify(err));
+        });
+      }
+      return res.json();
+    }).catch(function(e) { toast(e.message, 'error'); throw e; });
+  }
+
+  function toast(msg, type) {
+    type = type || 'info';
+    var el = document.createElement('div'); el.className = 'toast ' + type; el.textContent = msg;
+    $('toasts').appendChild(el); setTimeout(function() { el.remove(); }, 5000);
+  }
+  function addLog(msg) {
+    var c = $('log-container'); var d = document.createElement('div'); d.className = 'log-entry';
+    d.innerHTML = '<span class="time">' + new Date().toLocaleTimeString() + '</span>' + msg;
+    c.prepend(d);
+    while (c.children.length > 50) c.lastChild.remove();
+  }
+
+  // --- Confirmation modal ---
+  function confirmAction(title, body, isSell) {
+    return new Promise(function(resolve) {
+      $('modal-title').textContent = title; $('modal-body').textContent = body;
+      var btn = $('modal-confirm');
+      btn.className = 'btn-confirm ' + (isSell ? 'sell' : ''); btn.textContent = title;
+      $('confirm-modal').classList.add('active');
+      function done(val) { $('confirm-modal').classList.remove('active'); btn.onclick = null; $('modal-cancel').onclick = null; resolve(val); }
+      btn.onclick = function() { done(true); };
+      $('modal-cancel').onclick = function() { done(false); };
+    });
+  }
+
+  function fmtCurrency(n) { if (n == null) return '\u2014'; return Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+  // --- Renderers ---
+  function renderSymbols() {
+    var row = $('symbol-row'); row.innerHTML = '';
+    orderState.symbols.forEach(function(s) {
+      var btn = document.createElement('button');
+      btn.className = 'symbol-btn ' + (s.code === orderState.symbol ? 'active' : '');
+      btn.textContent = s.code; btn.title = s.name;
+      btn.onclick = function() { orderState.symbol = s.code; renderSymbols(); };
+      row.appendChild(btn);
+    });
+  }
+  function renderSizes() {
+    var row = $('size-row'); row.querySelectorAll('.size-btn').forEach(function(b) { b.remove(); });
+    var custom = $('custom-qty');
+    orderState.presets.forEach(function(p) {
+      var btn = document.createElement('button');
+      btn.className = 'size-btn ' + (p.quantity === orderState.quantity ? 'active' : '');
+      btn.textContent = p.label;
+      btn.onclick = function() { orderState.quantity = p.quantity; custom.value = ''; renderSizes(); };
+      row.insertBefore(btn, custom);
+    });
+  }
+  function renderPositions(positions) {
+    var tb = $('positions-body');
+    if (!positions || !positions.length) { tb.innerHTML = '<tr><td colspan="5" style="color:var(--text2)">No open positions</td></tr>'; return; }
+    tb.innerHTML = positions.map(function(p) {
+      var sym = p.symbol || p.underlying_symbol || '?';
+      var qty = p.quantity || 0;
+      var dir = p.quantity_direction || p.direction || '';
+      var dirStr = typeof dir === 'object' && dir.value ? dir.value : String(dir);
+      var pnl = p['realized-day-gain'] || p.realized_day_gain || 0;
+      return '<tr><td>' + sym + '</td><td>' + qty + '</td><td>' + dirStr + '</td><td class="' + (pnl >= 0 ? 'pnl-pos' : 'pnl-neg') + '">' + fmtCurrency(pnl) + '</td><td><button class="btn-sm flat" onclick="window._doFlatten(\'' + sym + '\')">Flat</button></td></tr>';
+    }).join('');
+  }
+  function renderOrders(orders) {
+    var tb = $('orders-body');
+    if (!orders || !orders.length) { tb.innerHTML = '<tr><td colspan="7" style="color:var(--text2)">No open orders</td></tr>'; return; }
+    var filtered = orders.filter(function(o) {
+      var st = o.status;
+      var stVal = (typeof st === 'object' && st && st.value) ? st.value : String(st || '');
+      return ['Filled','Cancelled','Rejected','Expired'].indexOf(stVal) === -1;
+    });
+    if (!filtered.length) { tb.innerHTML = '<tr><td colspan="7" style="color:var(--text2)">No open orders</td></tr>'; return; }
+    tb.innerHTML = filtered.map(function(o) {
+      var legs = o.legs || []; var sym = legs.length ? (legs[0].symbol || '') : (o.underlying_symbol || '?');
+      var side = legs.length ? (legs[0].action || '') : ''; var sideStr = typeof side === 'object' && side.value ? side.value : String(side);
+      var qty = legs.length ? (legs[0].quantity || '') : '';
+      var type = o.order_type || ''; var typeStr = typeof type === 'object' && type.value ? type.value : String(type);
+      var price = o.price || '\u2014'; var id = o.id || '';
+      return '<tr><td>' + id + '</td><td>' + sym + '</td><td>' + sideStr + '</td><td>' + qty + '</td><td>' + typeStr + '</td><td>' + price + '</td><td><button class="btn-sm" onclick="window._doCancel(\'' + id + '\')">X</button></td></tr>';
+    }).join('');
+  }
+
+  // --- Order actions ---
+  function doOrder(action) {
+    var qty = orderState.quantity, sym = orderState.symbol;
+    var tp = parseFloat($('tp-ticks').value) || 0, sl = parseFloat($('sl-ticks').value) || 0;
+    var p = Promise.resolve(true);
+    if (orderState.confirmOrders) {
+      p = confirmAction(action + ' ' + qty + ' ' + sym,
+        action + ' ' + qty + 'x ' + sym + ' @ Market\nTP: ' + tp + ' ticks' + (sl > 0 ? '  SL: ' + sl + ' ticks' : '') + (orderState.dryRun ? '\n[DRY RUN]' : ''), action === 'SELL');
+    }
+    p.then(function(ok) {
+      if (!ok) return;
+      addLog(action + ' ' + qty + 'x ' + sym + ' TP=' + tp + ' SL=' + sl + (orderState.dryRun ? ' [DRY]' : ''));
+      return ttApi('POST', '/trading/order', { symbol: sym, action: action, quantity: qty, tp_ticks: tp, sl_ticks: sl, dry_run: orderState.dryRun })
+        .then(function(res) { toast(res.result || 'Order placed', 'success'); addLog('\u2713 ' + res.result); refreshTT(); })
+        .catch(function(e) { addLog('\u2717 ' + e.message); });
+    });
+  }
+
+  window._doFlatten = function(sym) {
+    sym = sym || orderState.symbol;
+    var p = Promise.resolve(true);
+    if (orderState.confirmOrders) {
+      p = confirmAction('Flatten ' + sym, 'Close entire ' + sym + ' position?' + (orderState.dryRun ? '\n[DRY RUN]' : ''), true);
+    }
+    p.then(function(ok) {
+      if (!ok) return;
+      addLog('FLATTEN ' + sym);
+      return ttApi('POST', '/trading/flatten', { symbol: sym, dry_run: orderState.dryRun })
+        .then(function(res) {
+          if (res.status === 'no_position') { toast(res.message || 'No position found', 'error'); addLog('\u2717 ' + (res.message || 'No position')); }
+          else { toast(res.message || 'Flattened', 'success'); addLog('\u2713 ' + (res.message || 'Flattened')); }
+          refreshTT();
+        })
+        .catch(function(e) { addLog('\u2717 ' + e.message); });
+    });
+  };
+
+  window._doCancel = function(orderId) {
+    addLog('CANCEL order ' + orderId);
+    ttApi('POST', '/trading/cancel', { order_id: orderId })
+      .then(function() { toast('Order cancelled', 'success'); addLog('\u2713 Cancelled ' + orderId); refreshTT(); })
+      .catch(function(e) { addLog('\u2717 ' + e.message); });
+  };
+
+  function doCancelAll() {
+    var sym = orderState.symbol;
+    var p = Promise.resolve(true);
+    if (orderState.confirmOrders) {
+      p = confirmAction('Cancel All ' + sym, 'Cancel all open orders for ' + sym + '?', true);
+    }
+    p.then(function(ok) {
+      if (!ok) return;
+      addLog('CANCEL ALL ' + sym);
+      return ttApi('POST', '/trading/cancel-all', { symbol: sym })
+        .then(function(res) { toast('Cancelled ' + res.count + ' orders', 'success'); addLog('\u2713 Cancelled ' + res.count + ' orders'); refreshTT(); })
+        .catch(function(e) { addLog('\u2717 ' + e.message); });
+    });
+  }
+
+  // --- TT data refresh ---
+  function refreshTT() {
+    Promise.all([
+      ttApi('GET', '/trading/account'),
+      ttApi('GET', '/trading/positions'),
+      ttApi('GET', '/trading/orders')
+    ]).then(function(results) {
+      var acct = results[0], pos = results[1], ord = results[2];
+      $('net-liq').textContent = '$' + fmtCurrency(acct.net_liq);
+      $('buying-power').textContent = '$' + fmtCurrency(acct.buying_power);
+      $('cash-bal').textContent = '$' + fmtCurrency(acct.cash_balance);
+      var acctType = $('acct-type');
+      if (acct.account_type) { acctType.textContent = acct.account_type; acctType.style.display = ''; } else { acctType.style.display = 'none'; }
+      var sel = $('account-select');
+      if (sel.value !== acct.account_number) sel.value = acct.account_number;
+      renderPositions(pos.positions);
+      renderOrders(ord.orders);
+      $('ttDot').className = 'dot ok'; $('ttLabel').textContent = 'TT';
+      $('buy-btn').disabled = false; $('sell-btn').disabled = false;
+    }).catch(function() {
+      $('ttDot').className = 'dot err'; $('ttLabel').textContent = 'TT \u2717';
+      $('buy-btn').disabled = true; $('sell-btn').disabled = true;
+    });
+  }
+
+  function populateAccountSwitcher(accounts) {
+    var sel = $('account-select'); sel.innerHTML = '';
+    accounts.forEach(function(a) {
+      var opt = document.createElement('option');
+      opt.value = a['account-number'];
+      var desc = a.description && a.description !== 'N/A' ? ' \u2014 ' + a.description : '';
+      opt.textContent = a['account-number'] + desc;
+      sel.appendChild(opt);
+    });
+  }
+
+  // --- TT Init ---
+  function initTT() {
+    ttApi('GET', '/trading/config').then(function(tcfg) {
+      orderState.symbols = tcfg.symbols; orderState.presets = tcfg.size_presets; orderState.dryRun = tcfg.dry_run;
+      $('tp-ticks').value = tcfg.default_tp_ticks; $('sl-ticks').value = tcfg.default_sl_ticks;
+      $('dry-run-toggle').checked = tcfg.dry_run;
+      if (tcfg.dry_run) $('dry-run-banner').style.display = '';
+      if (tcfg.accounts && tcfg.accounts.length > 0) populateAccountSwitcher(tcfg.accounts);
+      renderSymbols(); renderSizes();
+      addLog('Trading panel connected');
+    }).catch(function(e) {
+      addLog('TT connect failed: ' + e.message);
+      orderState.symbols = [{code:'MNQ',name:'Micro Nasdaq'},{code:'MES',name:'Micro S&P'},{code:'NQ',name:'E-mini Nasdaq'},{code:'ES',name:'E-mini S&P'}];
+      orderState.presets = [{label:'1',quantity:1},{label:'2',quantity:2},{label:'3',quantity:3},{label:'5',quantity:5},{label:'10',quantity:10}];
+      renderSymbols(); renderSizes();
+    });
+
+    // Wire buttons
+    $('buy-btn').onclick = function() { doOrder('BUY'); };
+    $('sell-btn').onclick = function() { doOrder('SELL'); };
+    $('flatten-btn').onclick = function() { window._doFlatten(); };
+    $('cancel-all-btn').onclick = function() { doCancelAll(); };
+    $('dry-run-toggle').onchange = function(e) {
+      orderState.dryRun = e.target.checked;
+      $('dry-run-banner').style.display = orderState.dryRun ? '' : 'none';
+      ttApi('POST', '/trading/dry-run?enabled=' + orderState.dryRun).catch(function() {});
+      addLog('Dry run: ' + (orderState.dryRun ? 'ON' : 'OFF'));
+    };
+    $('confirm-toggle').onchange = function(e) { orderState.confirmOrders = e.target.checked; };
+    $('custom-qty').oninput = function(e) { var v = parseInt(e.target.value); if (v > 0) { orderState.quantity = v; renderSizes(); } };
+    $('account-select').onchange = function(e) {
+      var acctNum = e.target.value; if (!acctNum) return;
+      addLog('Switching to ' + acctNum + '\u2026');
+      ttApi('POST', '/trading/switch-account', { account_number: acctNum })
+        .then(function(res) { toast('Switched to ' + res.account_number, 'success'); addLog('\u2713 ' + res.message); refreshTT(); })
+        .catch(function(err) { toast('Switch failed: ' + err.message, 'error'); addLog('\u2717 ' + err.message); });
+    };
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+      if (e.key === 'b' || e.key === 'B') $('buy-btn').click();
+      if (e.key === 's' || e.key === 'S') $('sell-btn').click();
+      if (e.key === 'f' || e.key === 'F') $('flatten-btn').click();
+      if (e.key === 'Escape') $('confirm-modal').classList.remove('active');
+    });
+
+    refreshTT();
+    setInterval(refreshTT, 3000);
+  }
+
+  // =====================================================================
+  //  BOOT
+  // =====================================================================
+  document.addEventListener('click', function() { getAudioCtx(); }, { once: true });
+  gexConnect();
+  initTT();
+})();
+</script>
+</body>
+</html>

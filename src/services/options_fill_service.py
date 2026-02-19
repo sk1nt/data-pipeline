@@ -38,7 +38,7 @@ class OptionsFillService:
         self,
         max_retries: int = 3,
         timeout_seconds: int = 30,
-        tick_increment: Decimal = Decimal("0.01"),
+        tick_increment: Decimal = Decimal("0.05"),
         tastytrade_client=tastytrade_client,
     ):
         self.max_retries = max_retries
@@ -142,6 +142,8 @@ class OptionsFillService:
             pass
 
         leg = option.build_leg(quantity, action)
+        # Round price to tick increment ($0.05) to avoid invalid_price_increment errors
+        price = (price / self.tick_increment).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * self.tick_increment
         # Determine appropriate price sign for the order based on action
         # The TastyTrade SDK uses price sign to determine price_effect:
         # - Negative price = DEBIT (for BUY orders)

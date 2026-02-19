@@ -81,6 +81,9 @@ class TradeBot(commands.Bot):
         )
         self.status_channel_id = getattr(config, "status_channel_id", None)
         self.status_command_user = os.getenv("DISCORD_STATUS_USER", "skint0552").lower()
+        self.alert_dm_user_id = int(
+            os.getenv("DISCORD_ALERT_DM_USER_ID", "704125082750156840")
+        )
         self.option_alert_channel_ids = self._init_alert_channels()
         self._uw_listener_task: Optional[asyncio.Task] = None
         self._uw_listener_stop = asyncio.Event()
@@ -650,7 +653,7 @@ class TradeBot(commands.Bot):
                     if positions:
                         msg = "**Positions:**\n" + "\n".join(
                             [
-                                f"• {pos.get('symbol', 'N/A')}: {pos.get('quantity', 0)} @ {pos.get('average-price', 'N/A')}"
+                                f"• {pos.get('symbol', 'N/A')}: {pos.get('quantity', 0)} @ {pos.get('average_open_price', 'N/A')}"
                                 for pos in positions
                             ]
                         )
@@ -970,13 +973,18 @@ class TradeBot(commands.Bot):
     async def on_message(self, message):
         if message.author == self.user:
             return
-        
-        # Debug: log all messages
-        channel_id = getattr(message.channel, "id", None)
-        print(f"Message received: channel_id={channel_id}, author={message.author.id}, content={message.content[:50]}")
-        
-        # Handle DM shorthand commands (b5, s5, etc.) for privileged users
+
         is_dm = isinstance(message.channel, discord.DMChannel)
+        if not is_dm and not self._is_allowed_channel(message.channel):
+            return
+
+        # Debug: log allowed messages only
+        channel_id = getattr(message.channel, "id", None)
+        print(
+            f"Message received: channel_id={channel_id}, author={message.author.id}, content={message.content[:50]}"
+        )
+
+        # Handle DM shorthand commands (b5, s5, etc.) for privileged users
         if is_dm:
             handled = await self._handle_dm_shorthand(message)
             if handled:
@@ -994,10 +1002,6 @@ class TradeBot(commands.Bot):
             await self._process_alert_message(message)
             return  # Don't process as command after handling alert
         
-        # For non-alert messages, check if channel is allowed for commands
-        if not self._is_allowed_channel(message.channel):
-            return
-
         await super().on_message(message)
 
     async def _handle_dm_shorthand(self, message) -> bool:
@@ -1006,6 +1010,7 @@ class TradeBot(commands.Bot):
         Shortcuts:
           b<qty> = !tt b mnq <qty> 35  (buy MNQ with 35 tick TP)
           s<qty> = !tt s mnq <qty> 35  (sell MNQ with 35 tick TP)
+          f      = flatten MNQ position (close position + cancel TP orders)
           roth   = !tt account 5WT31787 (switch to Roth IRA)
           ira    = !tt account 5WT31673 (switch to Traditional IRA)
         
@@ -1017,7 +1022,7 @@ class TradeBot(commands.Bot):
         # Create a mock context-like object for the privilege check
         if not self._is_privileged_user_by_message(message):
             # Only respond if it looks like a shorthand command
-            if re.match(r'^([bs]\d+|roth|ira)$', content):
+            if re.match(r'^([bs]\d+|roth|ira|f)$', content):
                 await message.channel.send("You are not authorized for shorthand commands.")
                 return True
             return False
@@ -1042,6 +1047,39 @@ class TradeBot(commands.Bot):
                     await message.channel.send(f"Account {target} not found.")
             except Exception as e:
                 await message.channel.send(f"Failed to switch account: {e}")
+            return True
+        
+        # Flatten position shortcut: f = close entire MNQ position and cancel TP orders
+        if content == "f":
+            if not self.tastytrade_client:
+                await message.channel.send("TastyTrade client is not configured.")
+                return True
+            symbol = "MNQ"
+            try:
+                dry_run = bool(getattr(self.tastytrade_client, "_dry_run", True))
+                result = await asyncio.to_thread(
+                    self.tastytrade_client.flatten_position,
+                    symbol,
+                    dry_run,
+                )
+                status = result.get("status", "unknown")
+                if status == "no_position":
+                    msg = result.get("message", f"No {symbol} position to flatten.")
+                    cancelled = result.get("cancelled_orders", 0)
+                    if cancelled > 0:
+                        msg += f" Cancelled {cancelled} order(s)."
+                elif status == "success":
+                    msg = result.get("message", "Flattened position.")
+                    cancelled = result.get("cancelled_orders", 0)
+                    if cancelled > 0:
+                        msg += f" | Cancelled {cancelled} order(s)."
+                else:
+                    msg = f"Flatten result: {result}"
+                await message.channel.send(msg)
+            except TastytradeAuthError as e:
+                await message.channel.send(f"TastyTrade auth invalid: {e}")
+            except Exception as e:
+                await message.channel.send(f"Flatten failed: {e}")
             return True
         
         # Match patterns: b5, s10, b1, s2, etc.
@@ -1114,7 +1152,7 @@ class TradeBot(commands.Bot):
                 reason = "Automated trade alerts not permitted here."
             print(f"Alert rejected: user={user_id} ({user_ok}), channel={channel_id} ({channel_ok})")
             try:
-                await message.channel.send(reason)
+                await self._send_alert_dm(reason)
             except Exception as send_exc:
                 print(f"Failed to send rejection message: {send_exc}")
             return
@@ -1132,7 +1170,7 @@ class TradeBot(commands.Bot):
             msg = str(exc)
             print(msg)
             try:
-                await message.channel.send(msg)
+                await self._send_alert_dm(msg)
             except Exception as send_exc:
                 print(f"Failed to send auth error message to channel: {send_exc}")
             return
@@ -1140,7 +1178,7 @@ class TradeBot(commands.Bot):
         if not result:
             print("Alert processing returned None")
             try:
-                await message.channel.send("Alert processing failed or no action taken.")
+                await self._send_alert_dm("Alert processing failed or no action taken.")
             except Exception as send_exc:
                 print(f"Failed to send failure notification in channel: {send_exc}")
             return
@@ -1157,7 +1195,7 @@ class TradeBot(commands.Bot):
         else:
             msg = f"Automated order placed: {result}"
         try:
-            await message.channel.send(msg)
+            await self._send_alert_dm(msg)
         except Exception as send_exc:
             print(f"Failed to send success message to channel: {send_exc}")
 
@@ -1373,7 +1411,7 @@ class TradeBot(commands.Bot):
                     continue
                 
                 # We're in RTH, proceed with feed
-                start = now.replace(hour=9, minute=35, second=0, microsecond=0)
+                start = now.replace(hour=9, minute=30, second=0, microsecond=0)
                 end = now.replace(hour=16, minute=0, second=0, microsecond=0)
                 session_end = end
                 if self.gex_feed_force_window:
@@ -1443,6 +1481,26 @@ class TradeBot(commands.Bot):
             )
         return channels
 
+    async def _cleanup_previous_feed_messages(
+        self, channels: List[discord.abc.Messageable], limit: int = 50
+    ) -> None:
+        """Delete the bot's feed messages from today in each channel on restart."""
+        today = datetime.now(self.display_zone).date()
+        for channel in channels:
+            try:
+                async for msg in channel.history(limit=limit):
+                    msg_date = msg.created_at.astimezone(self.display_zone).date() if msg.created_at else None
+                    if msg_date and msg_date < today:
+                        break  # Stop scanning once we hit yesterday's messages
+                    if msg.author == self.user and msg.content and msg.content.startswith("```ansi\n") and "GEX:" in msg.content:
+                        try:
+                            await msg.delete()
+                            print(f"GEX feed: deleted previous feed message {msg.id} in channel {channel.id}")
+                        except Exception:
+                            pass
+            except Exception as exc:
+                print(f"GEX feed: failed to cleanup old messages in channel {getattr(channel, 'id', '?')}: {exc}")
+
     async def _run_gex_feed_session(
         self,
         symbol: str,
@@ -1456,6 +1514,10 @@ class TradeBot(commands.Bot):
         if not pubsub:
             print("GEX feed: pubsub unavailable, skipping session")
             return
+
+        # Delete any leftover feed messages from a previous bot session
+        await self._cleanup_previous_feed_messages(channels)
+
         while not self._gex_feed_stop.is_set():
             now = datetime.now(self.display_zone)
             if now >= session_end:
@@ -1475,13 +1537,16 @@ class TradeBot(commands.Bot):
             # Use compact formatting for feed
             content = self.format_gex_small(data)
             
-            # Check if we need to refresh (delete and recreate messages)
+            # Refresh on 5-minute clock boundaries (e.g. :00, :05, :10, ...)
+            refresh_interval = self.gex_feed_refresh_minutes
+            current_slot = now.minute // refresh_interval
             should_refresh = False
             if not messages:
                 should_refresh = True
             elif last_message_time:
-                minutes_elapsed = (now - last_message_time).total_seconds() / 60
-                if minutes_elapsed >= self.gex_feed_refresh_minutes:
+                last_slot = last_message_time.minute // refresh_interval
+                # Refresh if we crossed into a new 5-min slot or a new hour
+                if current_slot != last_slot or now.hour != last_message_time.hour:
                     should_refresh = True
             
             if should_refresh:
@@ -2914,7 +2979,8 @@ class TradeBot(commands.Bot):
 
     async def _send_dm(self, user, content: str) -> bool:
         try:
-            await user.send(content)
+            for chunk in self._chunk_message(content):
+                await user.send(chunk)
             return True
         except discord.Forbidden:
             return False
@@ -2923,8 +2989,50 @@ class TradeBot(commands.Bot):
             return False
 
     async def _send_dm_or_warn(self, ctx, content: str) -> None:
+        # If already in a DM, respond in the same channel without DM fallback.
+        if getattr(ctx.channel, "type", None) == discord.ChannelType.private:
+            for chunk in self._chunk_message(content):
+                await ctx.send(chunk)
+            return
         if not await self._send_dm(ctx.author, content):
             await ctx.send("Unable to DM you. Check your privacy settings.")
+
+    async def _send_alert_dm(self, content: str) -> None:
+        """Send automated trade updates to the configured alert DM user."""
+        try:
+            user = self.get_user(self.alert_dm_user_id)
+            if user is None:
+                user = await self.fetch_user(self.alert_dm_user_id)
+            await self._send_dm(user, content)
+        except Exception as exc:
+            print(f"Failed to DM alert user: {exc}")
+
+    @staticmethod
+    def _chunk_message(content: str, limit: int = 2000) -> List[str]:
+        """Split a message into Discord-safe chunks."""
+        if not content:
+            return [""]
+        if len(content) <= limit:
+            return [content]
+        chunks: List[str] = []
+        lines = content.splitlines(keepends=True)
+        current = ""
+        for line in lines:
+            if len(line) > limit:
+                if current:
+                    chunks.append(current)
+                    current = ""
+                for i in range(0, len(line), limit):
+                    chunks.append(line[i : i + limit])
+                continue
+            if len(current) + len(line) > limit:
+                chunks.append(current)
+                current = line
+            else:
+                current += line
+        if current:
+            chunks.append(current)
+        return chunks
 
     def _format_wall_value_line(
         self,
@@ -3229,7 +3337,7 @@ class TradeBot(commands.Bot):
             )
             return f"{label:<18}{strike:<8} {colorize(delta_color, delta_text)}"
 
-        maxchange_lines.append(fmt_delta_entry("current", current_entry))
+        maxchange_lines.append(fmt_delta_entry("largest delta", current_entry))
 
         max_priors = data.get("max_priors", []) or []
         intervals = [1, 5, 10, 15, 30]
@@ -3351,7 +3459,7 @@ class TradeBot(commands.Bot):
         current_entry = self._extract_current_maxchange_entry(data)
 
         def fmt_current_entry(entry):
-            label = f"{'current':<{classic_label_width}}"
+            label = f"{'largest delta':<{classic_label_width}}"
             if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
                 return f"{label}N/A"
             if (
@@ -3579,7 +3687,7 @@ class TradeBot(commands.Bot):
                 return f"{label:<18}{strike_txt:<8} {colorize(delta_color, delta_txt)}"
 
             maxchange_lines = ["", "max change gex"]
-            maxchange_lines.append(fmt_delta_entry("current", current_entry))
+            maxchange_lines.append(fmt_delta_entry("largest delta", current_entry))
 
             max_priors = data.get("max_priors", []) or []
             intervals = [1, 5, 10, 15, 30]
@@ -3741,7 +3849,7 @@ class TradeBot(commands.Bot):
             ansi.get(color_for_delta(max_snap.delta)), fmt_net_change(max_snap.delta)
         )
         lines.append(
-            f"current strike    {current_price:<8}   {current_delta}  Δ{max_change_txt}"
+            f"largest delta     {current_price:<8}   {current_delta}  Δ{max_change_txt}"
         )
         return lines
 
