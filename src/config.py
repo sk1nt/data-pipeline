@@ -216,6 +216,44 @@ class Settings(BaseSettings):
         default="readonly",
     )
 
+    # Social Feed & Correlation Engine
+    social_feed_enabled: bool = env_field("SOCIAL_FEED_ENABLED", default=False)
+    social_feed_urls: str = env_field("SOCIAL_FEED_URLS", default="")
+    social_feed_rth_interval_seconds: float = env_field(
+        "SOCIAL_FEED_RTH_INTERVAL_SECONDS", default=30.0
+    )
+    social_feed_off_hours_interval_seconds: float = env_field(
+        "SOCIAL_FEED_OFF_HOURS_INTERVAL_SECONDS", default=300.0
+    )
+    social_min_score_threshold: int = env_field(
+        "SOCIAL_MIN_SCORE_THRESHOLD", default=2
+    )
+    social_dedup_ttl_seconds: int = env_field(
+        "SOCIAL_DEDUP_TTL_SECONDS", default=86400
+    )
+    correlation_enabled: bool = env_field("CORRELATION_ENABLED", default=False)
+    correlation_window_seconds: int = env_field(
+        "CORRELATION_WINDOW_SECONDS", default=300
+    )
+    correlation_volume_spike_multiplier: float = env_field(
+        "CORRELATION_VOLUME_SPIKE_MULTIPLIER", default=2.0
+    )
+    correlation_gex_shift_pct: float = env_field(
+        "CORRELATION_GEX_SHIFT_PCT", default=15.0
+    )
+    correlation_price_move_pct: float = env_field(
+        "CORRELATION_PRICE_MOVE_PCT", default=0.3
+    )
+    correlation_price_move_window_seconds: int = env_field(
+        "CORRELATION_PRICE_MOVE_WINDOW_SECONDS", default=120
+    )
+    correlation_cooldown_seconds: int = env_field(
+        "CORRELATION_COOLDOWN_SECONDS", default=300
+    )
+    correlation_uw_premium_threshold: int = env_field(
+        "CORRELATION_UW_PREMIUM_THRESHOLD", default=1000000
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=False,
