@@ -93,6 +93,14 @@ class TradeBot(commands.Bot):
         self._market_agg_scheduled_stop = asyncio.Event()
         self._gex_feed_task: Optional[asyncio.Task] = None
         self._gex_feed_stop = asyncio.Event()
+        self._correlation_alert_task: Optional[asyncio.Task] = None
+        self._correlation_alert_stop = asyncio.Event()
+        self.correlation_alert_channel_ids = [
+            int(x) for x in os.getenv(
+                "CORRELATION_ALERT_CHANNEL_IDS",
+                "1425136266676146236,1429940127899324487"
+            ).split(",") if x.strip()
+        ]
         self.gex_feed_enabled = bool(getattr(config, "gex_feed_enabled", False))
         self.gex_feed_channel_ids = getattr(config, "gex_feed_channel_ids", None)
         raw_feed_symbol = getattr(config, "gex_feed_symbol", "NQ_NDX") or "NQ_NDX"
@@ -965,6 +973,12 @@ class TradeBot(commands.Bot):
                 self._scheduled_market_agg_updates()
             )
             print("Market agg scheduled updates started")
+        if not self._correlation_alert_task:
+            self._correlation_alert_stop = asyncio.Event()
+            self._correlation_alert_task = asyncio.create_task(
+                self._listen_correlation_alerts()
+            )
+            print("Correlation alert listener started")
         if self._should_run_gex_feed() and not self._gex_feed_task:
             self._gex_feed_stop.clear()
             self._gex_feed_task = asyncio.create_task(self._run_gex_feed_loop())
@@ -2785,6 +2799,73 @@ class TradeBot(commands.Bot):
                     print(f"Failed to find channel {channel_id}")
             except Exception as exc:
                 print(f"Failed to send market_agg alert to {channel_id}: {exc}")
+
+    async def _listen_correlation_alerts(self):
+        """Listen for social sentiment + market correlation alerts."""
+        pubsub = self.redis_client.pubsub(ignore_subscribe_messages=True)
+        try:
+            pubsub.subscribe("correlation:alerts:stream")
+        except Exception as exc:
+            print(f"Failed to subscribe to correlation alerts: {exc}")
+            return
+        try:
+            while not self._correlation_alert_stop.is_set():
+                message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
+                if not message:
+                    await asyncio.sleep(0.1)
+                    continue
+                if message.get("type") != "message":
+                    continue
+                data = message.get("data")
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8")
+                try:
+                    alert_payload = json.loads(data)
+                except Exception as exc:
+                    print(f"Failed to decode correlation alert: {exc}")
+                    continue
+                try:
+                    await self._broadcast_correlation_alert(alert_payload)
+                except Exception as exc:
+                    print(f"Failed to broadcast correlation alert: {exc}")
+        finally:
+            try:
+                pubsub.close()
+            except Exception:
+                pass
+
+    async def _broadcast_correlation_alert(self, alert: dict) -> None:
+        """Broadcast a correlation alert to configured Discord channels."""
+        try:
+            import sys
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+            from services.correlation_alert_service import CorrelationAlertService
+
+            alert_service = CorrelationAlertService()
+            message_text = alert_service.format_alert_message(alert)
+            # Also log to DuckDB
+            alert_service.log_correlation_event(alert, alert_fired=True)
+        except Exception as exc:
+            print(f"Failed to format correlation alert: {exc}")
+            # Fallback
+            message_text = (
+                f"⚡ **Correlation Alert**\n"
+                f"Type: `{alert.get('alert_type')}`\n"
+                f"Signals: {', '.join(alert.get('signals_triggered', []))}"
+            )
+
+        channel_ids = alert.get("discord_channels", self.correlation_alert_channel_ids)
+        for channel_id in channel_ids:
+            try:
+                channel = self.get_channel(channel_id)
+                if channel is None:
+                    channel = await self.fetch_channel(channel_id)
+                if channel:
+                    await channel.send(message_text)
+                else:
+                    print(f"Failed to find channel {channel_id}")
+            except Exception as exc:
+                print(f"Failed to send correlation alert to {channel_id}: {exc}")
 
     async def _scheduled_market_agg_updates(self):
         """Send scheduled Put/Call Ratio updates every 30 minutes starting at 10AM."""

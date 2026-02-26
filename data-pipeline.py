@@ -59,9 +59,11 @@ from src.services.gexbot_poller import (
 from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreamer  # noqa: E402
 from src.services.redis_timeseries import RedisTimeSeriesClient  # noqa: E402
 from src.services.redis_flush_worker import FlushWorkerSettings, RedisFlushWorker  # noqa: E402
-from src.services.discord_bot_service import DiscordBotService  # noqa: E402
 from src.services.lookup_service import LookupService  # noqa: E402
 from src.services.schwab_streamer import SchwabStreamClient, build_streamer  # noqa: E402
+from src.services.social_feed_service import SocialFeedService, FeedConfig, KeywordScorer  # noqa: E402
+from src.services.correlation_engine import CorrelationEngine  # noqa: E402
+from src.models.social_event import SocialSource  # noqa: E402
 
 # Trading panel router
 from backend.src.api.trading import router as trading_router  # noqa: E402
@@ -209,9 +211,10 @@ class ServiceManager:
         self.redis_client: Optional[RedisClient] = None
         self.rts: Optional[RedisTimeSeriesClient] = None
         self.flush_worker: Optional[RedisFlushWorker] = None
-        self.discord_bot: Optional[DiscordBotService] = None
         self.lookup_service: Optional[LookupService] = None
         self.schwab_service = SchwabStreamingService(self)
+        self.social_feed: Optional[SocialFeedService] = None
+        self.correlation_engine: Optional[CorrelationEngine] = None
         self.trade_count = 0
         self.depth_count = 0
         self.trade_counts: Dict[str, int] = {}
@@ -252,19 +255,21 @@ class ServiceManager:
             "gex_poller",
             "gex_nq_poller",
             "redis_flush",
-            "discord_bot",
+            "social_feed",
+            "correlation",
         ):
             self.start_service(service)
 
     async def stop(self) -> None:
         """Stop all managed services in a best-effort fashion."""
         for service in (
+            "correlation",
+            "social_feed",
             "tastytrade",
             "schwab",
             "gex_poller",
             "gex_nq_poller",
             "redis_flush",
-            "discord_bot",
         ):
             await self.stop_service(service)
 
@@ -297,11 +302,6 @@ class ServiceManager:
             "gex_poller": getattr(self.gex_poller, "status", lambda: {})(),
             "gex_nq_poller": getattr(self.gex_nq_poller, "status", lambda: {})(),
             "redis_flush_worker": getattr(self.flush_worker, "status", lambda: {})(),
-            "discord_bot": getattr(
-                self.discord_bot,
-                "status",
-                lambda: {"running": False, "enabled": settings.discord_bot_enabled},
-            )(),
             "lookup_service": {
                 "ready": bool(self.lookup_service),
                 "recent_depth_diffs": list(self.last_depth_comparison.values())[:3],
@@ -412,12 +412,48 @@ class ServiceManager:
             )
             self.flush_worker.start()
             LOGGER.info("Redis flush worker started")
-        elif name == "discord_bot" and settings.discord_bot_enabled:
-            if not self.discord_bot:
-                script_path = PROJECT_ROOT / "discord-bot" / "run_discord_bot.py"
-                self.discord_bot = DiscordBotService(script_path)
-            self.discord_bot.start()
-            LOGGER.info("Discord bot started")
+        elif name == "social_feed" and settings.social_feed_enabled:
+            if self.social_feed:
+                return
+            feeds = []
+            for url in settings.social_feed_urls.split(","):
+                url = url.strip()
+                if not url:
+                    continue
+                # Determine source type from URL
+                if "truthsocial" in url:
+                    feeds.append(FeedConfig(url, SocialSource.TRUTH_SOCIAL, "Truth Social"))
+                elif "nitter" in url or "twitter" in url or "rsshub" in url:
+                    feeds.append(FeedConfig(url, SocialSource.TWITTER, "Twitter"))
+                else:
+                    feeds.append(FeedConfig(url, SocialSource.NEWS_RSS, "News"))
+            if feeds:
+                self.social_feed = SocialFeedService(
+                    redis_client=self.redis_client,
+                    feeds=feeds,
+                    rth_interval_seconds=settings.social_feed_rth_interval_seconds,
+                    off_hours_interval_seconds=settings.social_feed_off_hours_interval_seconds,
+                    min_score_threshold=settings.social_min_score_threshold,
+                    dedup_ttl_seconds=settings.social_dedup_ttl_seconds,
+                )
+                self.social_feed.start()
+                LOGGER.info("Social feed service started with %d feeds", len(feeds))
+            else:
+                LOGGER.warning("Social feed enabled but no URLs configured")
+        elif name == "correlation" and settings.correlation_enabled:
+            if self.correlation_engine:
+                return
+            self.correlation_engine = CorrelationEngine(
+                redis_client=self.redis_client,
+                window_seconds=settings.correlation_window_seconds,
+                volume_spike_multiplier=settings.correlation_volume_spike_multiplier,
+                gex_shift_pct=settings.correlation_gex_shift_pct,
+                price_move_pct=settings.correlation_price_move_pct,
+                cooldown_seconds=settings.correlation_cooldown_seconds,
+                uw_premium_threshold=float(settings.correlation_uw_premium_threshold),
+            )
+            self.correlation_engine.start()
+            LOGGER.info("Correlation engine started")
 
     async def stop_service(self, name: str) -> None:
         """Stop a running service and clean up the local reference."""
@@ -441,10 +477,14 @@ class ServiceManager:
             await self.flush_worker.stop()
             self.flush_worker = None
             LOGGER.info("Redis flush worker stopped")
-        elif name == "discord_bot" and self.discord_bot:
-            await self.discord_bot.stop()
-            LOGGER.info("Discord bot stopped")
-            self.discord_bot = None
+        elif name == "social_feed" and self.social_feed:
+            await self.social_feed.stop()
+            self.social_feed = None
+            LOGGER.info("Social feed service stopped")
+        elif name == "correlation" and self.correlation_engine:
+            await self.correlation_engine.stop()
+            self.correlation_engine = None
+            LOGGER.info("Correlation engine stopped")
 
     async def restart_service(self, name: str) -> None:
         """Convenience helper for the ``/control`` endpoint."""
@@ -792,13 +832,35 @@ ML_TRADE_HISTORY_LIMIT = 500
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Ensure ServiceManager starts before handling requests and shuts down cleanly."""
+    import signal
+
     LOGGER.info("Starting services during FastAPI lifespan")
     service_manager.start()
+
+    loop = asyncio.get_running_loop()
+    shutdown_triggered = asyncio.Event()
+
+    def _signal_shutdown() -> None:
+        if not shutdown_triggered.is_set():
+            shutdown_triggered.set()
+            LOGGER.info("Signal received — stopping services before loop teardown")
+            loop.create_task(_graceful_stop())
+
+    async def _graceful_stop() -> None:
+        try:
+            await asyncio.wait_for(service_manager.stop(), timeout=5.0)
+        except Exception:
+            LOGGER.warning("Error during graceful service shutdown", exc_info=True)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _signal_shutdown)
+
     try:
         yield
     finally:
         LOGGER.info("Stopping services during FastAPI lifespan")
-        await service_manager.stop()
+        if not shutdown_triggered.is_set():
+            await service_manager.stop()
 
 
 app = FastAPI(title="Data Pipeline", lifespan=lifespan)
@@ -1384,9 +1446,76 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
         "delta_risk_reversal", "maxchange", "max_priors",
     )
 
+    # Map primary symbol to a secondary symbol whose net_gex we display
+    CROSS_GEX_MAP = {"NQ_NDX": "ES_SPX", "ES_SPX": "NQ_NDX"}
+
+    def _summarize_wall(major_strike, strikes, prefer_positive):
+        """Compute wall ladder: major + up to 2 next candidates with %."""
+        filtered = []
+        for s, g in strikes:
+            if prefer_positive and g <= 0:
+                continue
+            if not prefer_positive and g >= 0:
+                continue
+            filtered.append((s, g))
+        if not filtered:
+            return None
+        filtered.sort(key=lambda p: abs(p[1]), reverse=True)
+        major = None
+        if isinstance(major_strike, (int, float)):
+            for s, g in filtered:
+                if abs(s - major_strike) <= 0.51:
+                    major = (s, g)
+                    break
+        if major is None:
+            major = filtered[0]
+        entries = []
+        for s, g in filtered:
+            if abs(s - major[0]) <= 0.51:
+                continue
+            pct = (abs(g) / abs(major[1]) * 100) if major[1] else None
+            entries.append({"strike": s, "pct": pct})
+            if len(entries) >= 2:
+                break
+        return {"major": major[0], "next": entries}
+
+    def _parse_strikes(raw):
+        """Normalize strikes list into [(strike, gamma), ...]."""
+        if not isinstance(raw, list):
+            return []
+        result = []
+        for entry in raw:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                try:
+                    result.append((float(entry[0]), float(entry[1])))
+                except (TypeError, ValueError):
+                    pass
+        return result
+
     def _extract(payload: Dict[str, Any]) -> Dict[str, Any]:
         out = {k: payload.get(k) for k in GEX_FIELDS}
         out["symbol"] = normalized
+        # Wall ladders from strikes data
+        strikes = _parse_strikes(payload.get("strikes"))
+        if strikes:
+            call_ladder = _summarize_wall(payload.get("major_pos_vol"), strikes, True)
+            put_ladder = _summarize_wall(payload.get("major_neg_vol"), strikes, False)
+            if call_ladder:
+                out["call_wall_ladder"] = call_ladder
+            if put_ladder:
+                out["put_wall_ladder"] = put_ladder
+        # Cross-symbol net GEX (e.g. ES_SPX net_gex when viewing NQ_NDX)
+        cross_sym = CROSS_GEX_MAP.get(normalized)
+        if cross_sym:
+            try:
+                cross_key = f"{SNAPSHOT_KEY_PREFIX}{cross_sym}"
+                cross_raw = redis_conn.get(cross_key)
+                if cross_raw:
+                    cross_snap = json.loads(cross_raw if isinstance(cross_raw, str) else cross_raw.decode("utf-8"))
+                    out["cross_symbol"] = cross_sym
+                    out["cross_net_gex"] = cross_snap.get("net_gex")
+            except Exception:
+                pass
         return out
 
     # Send the latest cached snapshot immediately
@@ -1621,7 +1750,13 @@ def main() -> None:
             "SSL enabled: cert=%s, key=%s", args.ssl_certfile, args.ssl_keyfile
         )
     
-    uvicorn.run(**uvicorn_config)
+    try:
+        uvicorn.run(**uvicorn_config)
+    except (KeyboardInterrupt, RecursionError):
+        # Python 3.13 can hit RecursionError when _cancel_all_tasks walks
+        # deeply nested gather/child-task chains (e.g. tastytrade DXLinkStreamer).
+        # The signal handler in lifespan already stopped services; just exit.
+        pass
 
 
 if __name__ == "__main__":
