@@ -250,9 +250,6 @@ class Settings(BaseSettings):
     correlation_cooldown_seconds: int = env_field(
         "CORRELATION_COOLDOWN_SECONDS", default=300
     )
-    correlation_uw_premium_threshold: int = env_field(
-        "CORRELATION_UW_PREMIUM_THRESHOLD", default=1000000
-    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

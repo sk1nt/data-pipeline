@@ -23,7 +23,6 @@ from src.services.correlation_engine import (
     _check_volume_spike,
     _check_gex_shift,
     _check_price_move,
-    _check_uw_flow,
 )
 from src.services.correlation_alert_service import CorrelationAlertService
 
@@ -69,9 +68,6 @@ def _make_signal(
     price_change_pct: float | None = None,
     price: float | None = None,
     price_2min_ago: float | None = None,
-    uw_max_premium: float | None = None,
-    uw_put_call_ratio: float | None = None,
-    uw_prev_ratio: float | None = None,
 ) -> MarketSignalSnapshot:
     return MarketSignalSnapshot(
         timestamp=datetime.now(timezone.utc),
@@ -85,9 +81,6 @@ def _make_signal(
         price_change_pct=price_change_pct,
         price=price,
         price_2min_ago=price_2min_ago,
-        uw_max_premium=uw_max_premium,
-        uw_put_call_ratio=uw_put_call_ratio,
-        uw_prev_ratio=uw_prev_ratio,
     )
 
 
@@ -175,31 +168,6 @@ class TestEndToEndConfluencePipeline:
         events = alert_service.query_events(limit=10)
         assert len(events) == 1
         assert events[0]["alert_fired"] is True
-
-
-class TestEndToEndUwFlow:
-    """Large option premium after geopolitical tweet → uw_flow alert."""
-
-    def test_large_premium_alert(self, alert_service):
-        event = _make_social_event("Military action authorized in South China Sea")
-
-        signal = _make_signal(uw_max_premium=5_000_000)
-        msg = _check_uw_flow(event, signal, premium_threshold=1_000_000)
-        assert msg is not None
-
-        alert = CorrelationAlert(
-            alert_type="uw_flow",
-            social_event=event,
-            market_signals=signal,
-            signals_triggered=["uw_flow"],
-            message=msg,
-            severity="medium",
-        )
-        payload = alert.model_dump(mode="json")
-
-        alert_service.log_correlation_event(payload, alert_fired=True)
-        events = alert_service.query_events(limit=10)
-        assert len(events) == 1
 
 
 class TestEventWindowIntegration:

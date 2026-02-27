@@ -11,7 +11,6 @@ from src.services.correlation_engine import (
     MarketSignalSnapshot,
     _check_gex_shift,
     _check_price_move,
-    _check_uw_flow,
     _check_volume_spike,
 )
 
@@ -144,38 +143,6 @@ class TestPriceMove:
             price_change_pct=0.1,
         )
         msg = _check_price_move(event, signal, pct_threshold=0.3)
-        assert msg is None
-
-
-class TestUWFlow:
-    def test_fires_on_large_premium(self):
-        event = _make_social_event()
-        signal = MarketSignalSnapshot(
-            timestamp=datetime.now(timezone.utc),
-            uw_max_premium=2_000_000,
-        )
-        msg = _check_uw_flow(event, signal, premium_threshold=1_000_000)
-        assert msg is not None
-        assert "UNUSUAL FLOW" in msg
-
-    def test_fires_on_ratio_shift(self):
-        event = _make_social_event()
-        signal = MarketSignalSnapshot(
-            timestamp=datetime.now(timezone.utc),
-            uw_put_call_ratio=1.2,
-            uw_prev_ratio=0.9,
-        )
-        msg = _check_uw_flow(event, signal, premium_threshold=1_000_000)
-        assert msg is not None
-        assert "RATIO SHIFT" in msg
-
-    def test_silent_on_small_premium(self):
-        event = _make_social_event()
-        signal = MarketSignalSnapshot(
-            timestamp=datetime.now(timezone.utc),
-            uw_max_premium=500_000,
-        )
-        msg = _check_uw_flow(event, signal, premium_threshold=1_000_000)
         assert msg is None
 
 

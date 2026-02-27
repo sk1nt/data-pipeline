@@ -41,11 +41,9 @@ Real-time correlation engine that ingests social media posts (Truth Social / Twi
 │            Correlation Engine                     │
 │                                                   │
 │  Inputs (all via Redis):                          │
-│  • social:events:stream  (social/news events)     │
-│  • gex:snapshot:stream   (GEX snapshots)          │
-│  • market_data:ticks     (Schwab tick data)       │
-│  • uw:market_agg:stream  (UW put/call ratio)      │
-│  • uw:option_trade:stream (UW large option flow)   │
+│  • social:events:stream           (social/news)    │
+│  • gex:snapshot:stream            (GEX snapshots)  │
+│  • market_data:tastytrade:trades  (MNQ/MES ticks)  │
 │                                                   │
 │  ┌──────────────┐  ┌──────────────────────────┐  │
 │  │ Event Window  │  │ Correlation Rules Engine │  │
@@ -71,8 +69,7 @@ Real-time correlation engine that ingests social media posts (Truth Social / Twi
 | Component | What We Reuse | Location |
 |-----------|--------------|----------|
 | GEX snapshots | Real-time GEX data via Redis pub/sub | `src/services/gexbot_poller.py`, channel `gex:snapshot:stream` |
-| Tick/price data | Schwab streamer ticks | `src/services/schwab_streamer.py`, channel `market_data:ticks` |
-| UW option flow | Large option trades + put/call ratio | `src/services/uw_message_service.py`, channels `uw:market_agg:stream`, `uw:option_trade:stream` |
+| Tick/price data | TastyTrade streamer trades (MNQ/MES only) | `src/services/tastytrade_streamer.py`, channel `market_data:tastytrade:trades` |
 | Discord bot | Alert delivery to channels | `discord-bot/bot/trade_bot.py` |
 | Redis time series | Historical metric storage | `src/services/redis_timeseries.py` |
 | Market hours | RTH/off-hours awareness | `src/lib/market_hours.py` |
@@ -106,7 +103,7 @@ Posts/headlines are scored by financial relevance using keyword matching:
 
 ### Rule 1: Social Event + Volume Spike
 - Social event with score >= 2 occurred in last 5 minutes
-- Volume in current 1-min bar > 2× rolling 20-bar average
+- Volume in current 1-min bar > 2× rolling 20-bar average (MNQ/MES via TastyTrade)
 - **Alert**: "🚨 VOLUME SPIKE after social event: {summary} | Vol: {current} vs avg {avg} | {symbol}"
 
 ### Rule 2: Social Event + GEX Shift
@@ -116,15 +113,10 @@ Posts/headlines are scored by financial relevance using keyword matching:
 
 ### Rule 3: Social Event + Price Move
 - Social event with score >= 2 occurred in last 5 minutes
-- Price moved > 0.3% in last 2 minutes (configurable)
+- Price moved > 0.3% in last 2 minutes on MNQ/MES (configurable)
 - **Alert**: "📊 PRICE MOVE after social event: {summary} | {symbol}: {price_change}% in {minutes}m"
 
-### Rule 4: Social Event + UW Flow Spike
-- Social event with score >= 2 occurred in last 5 minutes
-- UW option trade premium > $1M on a single ticker OR put/call ratio shift > 15%
-- **Alert**: "🐋 UNUSUAL FLOW after social event: {summary} | {details}"
-
-### Rule 5: Multi-Signal Confluence
+### Rule 4: Multi-Signal Confluence
 - Social event + any 2 of: volume spike, GEX shift, price move
 - **Alert**: "⚡ CONFLUENCE ALERT: {n} signals triggered after: {summary} | Signals: {list}"
 

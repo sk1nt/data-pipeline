@@ -33,7 +33,6 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     volume_ratio    DOUBLE,
     gex_change_pct  DOUBLE,
     price_change_pct DOUBLE,
-    uw_ratio_change DOUBLE,
     config_snapshot VARCHAR,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -116,15 +115,8 @@ class CorrelationAlertService:
                 "volume_ratio": signals.get("volume_ratio"),
                 "gex_change_pct": signals.get("gex_change_pct"),
                 "price_change_pct": signals.get("price_change_pct"),
-                "uw_ratio_change": None,
                 "config_snapshot": None,
             }
-
-            # Compute UW ratio change if available
-            uw_cur = signals.get("uw_put_call_ratio")
-            uw_prev = signals.get("uw_prev_ratio")
-            if uw_cur is not None and uw_prev is not None and uw_prev != 0:
-                row["uw_ratio_change"] = (float(uw_cur) - float(uw_prev)) / float(uw_prev)
 
             self._insert_row(row)
         except Exception:

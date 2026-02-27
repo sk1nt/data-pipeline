@@ -42,8 +42,6 @@ def _make_alert(
             "volume_20bar_avg": 2000,
             "gex_change_pct": None,
             "price_change_pct": None,
-            "uw_put_call_ratio": None,
-            "uw_prev_ratio": None,
         },
     }
 
@@ -121,17 +119,6 @@ class TestDuckDBPersistence:
 
         events = alert_service.query_events(limit=3)
         assert len(events) == 3
-
-    def test_uw_ratio_change_computed(self, alert_service):
-        alert = _make_alert()
-        alert["market_signals"]["uw_put_call_ratio"] = 1.2
-        alert["market_signals"]["uw_prev_ratio"] = 1.0
-        alert_service.log_correlation_event(alert, alert_fired=True)
-
-        events = alert_service.query_events(limit=1)
-        assert len(events) == 1
-        # (1.2 - 1.0) / 1.0 = 0.2
-        assert abs(events[0]["uw_ratio_change"] - 0.2) < 0.001
 
 
 class TestSanitizeText:

@@ -26,6 +26,13 @@ CORRELATION_ALERT_CHANNEL = "correlation:alerts:stream"
 # Data structures
 # ---------------------------------------------------------------------------
 
+# Only correlate TastyTrade data for these symbols
+ALLOWED_SYMBOLS = {"MNQ", "MES"}
+
+# TastyTrade trade channel (volume + price source)
+TASTYTRADE_TRADE_CHANNEL = "market_data:tastytrade:trades"
+
+
 class MarketSignalSnapshot(BaseModel):
     """Point-in-time market microstructure signals."""
 
@@ -43,10 +50,6 @@ class MarketSignalSnapshot(BaseModel):
     price: Optional[float] = None
     price_2min_ago: Optional[float] = None
     price_change_pct: Optional[float] = None
-    # UW Flow
-    uw_put_call_ratio: Optional[float] = None
-    uw_prev_ratio: Optional[float] = None
-    uw_max_premium: Optional[float] = None
 
 
 class CorrelationAlert(BaseModel):
@@ -54,7 +57,7 @@ class CorrelationAlert(BaseModel):
 
     alert_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    alert_type: str  # volume_spike, gex_shift, price_move, uw_flow, confluence
+    alert_type: str  # volume_spike, gex_shift, price_move, confluence
     social_event: SocialEvent
     market_signals: MarketSignalSnapshot
     signals_triggered: List[str] = Field(default_factory=list)
@@ -160,33 +163,6 @@ def _check_price_move(
     return None
 
 
-def _check_uw_flow(
-    event: SocialEvent, signal: MarketSignalSnapshot, premium_threshold: float
-) -> Optional[str]:
-    # Check for large premium
-    if signal.uw_max_premium is not None and signal.uw_max_premium >= premium_threshold:
-        return (
-            f"🐋 **UNUSUAL FLOW** after social event\n"
-            f"> {event.text[:120]}\n"
-            f"Large option premium: **${signal.uw_max_premium:,.0f}**"
-        )
-    # Check for PCR shift
-    if (
-        signal.uw_put_call_ratio is not None
-        and signal.uw_prev_ratio is not None
-        and signal.uw_prev_ratio > 0
-    ):
-        ratio_change = abs(signal.uw_put_call_ratio - signal.uw_prev_ratio) / signal.uw_prev_ratio
-        if ratio_change >= 0.15:
-            return (
-                f"🐋 **P/C RATIO SHIFT** after social event\n"
-                f"> {event.text[:120]}\n"
-                f"Put/Call: {signal.uw_prev_ratio:.3f} → {signal.uw_put_call_ratio:.3f} "
-                f"(**{ratio_change * 100:.1f}%** change)"
-            )
-    return None
-
-
 # ---------------------------------------------------------------------------
 # Correlation Engine
 # ---------------------------------------------------------------------------
@@ -203,7 +179,6 @@ class CorrelationEngine:
         gex_shift_pct: float = 15.0,
         price_move_pct: float = 0.3,
         cooldown_seconds: int = 300,
-        uw_premium_threshold: float = 1_000_000,
     ) -> None:
         self.redis = redis_client
         self.window = EventWindow(window_seconds)
@@ -211,17 +186,14 @@ class CorrelationEngine:
         self.gex_pct = gex_shift_pct
         self.price_pct = price_move_pct
         self.cooldown = cooldown_seconds
-        self.uw_premium = uw_premium_threshold
         self._cooldowns: Dict[str, datetime] = {}  # event_id:rule → last_alert_time
         self._task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
 
-        # Market state tracked from Redis streams
-        self._volume_bars: deque[Tuple[datetime, float]] = deque(maxlen=20)
+        # Market state tracked from Redis streams (per-symbol)
+        self._volume_bars: Dict[str, deque] = {}  # symbol → deque of (ts, vol)
         self._last_gex: Optional[float] = None
-        self._price_history: deque[Tuple[datetime, float]] = deque(maxlen=120)
-        self._last_uw_ratio: Optional[float] = None
-        self._last_uw_premium: float = 0.0
+        self._price_history: Dict[str, deque] = {}  # symbol → deque of (ts, price)
 
     def start(self) -> None:
         if self._task and not self._task.done():
@@ -247,9 +219,7 @@ class CorrelationEngine:
         channels = [
             SOCIAL_EVENTS_CHANNEL,
             "gex:snapshot:stream",
-            "market_data:ticks",
-            "uw:market_agg:stream",
-            "uw:option_trade:stream",
+            TASTYTRADE_TRADE_CHANNEL,
         ]
         pubsub.subscribe(*channels)
         LOGGER.info("CorrelationEngine subscribed to: %s", channels)
@@ -304,59 +274,41 @@ class CorrelationEngine:
                 self.window.add_signal(signal)
                 self._check_correlations_for_market_signal()
 
-        elif channel == "market_data:ticks":
-            price = data.get("price") or data.get("last")
-            volume = data.get("volume") or data.get("size", 0)
+        elif channel == TASTYTRADE_TRADE_CHANNEL:
+            symbol = (data.get("symbol") or "").upper()
+            if symbol not in ALLOWED_SYMBOLS:
+                return
+            price = data.get("price")
+            volume = data.get("size") or data.get("volume", 0)
             if price is not None:
-                self._price_history.append((now, float(price)))
+                hist = self._price_history.setdefault(symbol, deque(maxlen=120))
+                hist.append((now, float(price)))
             if volume:
-                self._update_volume_bar(now, float(volume))
-            signal = self._build_signal(now)
-            signal.symbol = data.get("symbol", "")
+                self._update_volume_bar(symbol, now, float(volume))
+            signal = self._build_signal(now, symbol)
+            signal.symbol = symbol
             self.window.add_signal(signal)
             self._check_correlations_for_market_signal()
 
-        elif channel == "uw:market_agg:stream":
-            inner = data.get("data", data)
-            ratio = inner.get("put_call_ratio")
-            if ratio is not None:
-                prev = self._last_uw_ratio
-                self._last_uw_ratio = float(ratio)
-                signal = self._build_signal(now)
-                signal.uw_put_call_ratio = self._last_uw_ratio
-                signal.uw_prev_ratio = prev
-                self.window.add_signal(signal)
-                self._check_correlations_for_market_signal()
-
-        elif channel == "uw:option_trade:stream":
-            inner = data.get("data", data)
-            premium = inner.get("premium")
-            if premium is not None:
-                prem_val = abs(float(premium))
-                if prem_val > self._last_uw_premium:
-                    self._last_uw_premium = prem_val
-                signal = self._build_signal(now)
-                signal.uw_max_premium = self._last_uw_premium
-                self.window.add_signal(signal)
-                self._check_correlations_for_market_signal()
-
-    def _build_signal(self, now: datetime) -> MarketSignalSnapshot:
+    def _build_signal(self, now: datetime, symbol: str = "") -> MarketSignalSnapshot:
         """Construct a MarketSignalSnapshot from current tracked state."""
-        signal = MarketSignalSnapshot(timestamp=now)
+        signal = MarketSignalSnapshot(timestamp=now, symbol=symbol)
 
-        # Volume
-        if len(self._volume_bars) >= 2:
-            avg = sum(v for _, v in self._volume_bars) / len(self._volume_bars)
-            latest = self._volume_bars[-1][1]
+        # Volume (per-symbol)
+        bars = self._volume_bars.get(symbol)
+        if bars and len(bars) >= 2:
+            avg = sum(v for _, v in bars) / len(bars)
+            latest = bars[-1][1]
             signal.volume_1min = latest
             signal.volume_20bar_avg = avg
             signal.volume_ratio = latest / avg if avg > 0 else None
 
-        # Price
-        if len(self._price_history) >= 2:
-            signal.price = self._price_history[-1][1]
+        # Price (per-symbol)
+        hist = self._price_history.get(symbol)
+        if hist and len(hist) >= 2:
+            signal.price = hist[-1][1]
             cutoff = now - timedelta(seconds=120)
-            older = [p for t, p in self._price_history if t <= cutoff]
+            older = [p for t, p in hist if t <= cutoff]
             if older:
                 signal.price_2min_ago = older[-1]
                 if signal.price_2min_ago != 0:
@@ -366,14 +318,15 @@ class CorrelationEngine:
 
         return signal
 
-    def _update_volume_bar(self, now: datetime, volume: float) -> None:
-        """Accumulate volume into 1-minute bars."""
-        if self._volume_bars:
-            last_ts, last_vol = self._volume_bars[-1]
+    def _update_volume_bar(self, symbol: str, now: datetime, volume: float) -> None:
+        """Accumulate volume into 1-minute bars (per-symbol)."""
+        bars = self._volume_bars.setdefault(symbol, deque(maxlen=20))
+        if bars:
+            last_ts, last_vol = bars[-1]
             if (now - last_ts).total_seconds() < 60:
-                self._volume_bars[-1] = (last_ts, last_vol + volume)
+                bars[-1] = (last_ts, last_vol + volume)
                 return
-        self._volume_bars.append((now, volume))
+        bars.append((now, volume))
 
     def _check_correlations_for_market_signal(self) -> None:
         """When a new market signal arrives, check if any recent social events correlate."""
@@ -406,12 +359,6 @@ class CorrelationEngine:
         msg = _check_price_move(event, signal, self.price_pct)
         if msg and not self._is_cooled_down(event.event_id, "price_move"):
             triggered_signals.append("price_move")
-            messages.append(msg)
-
-        # Rule 4: UW flow
-        msg = _check_uw_flow(event, signal, self.uw_premium)
-        if msg and not self._is_cooled_down(event.event_id, "uw_flow"):
-            triggered_signals.append("uw_flow")
             messages.append(msg)
 
         if not triggered_signals:

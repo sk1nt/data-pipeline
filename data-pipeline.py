@@ -450,7 +450,6 @@ class ServiceManager:
                 gex_shift_pct=settings.correlation_gex_shift_pct,
                 price_move_pct=settings.correlation_price_move_pct,
                 cooldown_seconds=settings.correlation_cooldown_seconds,
-                uw_premium_threshold=float(settings.correlation_uw_premium_threshold),
             )
             self.correlation_engine.start()
             LOGGER.info("Correlation engine started")
