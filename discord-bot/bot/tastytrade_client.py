@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import threading
+
+import httpx
 import re
 from decimal import Decimal
 from dataclasses import dataclass
@@ -104,6 +106,8 @@ class TastyTradeClient:
         self._needs_reauth: bool = False
         self._reauth_backoff_seconds: int = 60
         self._reauth_thread: Optional[threading.Thread] = None
+        self._last_connect_failure: float = 0.0
+        self._connect_cooldown_seconds: float = 15.0
         # Start reauth worker thread (best-effort; don't raise on failure)
         try:
             self._start_reauth_worker()
@@ -485,13 +489,25 @@ class TastyTradeClient:
 
     def _ensure_session(self) -> Session:
         assert Session is not None  # for type checkers
+        # Fast-fail if we recently failed to connect (avoid repeated TCP timeouts)
+        if self._session is None and self._last_connect_failure:
+            elapsed = time.monotonic() - self._last_connect_failure
+            if elapsed < self._connect_cooldown_seconds:
+                raise ConnectionError(
+                    f"TastyTrade API unreachable (retry in {self._connect_cooldown_seconds - elapsed:.0f}s)"
+                )
         if self._session is None:
-            self._session = Session(
-                provider_secret=self._client_secret,
-                refresh_token=self._refresh_token,
-                is_test=self._use_sandbox,
-            )
-            self._session_expiration = self._derive_expiration(self._session)
+            try:
+                self._session = Session(
+                    provider_secret=self._client_secret,
+                    refresh_token=self._refresh_token,
+                    is_test=self._use_sandbox,
+                )
+                self._session_expiration = self._derive_expiration(self._session)
+                self._last_connect_failure = 0.0
+            except (httpx.TransportError, ConnectionError, TimeoutError, OSError) as exc:
+                self._last_connect_failure = time.monotonic()
+                raise ConnectionError(f"TastyTrade API unreachable: {exc}") from exc
         else:
             # refresh if token expired
             try:

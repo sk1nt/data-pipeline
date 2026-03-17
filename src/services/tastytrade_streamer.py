@@ -62,7 +62,11 @@ class TastyTradeStreamer:
     async def stop(self) -> None:
         self._stop_event.set()
         if self._task:
-            await self._task
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
             self._task = None
 
     @property

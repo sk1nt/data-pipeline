@@ -308,8 +308,8 @@ tr:hover { background: var(--bg3); }
 <!-- ===== GEX METRICS ===== -->
 <div class="metrics" id="metricsGrid">
   <div class="metric">
-    <span class="lbl">Spot</span>
-    <span class="val neutral" id="spot">&mdash;</span>
+    <span class="lbl" id="crossGexLabel">ES/SPX Net GEX</span>
+    <span class="val neutral" id="crossGex">&mdash;</span>
   </div>
   <div class="metric">
     <span class="lbl">Zero Gamma</span>
@@ -318,10 +318,12 @@ tr:hover { background: var(--bg3); }
   <div class="metric">
     <span class="lbl">Call Wall</span>
     <span class="val neutral" id="callWall">&mdash;</span>
+    <span class="sub" id="callWallNext"></span>
   </div>
   <div class="metric">
     <span class="lbl">Put Wall</span>
     <span class="val neutral" id="putWall">&mdash;</span>
+    <span class="sub" id="putWallNext"></span>
   </div>
   <div class="metric">
     <span class="lbl">Net GEX</span>
@@ -460,7 +462,7 @@ tr:hover { background: var(--bg3); }
 <div class="order-section">
   <div class="toggle-row">
     <label class="toggle"><input type="checkbox" id="dry-run-toggle"> Dry Run</label>
-    <label class="toggle"><input type="checkbox" id="confirm-toggle" checked> Confirm</label>
+    <label class="toggle"><input type="checkbox" id="confirm-toggle"> Confirm</label>
   </div>
 </div>
 
@@ -538,8 +540,9 @@ tr:hover { background: var(--bg3); }
   // --- DOM refs ---
   const $ = id => document.getElementById(id);
   const connDot = $('connDot'), connLabel = $('connLabel');
-  const spot = $('spot'), zeroGamma = $('zeroGamma');
+  const crossGex = $('crossGex'), crossGexLabel = $('crossGexLabel'), zeroGamma = $('zeroGamma');
   const callWall = $('callWall'), putWall = $('putWall');
+  const callWallNext = $('callWallNext'), putWallNext = $('putWallNext');
   const netGex = $('netGex'), netGexDelta = $('netGexDelta');
   const netGexOI = $('netGexOI');
   const gexDeltaEl = $('gexDelta');
@@ -682,12 +685,33 @@ tr:hover { background: var(--bg3); }
     });
   }
 
+  // --- Format wall ladder next candidates ---
+  function fmtWallNext(ladder) {
+    if (!ladder || !ladder.next || !ladder.next.length) return '';
+    return ladder.next.map(function(e) {
+      var pct = typeof e.pct === 'number' ? e.pct.toFixed(0) + '%' : '';
+      return fmtPrice(e.strike) + ' ' + pct;
+    }).join('  \u00B7  ');
+  }
+
   // --- GEX snapshot display ---
   function onSnapshot(data) {
-    spot.textContent = fmtPrice(data.spot); spot.className = 'val neutral';
+    // Cross-symbol net GEX (e.g. ES_SPX when viewing NQ_NDX)
+    if (data.cross_symbol) {
+      var label = data.cross_symbol.replace('_', '/') + ' Net GEX';
+      crossGexLabel.textContent = label;
+      crossGex.textContent = fmtBn(data.cross_net_gex);
+      crossGex.className = 'val ' + valClass(data.cross_net_gex);
+    } else {
+      crossGexLabel.textContent = 'Spot';
+      crossGex.textContent = fmtPrice(data.spot);
+      crossGex.className = 'val neutral';
+    }
     zeroGamma.textContent = fmtPrice(data.zero_gamma); zeroGamma.className = 'val neutral';
     callWall.textContent = fmtPrice(data.major_pos_vol); callWall.className = 'val neutral';
+    callWallNext.textContent = fmtWallNext(data.call_wall_ladder);
     putWall.textContent = fmtPrice(data.major_neg_vol); putWall.className = 'val neutral';
+    putWallNext.textContent = fmtWallNext(data.put_wall_ladder);
     netGex.textContent = fmtBn(data.net_gex); netGex.className = 'val ' + valClass(data.net_gex);
     netGexOI.textContent = fmtBn(data.sum_gex_oi); netGexOI.className = 'val ' + valClass(data.sum_gex_oi);
     var drr = data.delta_risk_reversal;
@@ -734,7 +758,7 @@ tr:hover { background: var(--bg3); }
   }
   var ttHeaders = { 'Content-Type': 'application/json', 'X-API-Key': API_KEY };
 
-  var orderState = { symbol: 'MNQ', quantity: 2, symbols: [], presets: [], dryRun: true, confirmOrders: true };
+  var orderState = { symbol: 'MNQ', quantity: 2, symbols: [], presets: [], dryRun: true, confirmOrders: false };
 
   // --- TT API helper ---
   function ttApi(method, path, body) {

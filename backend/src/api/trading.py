@@ -6,6 +6,7 @@ import os
 from decimal import Decimal
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel, Field
 
@@ -158,7 +159,10 @@ async def get_config(_=Depends(verify_api_key)):
 async def get_account(_=Depends(verify_api_key)):
     """Account summary: net liq, buying power, positions."""
     tt = get_tt()
-    summary = await asyncio.to_thread(tt.get_account_summary)
+    try:
+        summary = await asyncio.to_thread(tt.get_account_summary)
+    except (httpx.ConnectTimeout, httpx.ConnectError, ConnectionError, TimeoutError) as exc:
+        raise HTTPException(503, f"TastyTrade API unreachable: {exc}") from exc
     return {
         "account_number": summary.account_number,
         "nickname": summary.nickname,
@@ -173,7 +177,10 @@ async def get_account(_=Depends(verify_api_key)):
 async def get_positions(_=Depends(verify_api_key)):
     """Current open positions."""
     tt = get_tt()
-    positions = await asyncio.to_thread(tt.get_positions)
+    try:
+        positions = await asyncio.to_thread(tt.get_positions)
+    except (httpx.ConnectTimeout, httpx.ConnectError, ConnectionError, TimeoutError) as exc:
+        raise HTTPException(503, f"TastyTrade API unreachable: {exc}") from exc
     return {"positions": positions}
 
 
@@ -181,7 +188,10 @@ async def get_positions(_=Depends(verify_api_key)):
 async def get_orders(_=Depends(verify_api_key)):
     """Open / working orders."""
     tt = get_tt()
-    orders = await asyncio.to_thread(tt.get_orders)
+    try:
+        orders = await asyncio.to_thread(tt.get_orders)
+    except (httpx.ConnectTimeout, httpx.ConnectError, ConnectionError, TimeoutError) as exc:
+        raise HTTPException(503, f"TastyTrade API unreachable: {exc}") from exc
     return {"orders": orders}
 
 
@@ -189,15 +199,18 @@ async def get_orders(_=Depends(verify_api_key)):
 async def place_order(req: OrderRequest, _=Depends(verify_api_key)):
     """Place a market order with TP (and optional SL)."""
     tt = get_tt()
-    result = await asyncio.to_thread(
-        tt.place_market_order_with_tp,
-        symbol=req.symbol,
-        action=req.action,
-        quantity=req.quantity,
-        tp_ticks=req.tp_ticks,
-        sl_ticks=req.sl_ticks,
-        dry_run=req.dry_run,
-    )
+    try:
+        result = await asyncio.to_thread(
+            tt.place_market_order_with_tp,
+            symbol=req.symbol,
+            action=req.action,
+            quantity=req.quantity,
+            tp_ticks=req.tp_ticks,
+            sl_ticks=req.sl_ticks,
+            dry_run=req.dry_run,
+        )
+    except (httpx.ConnectTimeout, httpx.ConnectError, ConnectionError, TimeoutError) as exc:
+        raise HTTPException(503, f"TastyTrade API unreachable: {exc}") from exc
     return {"result": result}
 
 
@@ -205,7 +218,10 @@ async def place_order(req: OrderRequest, _=Depends(verify_api_key)):
 async def flatten(req: FlattenRequest, _=Depends(verify_api_key)):
     """Flatten entire position for a symbol."""
     tt = get_tt()
-    result = await asyncio.to_thread(tt.flatten_position, req.symbol, dry_run=req.dry_run)
+    try:
+        result = await asyncio.to_thread(tt.flatten_position, req.symbol, dry_run=req.dry_run)
+    except (httpx.ConnectTimeout, httpx.ConnectError, ConnectionError, TimeoutError) as exc:
+        raise HTTPException(503, f"TastyTrade API unreachable: {exc}") from exc
     return result
 
 
@@ -213,7 +229,10 @@ async def flatten(req: FlattenRequest, _=Depends(verify_api_key)):
 async def cancel_order(req: CancelRequest, _=Depends(verify_api_key)):
     """Cancel a single order by ID."""
     tt = get_tt()
-    result = await asyncio.to_thread(tt.cancel_order, req.order_id)
+    try:
+        result = await asyncio.to_thread(tt.cancel_order, req.order_id)
+    except (httpx.ConnectTimeout, httpx.ConnectError, ConnectionError, TimeoutError) as exc:
+        raise HTTPException(503, f"TastyTrade API unreachable: {exc}") from exc
     return {"result": result}
 
 
@@ -221,7 +240,10 @@ async def cancel_order(req: CancelRequest, _=Depends(verify_api_key)):
 async def cancel_all_orders(req: FlattenRequest, _=Depends(verify_api_key)):
     """Cancel all open orders for a symbol."""
     tt = get_tt()
-    orders = await asyncio.to_thread(tt.get_orders)
+    try:
+        orders = await asyncio.to_thread(tt.get_orders)
+    except (httpx.ConnectTimeout, httpx.ConnectError, ConnectionError, TimeoutError) as exc:
+        raise HTTPException(503, f"TastyTrade API unreachable: {exc}") from exc
     cancelled = []
     search = req.symbol.upper().lstrip("/")
     for order in orders:
@@ -251,7 +273,10 @@ async def cancel_all_orders(req: FlattenRequest, _=Depends(verify_api_key)):
 async def list_accounts(_=Depends(verify_api_key)):
     """List all available TastyTrade accounts."""
     tt = get_tt()
-    accounts = await asyncio.to_thread(tt.get_accounts)
+    try:
+        accounts = await asyncio.to_thread(tt.get_accounts)
+    except (httpx.ConnectTimeout, httpx.ConnectError, ConnectionError, TimeoutError) as exc:
+        raise HTTPException(503, f"TastyTrade API unreachable: {exc}") from exc
     active = tt.active_account
     return {"accounts": accounts, "active_account": active}
 
@@ -260,10 +285,16 @@ async def list_accounts(_=Depends(verify_api_key)):
 async def switch_account(req: SwitchAccountRequest, _=Depends(verify_api_key)):
     """Switch the active trading account."""
     tt = get_tt()
-    ok = await asyncio.to_thread(tt.set_active_account, req.account_number)
+    try:
+        ok = await asyncio.to_thread(tt.set_active_account, req.account_number)
+    except (httpx.ConnectTimeout, httpx.ConnectError, ConnectionError, TimeoutError) as exc:
+        raise HTTPException(503, f"TastyTrade API unreachable: {exc}") from exc
     if not ok:
         raise HTTPException(400, f"Account {req.account_number} not found")
-    summary = await asyncio.to_thread(tt.get_account_summary)
+    try:
+        summary = await asyncio.to_thread(tt.get_account_summary)
+    except (httpx.ConnectTimeout, httpx.ConnectError, ConnectionError, TimeoutError) as exc:
+        raise HTTPException(503, f"TastyTrade API unreachable: {exc}") from exc
     return {
         "account_number": summary.account_number,
         "nickname": summary.nickname,
