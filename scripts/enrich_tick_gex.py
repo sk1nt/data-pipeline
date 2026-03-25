@@ -545,8 +545,8 @@ def main():
     )
     parser.add_argument(
         "--scid-file",
-        default="/mnt/c/SierraChart/Data/MNQZ25_FUT_CME.scid",
-        help="Path to SCID file (default: MNQ Z25)",
+        default="/mnt/c/SierraChart/Data/MNQM26_FUT_CME.scid",
+        help="Path to SCID file (default: MNQ M26)",
     )
 
     mode = parser.add_mutually_exclusive_group(required=True)

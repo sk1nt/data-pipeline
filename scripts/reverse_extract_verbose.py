@@ -30,7 +30,7 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Verbose reverse extraction for MNQ ticks and depth"
     )
-    p.add_argument("--scid-file", default="/mnt/c/SierraChart/Data/MNQZ25_FUT_CME.scid")
+    p.add_argument("--scid-file", default="/mnt/c/SierraChart/Data/MNQM26_FUT_CME.scid")
     p.add_argument("--depth-dir", default="/mnt/c/SierraChart/Data/MarketDepthData")
     p.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
     p.add_argument("--end", required=True, help="End date YYYY-MM-DD")
@@ -115,7 +115,7 @@ def main():
             log.info("Processing day %s", day_str)
 
             # parse depth snapshots (if present) and stream them into chunked parquet parts
-            depth_path = os.path.join(depth_dir, f"MNQZ25_FUT_CME.{day_str}.depth")
+            depth_path = os.path.join(depth_dir, f"MNQM26_FUT_CME.{day_str}.depth")
             snaps_timestamps = []  # lightweight list of snapshot timestamps (for interleaving)
             day_out_dir = parquet_dir / current.strftime("%Y%m%d")
             day_out_dir.mkdir(parents=True, exist_ok=True)

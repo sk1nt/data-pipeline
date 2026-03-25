@@ -120,6 +120,9 @@ redis/dump.rdb
 redis/*.log
 data/
 
+# Legal (private, never sync)
+legal/
+
 # Legacy ML artifacts (now live in dedicated repo)
 # Keep ignoring stray experiment/model folders at root to avoid accidental commits.
 experiments/
