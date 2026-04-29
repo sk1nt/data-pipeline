@@ -146,18 +146,20 @@ def _check_volume_spike(
 
 
 def _check_gex_shift(
-    event: SocialEvent, signal: MarketSignalSnapshot, pct_threshold: float
+    event: SocialEvent, signal: MarketSignalSnapshot, abs_threshold: float
 ) -> Optional[str]:
     if (
-        signal.gex_change_pct is not None
-        and abs(signal.gex_change_pct) >= pct_threshold
+        signal.net_gex is not None
+        and signal.prev_net_gex is not None
+        and abs(signal.net_gex - signal.prev_net_gex) >= abs_threshold
     ):
-        direction = "⬆️" if signal.gex_change_pct > 0 else "⬇️"
+        delta = signal.net_gex - signal.prev_net_gex
+        direction = "⬆️" if delta > 0 else "⬇️"
         return (
             f"🧲 **NQ GEX SHIFT** {direction} after social event\n"
             f"> {event.text[:120]}\n"
             f"NQ Net GEX: {signal.prev_net_gex:.0f} → {signal.net_gex:.0f} "
-            f"(**{signal.gex_change_pct:+.1f}%**)"
+            f"(Δ **{delta:+.0f}**)"
         )
     return None
 
@@ -192,14 +194,14 @@ class CorrelationEngine:
         *,
         window_seconds: int = 300,
         volume_spike_multiplier: float = 2.0,
-        gex_shift_pct: float = 15.0,
+        gex_shift_abs: float = 1500,
         price_move_pct: float = 0.3,
         cooldown_seconds: int = 300,
     ) -> None:
         self.redis = redis_client
         self.window = EventWindow(window_seconds)
         self.volume_multiplier = volume_spike_multiplier
-        self.gex_pct = gex_shift_pct
+        self.gex_abs = gex_shift_abs
         self.price_pct = price_move_pct
         self.cooldown = cooldown_seconds
         self._cooldowns: Dict[str, datetime] = {}  # event_id:rule → last_alert_time
@@ -372,7 +374,7 @@ class CorrelationEngine:
 
         # Rule 2: GEX shift — only during RTH core hours (9:45 AM – 3:00 PM ET)
         if gex_active:
-            msg = _check_gex_shift(event, signal, self.gex_pct)
+            msg = _check_gex_shift(event, signal, self.gex_abs)
             if msg and not self._is_cooled_down(event.event_id, "gex_shift"):
                 triggered_signals.append("gex_shift")
                 messages.append(msg)

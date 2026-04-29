@@ -35,7 +35,7 @@ def _make_social_event(text="Tariffs on China raised to 100%", score=3, event_id
 def _make_engine(
     *,
     volume_spike_multiplier=2.0,
-    gex_shift_pct=15.0,
+    gex_shift_abs=1500,
     price_move_pct=0.3,
     cooldown_seconds=300,
     window_seconds=300,
@@ -46,7 +46,7 @@ def _make_engine(
     return CorrelationEngine(
         redis_client=mock_redis,
         volume_spike_multiplier=volume_spike_multiplier,
-        gex_shift_pct=gex_shift_pct,
+        gex_shift_abs=gex_shift_abs,
         price_move_pct=price_move_pct,
         cooldown_seconds=cooldown_seconds,
         window_seconds=window_seconds,
@@ -128,12 +128,11 @@ class TestGexShift:
         event = _make_social_event()
         signal = MarketSignalSnapshot(
             timestamp=datetime.now(timezone.utc),
-            symbol="ES_SPX",
-            net_gex=1150,
+            symbol="NQ_NDX",
+            net_gex=3000,
             prev_net_gex=1000,
-            gex_change_pct=15.0,
         )
-        msg = _check_gex_shift(event, signal, pct_threshold=15.0)
+        msg = _check_gex_shift(event, signal, abs_threshold=1500)
         assert msg is not None
         assert "GEX SHIFT" in msg
 
@@ -141,9 +140,10 @@ class TestGexShift:
         event = _make_social_event()
         signal = MarketSignalSnapshot(
             timestamp=datetime.now(timezone.utc),
-            gex_change_pct=5.0,
+            net_gex=1000,
+            prev_net_gex=500,
         )
-        msg = _check_gex_shift(event, signal, pct_threshold=15.0)
+        msg = _check_gex_shift(event, signal, abs_threshold=1500)
         assert msg is None
 
 
@@ -181,8 +181,7 @@ class TestConfluence:
             volume_ratio=3.0,
             volume_1min=6000,
             volume_20bar_avg=2000,
-            gex_change_pct=20.0,
-            net_gex=1200,
+            net_gex=3000,
             prev_net_gex=1000,
             price_change_pct=0.5,
             price=20100,
@@ -190,7 +189,7 @@ class TestConfluence:
         )
         # All rules should fire
         vol_msg = _check_volume_spike(event, signal, 2.0)
-        gex_msg = _check_gex_shift(event, signal, 15.0)
+        gex_msg = _check_gex_shift(event, signal, 1500)
         price_msg = _check_price_move(event, signal, 0.3)
 
         assert vol_msg is not None
@@ -205,11 +204,12 @@ class TestConfluence:
             volume_ratio=3.0,
             volume_1min=6000,
             volume_20bar_avg=2000,
-            gex_change_pct=5.0,  # below threshold
+            net_gex=1000,
+            prev_net_gex=500,
             price_change_pct=0.1,  # below threshold
         )
         vol_msg = _check_volume_spike(event, signal, 2.0)
-        gex_msg = _check_gex_shift(event, signal, 15.0)
+        gex_msg = _check_gex_shift(event, signal, 1500)
         price_msg = _check_price_move(event, signal, 0.3)
 
         triggered = [m for m in [vol_msg, gex_msg, price_msg] if m is not None]
@@ -241,12 +241,11 @@ class TestExactThreshold:
         event = _make_social_event()
         signal = MarketSignalSnapshot(
             timestamp=datetime.now(timezone.utc),
-            gex_change_pct=-20.0,
-            net_gex=800,
-            prev_net_gex=1000,
+            net_gex=0,
+            prev_net_gex=2000,
         )
-        msg = _check_gex_shift(event, signal, 15.0)
-        assert msg is not None  # abs(-20) >= 15
+        msg = _check_gex_shift(event, signal, 1500)
+        assert msg is not None  # abs(0 - 2000) = 2000 >= 1500
 
 
 # ---------------------------------------------------------------------------
@@ -415,13 +414,13 @@ class TestCheckCorrelationsPublish:
         assert "volume_spike" in published["signals_triggered"]
 
     def test_confluence_sets_high_severity(self, _gex_win):
-        engine, mock_redis = _make_engine(gex_shift_pct=5.0, price_move_pct=0.1)
+        engine, mock_redis = _make_engine(gex_shift_abs=100, price_move_pct=0.1)
         event = _make_social_event(event_id="conf_test")
         signal = MarketSignalSnapshot(
             timestamp=datetime.now(timezone.utc),
             symbol="MNQ",
             volume_ratio=3.0, volume_1min=6000, volume_20bar_avg=2000,
-            gex_change_pct=10.0, net_gex=1100, prev_net_gex=1000,
+            net_gex=1300, prev_net_gex=1000,
             price_change_pct=0.5, price=20100, price_2min_ago=20000,
         )
         engine.window.add_signal(signal)
