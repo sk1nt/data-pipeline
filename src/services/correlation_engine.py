@@ -7,9 +7,10 @@ import json
 import logging
 import uuid
 from collections import deque
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +29,21 @@ CORRELATION_ALERT_CHANNEL = "correlation:alerts:stream"
 
 # Only correlate TastyTrade data for these symbols
 ALLOWED_SYMBOLS = {"MNQ", "MES"}
+
+# Only use GEX snapshots for this underlying (NQ / NDX)
+GEX_SYMBOL = "NQ_NDX"
+
+# GEX is unreliable pre-open and late afternoon; only correlate during RTH core hours
+_ET = ZoneInfo("America/New_York")
+_GEX_WINDOW_START = time(9, 45)   # 9:45 AM ET
+_GEX_WINDOW_END   = time(15, 0)   # 3:00 PM ET
+
+
+def _in_gex_window() -> bool:
+    """Return True when GEX readings are reliable (9:45 AM – 3:00 PM ET)."""
+    now_et = datetime.now(_ET).time()
+    return _GEX_WINDOW_START <= now_et < _GEX_WINDOW_END
+
 
 # TastyTrade trade channel (volume + price source)
 TASTYTRADE_TRADE_CHANNEL = "market_data:tastytrade:trades"
@@ -138,10 +154,10 @@ def _check_gex_shift(
     ):
         direction = "⬆️" if signal.gex_change_pct > 0 else "⬇️"
         return (
-            f"🧲 **GEX SHIFT** {direction} after social event\n"
+            f"🧲 **NQ GEX SHIFT** {direction} after social event\n"
             f"> {event.text[:120]}\n"
-            f"Net GEX: {signal.prev_net_gex:.0f} → {signal.net_gex:.0f} "
-            f"(**{signal.gex_change_pct:+.1f}%**) | {signal.symbol}"
+            f"NQ Net GEX: {signal.prev_net_gex:.0f} → {signal.net_gex:.0f} "
+            f"(**{signal.gex_change_pct:+.1f}%**)"
         )
     return None
 
@@ -261,6 +277,10 @@ class CorrelationEngine:
             self._check_correlations(event)
 
         elif channel == "gex:snapshot:stream":
+            # Only use NQ_NDX GEX snapshots
+            snapshot_symbol = (data.get("symbol") or data.get("ticker") or "").upper()
+            if snapshot_symbol != GEX_SYMBOL:
+                return
             net_gex = data.get("net_gex") or data.get("sum_gex_vol")
             if net_gex is not None:
                 prev = self._last_gex
@@ -270,7 +290,7 @@ class CorrelationEngine:
                     signal.prev_net_gex = prev
                     signal.net_gex = self._last_gex
                     signal.gex_change_pct = ((self._last_gex - prev) / abs(prev)) * 100
-                    signal.symbol = data.get("ticker", "")
+                    signal.symbol = GEX_SYMBOL
                 self.window.add_signal(signal)
                 self._check_correlations_for_market_signal()
 
@@ -342,6 +362,7 @@ class CorrelationEngine:
 
         triggered_signals: List[str] = []
         messages: List[str] = []
+        gex_active = _in_gex_window()
 
         # Rule 1: Volume spike
         msg = _check_volume_spike(event, signal, self.volume_multiplier)
@@ -349,11 +370,12 @@ class CorrelationEngine:
             triggered_signals.append("volume_spike")
             messages.append(msg)
 
-        # Rule 2: GEX shift
-        msg = _check_gex_shift(event, signal, self.gex_pct)
-        if msg and not self._is_cooled_down(event.event_id, "gex_shift"):
-            triggered_signals.append("gex_shift")
-            messages.append(msg)
+        # Rule 2: GEX shift — only during RTH core hours (9:45 AM – 3:00 PM ET)
+        if gex_active:
+            msg = _check_gex_shift(event, signal, self.gex_pct)
+            if msg and not self._is_cooled_down(event.event_id, "gex_shift"):
+                triggered_signals.append("gex_shift")
+                messages.append(msg)
 
         # Rule 3: Price move
         msg = _check_price_move(event, signal, self.price_pct)
@@ -362,6 +384,12 @@ class CorrelationEngine:
             messages.append(msg)
 
         if not triggered_signals:
+            return
+
+        # Outside RTH core hours: require both volume spike AND price move (3-tuple
+        # confirmation: social event + volume + price).  Single-signal alerts without
+        # GEX context are too noisy pre-open or late in the session.
+        if not gex_active and len(triggered_signals) < 2:
             return
 
         # Rule 5: Confluence if >= 2 signals

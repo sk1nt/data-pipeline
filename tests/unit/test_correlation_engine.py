@@ -253,8 +253,9 @@ class TestExactThreshold:
 # Cooldown
 # ---------------------------------------------------------------------------
 
+@patch("src.services.correlation_engine._in_gex_window", return_value=True)
 class TestCooldown:
-    def test_same_event_and_rule_suppressed_within_cooldown(self):
+    def test_same_event_and_rule_suppressed_within_cooldown(self, _gex_win):
         engine, mock_redis = _make_engine(cooldown_seconds=300)
         event = _make_social_event(event_id="evt_cd")
         signal = MarketSignalSnapshot(
@@ -272,7 +273,7 @@ class TestCooldown:
         engine._check_correlations(event)
         assert mock_redis.client.publish.call_count == 1
 
-    def test_different_events_not_affected_by_cooldown(self):
+    def test_different_events_not_affected_by_cooldown(self, _gex_win):
         engine, mock_redis = _make_engine(cooldown_seconds=300)
         signal = MarketSignalSnapshot(
             timestamp=datetime.now(timezone.utc),
@@ -287,7 +288,7 @@ class TestCooldown:
 
         assert mock_redis.client.publish.call_count == 3
 
-    def test_expired_cooldown_allows_re_fire(self):
+    def test_expired_cooldown_allows_re_fire(self, _gex_win):
         engine, mock_redis = _make_engine(cooldown_seconds=1)
         event = _make_social_event(event_id="evt_exp")
         signal = MarketSignalSnapshot(
@@ -393,8 +394,9 @@ class TestBuildSignal:
 # Full engine: _check_correlations publishes correct payload
 # ---------------------------------------------------------------------------
 
+@patch("src.services.correlation_engine._in_gex_window", return_value=True)
 class TestCheckCorrelationsPublish:
-    def test_publishes_alert_to_redis_channel(self):
+    def test_publishes_alert_to_redis_channel(self, _gex_win):
         engine, mock_redis = _make_engine()
         event = _make_social_event(event_id="pub_test")
         signal = MarketSignalSnapshot(
@@ -412,7 +414,7 @@ class TestCheckCorrelationsPublish:
         assert published["alert_type"] == "volume_spike"
         assert "volume_spike" in published["signals_triggered"]
 
-    def test_confluence_sets_high_severity(self):
+    def test_confluence_sets_high_severity(self, _gex_win):
         engine, mock_redis = _make_engine(gex_shift_pct=5.0, price_move_pct=0.1)
         event = _make_social_event(event_id="conf_test")
         signal = MarketSignalSnapshot(
@@ -431,13 +433,13 @@ class TestCheckCorrelationsPublish:
         assert published["alert_type"] == "confluence"
         assert len(published["signals_triggered"]) >= 2
 
-    def test_no_publish_when_no_signal(self):
+    def test_no_publish_when_no_signal(self, _gex_win):
         engine, mock_redis = _make_engine()
         event = _make_social_event(event_id="nosig_test")
         engine._check_correlations(event)
         assert mock_redis.client.publish.call_count == 0
 
-    def test_no_publish_when_below_all_thresholds(self):
+    def test_no_publish_when_below_all_thresholds(self, _gex_win):
         engine, mock_redis = _make_engine()
         event = _make_social_event(event_id="below_test")
         signal = MarketSignalSnapshot(
@@ -450,7 +452,7 @@ class TestCheckCorrelationsPublish:
         engine._check_correlations(event)
         assert mock_redis.client.publish.call_count == 0
 
-    def test_published_payload_includes_social_event_fields(self):
+    def test_published_payload_includes_social_event_fields(self, _gex_win):
         engine, mock_redis = _make_engine()
         event = _make_social_event(event_id="field_test")
         signal = MarketSignalSnapshot(
@@ -472,8 +474,9 @@ class TestCheckCorrelationsPublish:
 # Market-signal-triggered lookback
 # ---------------------------------------------------------------------------
 
+@patch("src.services.correlation_engine._in_gex_window", return_value=True)
 class TestMarketSignalLookback:
-    def test_new_signal_checks_recent_social_events(self):
+    def test_new_signal_checks_recent_social_events(self, _gex_win):
         """A trade tick arriving after a social event should still correlate."""
         engine, mock_redis = _make_engine()
         event = _make_social_event(event_id="lookback_evt")
@@ -488,7 +491,7 @@ class TestMarketSignalLookback:
 
         assert mock_redis.client.publish.call_count == 1
 
-    def test_expired_social_event_not_correlated(self):
+    def test_expired_social_event_not_correlated(self, _gex_win):
         """Social events older than window_seconds are ignored on market tick."""
         engine, mock_redis = _make_engine(window_seconds=60)
         old_event = SocialEvent(
