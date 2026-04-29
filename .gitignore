@@ -122,6 +122,7 @@ data/
 
 # Legal (private, never sync)
 legal/
+trading/
 
 # Legacy ML artifacts (now live in dedicated repo)
 # Keep ignoring stray experiment/model folders at root to avoid accidental commits.

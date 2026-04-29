@@ -18,6 +18,14 @@ class SocialSource(str, Enum):
     NEWS_RSS = "news_rss"
 
 
+class Sentiment(str, Enum):
+    """Directional sentiment of a news headline."""
+
+    BULLISH = "bullish"
+    BEARISH = "bearish"
+    NEUTRAL = "neutral"
+
+
 class KeywordCategory(BaseModel):
     """A category of keywords with a weight for scoring."""
 
@@ -40,6 +48,7 @@ class SocialEvent(BaseModel):
     text: str = Field(min_length=1)
     url: Optional[str] = None
     relevance_score: int = Field(default=0, ge=0)
+    sentiment: Sentiment = Field(default=Sentiment.NEUTRAL, description="Directional market sentiment")
     keywords_matched: List[str] = Field(default_factory=list)
     categories_matched: List[str] = Field(default_factory=list)
 
@@ -185,4 +194,24 @@ DEFAULT_KEYWORD_CATEGORIES: List[KeywordCategory] = [
         ],
         weight=1,
     ),
+]
+
+# Sentiment keyword lists for directional scoring
+BULLISH_KEYWORDS: List[str] = [
+    "rally", "surge", "soar", "jump", "gain", "rise", "climb",
+    "bull market", "all-time high", "record high", "breakout", "boom",
+    "rate cut", "dovish", "easing", "stimulus", "trade deal",
+    "beat expectations", "beats", "upgrade", "buy", "outperform",
+    "strong earnings", "better than expected", "upbeat", "optimism",
+    "recovery", "rebound", "green", "positive",
+]
+
+BEARISH_KEYWORDS: List[str] = [
+    "crash", "plunge", "tumble", "drop", "fall", "decline", "sink",
+    "bear market", "sell-off", "selloff", "correction", "slump",
+    "rate hike", "hawkish", "tightening", "tariff", "trade war",
+    "miss expectations", "misses", "downgrade", "sell", "underperform",
+    "weak earnings", "worse than expected", "warning", "recession",
+    "layoffs", "default", "crisis", "shutdown", "sanctions",
+    "inflation", "red", "negative", "fear", "panic",
 ]

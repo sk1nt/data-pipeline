@@ -222,6 +222,12 @@ class Settings(BaseSettings):
     social_feed_off_hours_interval_seconds: float = env_field(
         "SOCIAL_FEED_OFF_HOURS_INTERVAL_SECONDS", default=300.0
     )
+    social_feed_priority_interval_seconds: float = env_field(
+        "SOCIAL_FEED_PRIORITY_INTERVAL_SECONDS", default=10.0
+    )
+    social_feed_priority_handles: str = env_field(
+        "SOCIAL_FEED_PRIORITY_HANDLES", default="DeItaone,FirstSquawk,LiveSquawk,WatcherGuru,WhiteHouse,POTUS"
+    )
     social_min_score_threshold: float = env_field(
         "SOCIAL_MIN_SCORE_THRESHOLD", default=0.5
     )

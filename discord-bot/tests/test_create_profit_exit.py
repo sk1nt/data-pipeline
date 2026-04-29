@@ -33,7 +33,7 @@ async def test_create_profit_exit_uses_entry_price(monkeypatch):
 
     captured = {}
 
-    async def fake_place_limit_order(option, quantity, action, price):
+    async def fake_place_limit_order(option, quantity, action, price, **kwargs):
         captured["exit_price"] = price
         captured["quantity"] = quantity
         return "exit123"
@@ -69,7 +69,7 @@ async def test_create_profit_exit_looks_up_price_when_not_provided(monkeypatch):
 
     captured = {}
 
-    async def fake_place_limit_order(option, quantity, action, price):
+    async def fake_place_limit_order(option, quantity, action, price, **kwargs):
         captured["exit_price"] = price
         return "exit123"
 
@@ -106,7 +106,7 @@ async def test_create_profit_exit_prefers_fill_price(monkeypatch):
 
     captured = {}
 
-    async def fake_place_limit_order(option, quantity, action, price):
+    async def fake_place_limit_order(option, quantity, action, price, **kwargs):
         captured["exit_price"] = price
         return "exit123"
 
@@ -128,7 +128,7 @@ async def test_create_profit_exit_with_direct_entry_price(monkeypatch):
 
     captured = {}
 
-    async def fake_place_limit_order(option, quantity, action, price):
+    async def fake_place_limit_order(option, quantity, action, price, **kwargs):
         captured["exit_price"] = price
         captured["quantity"] = quantity
         return "exit456"

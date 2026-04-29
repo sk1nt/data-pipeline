@@ -43,7 +43,7 @@ def scorer():
 
 def _make_social_event(text: str, source: SocialSource = SocialSource.TWITTER, author: str = "@realDonaldTrump") -> SocialEvent:
     scorer = KeywordScorer()
-    score, keywords, categories = scorer.score(text)
+    score, keywords, categories, sentiment = scorer.score(text)
     return SocialEvent(
         event_id=uuid.uuid4().hex[:12],
         timestamp=datetime.now(timezone.utc),
@@ -54,6 +54,7 @@ def _make_social_event(text: str, source: SocialSource = SocialSource.TWITTER, a
         relevance_score=score,
         keywords_matched=keywords,
         categories_matched=categories,
+        sentiment=sentiment,
     )
 
 
@@ -262,3 +263,268 @@ class TestSerializationRoundtrip:
         assert deserialized["alert_type"] == "price_move"
         assert deserialized["social_event"]["text"] == event.text
         assert deserialized["market_signals"]["price_change_pct"] == -0.5
+
+
+# ---------------------------------------------------------------------------
+# Backfill realized impact
+# ---------------------------------------------------------------------------
+
+class TestBackfillRealizedImpact:
+    def test_backfill_updates_existing_row(self, alert_service):
+        event = _make_social_event("Tariffs on Canada announced")
+        signal = _make_signal(price_change_pct=0.6, price=21000.0, price_2min_ago=20874.0)
+        alert = CorrelationAlert(
+            alert_type="price_move",
+            social_event=event,
+            market_signals=signal,
+            signals_triggered=["price_move"],
+            message="price moved",
+            severity="medium",
+        )
+        payload = alert.model_dump(mode="json")
+        alert_service.log_correlation_event(payload, alert_fired=True)
+
+        alert_service.backfill_realized_impact(
+            social_event_id=event.event_id,
+            realized_impact_score=72.5,
+            price_t0=21000.0,
+            price_t15=21315.0,
+            price_ticker="MNQ",
+            is_noise=False,
+        )
+
+        rows = alert_service.query_events(limit=1)
+        assert len(rows) == 1
+        assert rows[0]["realized_impact_score"] == pytest.approx(72.5)
+        assert rows[0]["price_ticker"] == "MNQ"
+        assert rows[0]["is_noise"] is False
+
+    def test_backfill_marks_noise(self, alert_service):
+        event = _make_social_event("Jimmy Fallon jokes about the Fed")
+        signal = _make_signal()
+        alert = CorrelationAlert(
+            alert_type="volume_spike",
+            social_event=event,
+            market_signals=signal,
+            signals_triggered=["volume_spike"],
+            message="vol spike",
+            severity="medium",
+        )
+        payload = alert.model_dump(mode="json")
+        alert_service.log_correlation_event(payload, alert_fired=True)
+
+        alert_service.backfill_realized_impact(
+            social_event_id=event.event_id,
+            realized_impact_score=2.1,
+            price_t0=20000.0,
+            price_t15=20005.0,
+            price_ticker="MES",
+            is_noise=True,
+        )
+
+        rows = alert_service.query_events(limit=1)
+        assert rows[0]["is_noise"] is True
+        assert rows[0]["realized_impact_score"] == pytest.approx(2.1)
+
+
+# ---------------------------------------------------------------------------
+# Date-range queries
+# ---------------------------------------------------------------------------
+
+class TestQueryDateFilters:
+    def test_start_date_excludes_older_rows(self, alert_service):
+        import time
+        from datetime import timedelta
+
+        old_event = _make_social_event("Old rate hike news")
+        old_signal = _make_signal(volume_ratio=3.0, volume_1min=6000, volume_20bar_avg=2000)
+        old_alert = CorrelationAlert(
+            alert_type="volume_spike",
+            social_event=old_event,
+            market_signals=old_signal,
+            signals_triggered=["volume_spike"],
+            message="old",
+            severity="medium",
+        )
+        old_payload = old_alert.model_dump(mode="json")
+        # Backdate the timestamp
+        old_payload["timestamp"] = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        alert_service.log_correlation_event(old_payload, alert_fired=True)
+
+        new_event = _make_social_event("New tariff news just breaking")
+        new_signal = _make_signal(volume_ratio=2.5, volume_1min=5000, volume_20bar_avg=2000)
+        new_alert = CorrelationAlert(
+            alert_type="volume_spike",
+            social_event=new_event,
+            market_signals=new_signal,
+            signals_triggered=["volume_spike"],
+            message="new",
+            severity="medium",
+        )
+        alert_service.log_correlation_event(new_alert.model_dump(mode="json"), alert_fired=True)
+
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+        results = alert_service.query_events(start=cutoff, limit=10)
+        assert len(results) == 1
+        assert "New tariff" in results[0]["social_text"]
+
+    def test_end_date_excludes_newer_rows(self, alert_service):
+        from datetime import timedelta
+
+        # Insert a row with a timestamp 2h ago and one now
+        old_event = _make_social_event("Rate cut expected")
+        old_signal = _make_signal(price_change_pct=0.5, price=21000.0, price_2min_ago=20895.0)
+        old_alert = CorrelationAlert(
+            alert_type="price_move",
+            social_event=old_event,
+            market_signals=old_signal,
+            signals_triggered=["price_move"],
+            message="old price move",
+            severity="medium",
+        )
+        old_payload = old_alert.model_dump(mode="json")
+        old_payload["timestamp"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        alert_service.log_correlation_event(old_payload, alert_fired=True)
+
+        new_event = _make_social_event("Breaking: emergency rate cut")
+        new_signal = _make_signal(price_change_pct=0.8, price=21200.0, price_2min_ago=21032.0)
+        new_alert = CorrelationAlert(
+            alert_type="price_move",
+            social_event=new_event,
+            market_signals=new_signal,
+            signals_triggered=["price_move"],
+            message="new price move",
+            severity="medium",
+        )
+        alert_service.log_correlation_event(new_alert.model_dump(mode="json"), alert_fired=True)
+
+        end = datetime.now(timezone.utc) - timedelta(hours=1)
+        results = alert_service.query_events(end=end, limit=10)
+        assert len(results) == 1
+        assert "Rate cut expected" in results[0]["social_text"]
+
+
+# ---------------------------------------------------------------------------
+# Security: sanitization in formatted messages
+# ---------------------------------------------------------------------------
+
+class TestAlertMessageSecurity:
+    def test_sanitizes_at_here(self, alert_service):
+        event = _make_social_event("@here everyone check this")
+        alert = CorrelationAlert(
+            alert_type="volume_spike",
+            social_event=event,
+            market_signals=_make_signal(),
+            signals_triggered=["volume_spike"],
+            message="vol",
+            severity="medium",
+        )
+        payload = alert.model_dump(mode="json")
+        payload["social_event"]["author"] = "@here dangerous"
+        msg = alert_service.format_alert_message(payload)
+        assert "@here" not in msg
+
+    def test_sanitizes_at_everyone_in_author(self, alert_service):
+        event = _make_social_event("Normal news headline")
+        alert = CorrelationAlert(
+            alert_type="gex_shift",
+            social_event=event,
+            market_signals=_make_signal(gex_change_pct=20.0, net_gex=1200, prev_net_gex=1000),
+            signals_triggered=["gex_shift"],
+            message="gex",
+            severity="medium",
+        )
+        payload = alert.model_dump(mode="json")
+        payload["social_event"]["author"] = "@everyone danger"
+        msg = alert_service.format_alert_message(payload)
+        assert "@everyone" not in msg
+
+    def test_truncates_very_long_author(self, alert_service):
+        event = _make_social_event("Normal story")
+        alert = CorrelationAlert(
+            alert_type="volume_spike",
+            social_event=event,
+            market_signals=_make_signal(volume_ratio=3.0),
+            signals_triggered=["volume_spike"],
+            message="vol",
+            severity="medium",
+        )
+        payload = alert.model_dump(mode="json")
+        payload["social_event"]["author"] = "A" * 500
+        msg = alert_service.format_alert_message(payload)
+        # Author field should be truncated to 200 chars by _sanitize_text
+        assert "A" * 201 not in msg
+
+
+# ---------------------------------------------------------------------------
+# No market signal → no alert fired
+# ---------------------------------------------------------------------------
+
+class TestNoSignalNoAlert:
+    def test_volume_spike_rule_none_when_no_volume_data(self):
+        event = _make_social_event("Breaking tariff announcement")
+        signal = _make_signal()  # all None
+        msg = _check_volume_spike(event, signal, multiplier=2.0)
+        assert msg is None
+
+    def test_gex_shift_rule_none_when_no_gex_data(self):
+        event = _make_social_event("Fed minutes released")
+        signal = _make_signal()
+        msg = _check_gex_shift(event, signal, pct_threshold=5.0)
+        assert msg is None
+
+    def test_price_move_rule_none_when_no_price_data(self):
+        event = _make_social_event("China trade deal")
+        signal = _make_signal()
+        msg = _check_price_move(event, signal, pct_threshold=0.3)
+        assert msg is None
+
+
+# ---------------------------------------------------------------------------
+# Sentiment propagates into persisted row
+# ---------------------------------------------------------------------------
+
+class TestSentimentPersistence:
+    def test_bullish_event_text_survives_roundtrip(self, alert_service):
+        event = _make_social_event("Major rate cut announced, economy booming, markets rally")
+        signal = _make_signal(price_change_pct=0.6, price=21100.0, price_2min_ago=20974.0)
+        alert = CorrelationAlert(
+            alert_type="price_move",
+            social_event=event,
+            market_signals=signal,
+            signals_triggered=["price_move"],
+            message="price up",
+            severity="medium",
+        )
+        payload = alert.model_dump(mode="json")
+        alert_service.log_correlation_event(payload, alert_fired=True)
+
+        rows = alert_service.query_events(limit=1)
+        assert len(rows) == 1
+        # Text is stored (truncated to 500 chars)
+        assert rows[0]["social_text"][:50] == event.text[:50]
+
+    def test_multiple_alerts_ordered_newest_first(self, alert_service):
+        from datetime import timedelta
+        texts = ["First news", "Second news", "Third news"]
+        for i, text in enumerate(texts):
+            event = _make_social_event(text)
+            signal = _make_signal(volume_ratio=2.5 + i * 0.5,
+                                   volume_1min=5000 + i * 1000,
+                                   volume_20bar_avg=2000)
+            alert = CorrelationAlert(
+                alert_type="volume_spike",
+                social_event=event,
+                market_signals=signal,
+                signals_triggered=["volume_spike"],
+                message=f"vol {i}",
+                severity="medium",
+            )
+            alert_service.log_correlation_event(alert.model_dump(mode="json"), alert_fired=True)
+
+        rows = alert_service.query_events(limit=10)
+        assert len(rows) == 3
+        # Most recent inserted comes first (ORDER BY timestamp DESC)
+        assert "Third news" in rows[0]["social_text"]

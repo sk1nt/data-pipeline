@@ -98,7 +98,7 @@ class TradeBot(commands.Bot):
         self.correlation_alert_channel_ids = [
             int(x) for x in os.getenv(
                 "CORRELATION_ALERT_CHANNEL_IDS",
-                "1425136266676146236,1429940127899324487"
+                "1429940127899324487"
             ).split(",") if x.strip()
         ]
         self.gex_feed_enabled = bool(getattr(config, "gex_feed_enabled", False))

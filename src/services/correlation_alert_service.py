@@ -20,23 +20,38 @@ TABLE_NAME = "correlation_events"
 
 _CREATE_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-    timestamp       TIMESTAMP NOT NULL,
-    social_event_id VARCHAR NOT NULL,
-    social_source   VARCHAR NOT NULL,
-    social_author   VARCHAR NOT NULL,
-    social_text     VARCHAR,
-    social_score    INTEGER NOT NULL,
-    social_url      VARCHAR,
-    alert_type      VARCHAR,
-    alert_fired     BOOLEAN NOT NULL DEFAULT FALSE,
-    signals_triggered VARCHAR,
-    volume_ratio    DOUBLE,
-    gex_change_pct  DOUBLE,
-    price_change_pct DOUBLE,
-    config_snapshot VARCHAR,
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    timestamp              TIMESTAMP NOT NULL,
+    social_event_id        VARCHAR NOT NULL,
+    social_source          VARCHAR NOT NULL,
+    social_author          VARCHAR NOT NULL,
+    social_text            VARCHAR,
+    social_score           INTEGER NOT NULL,
+    social_url             VARCHAR,
+    alert_type             VARCHAR,
+    alert_fired            BOOLEAN NOT NULL DEFAULT FALSE,
+    signals_triggered      VARCHAR,
+    volume_ratio           DOUBLE,
+    gex_change_pct         DOUBLE,
+    price_change_pct       DOUBLE,
+    config_snapshot        VARCHAR,
+    created_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- Realized market impact (back-filled by MarketMoverAnalyzer)
+    realized_impact_score  DOUBLE,
+    price_t0               DOUBLE,
+    price_t15              DOUBLE,
+    price_ticker           VARCHAR,
+    is_noise               BOOLEAN
 );
 """
+
+# Columns added after the initial schema; safely ignored if already present.
+_MIGRATE_COLUMNS = [
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS realized_impact_score DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS price_t0              DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS price_t15             DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS price_ticker          VARCHAR",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS is_noise              BOOLEAN",
+]
 
 
 class CorrelationAlertService:
@@ -56,6 +71,11 @@ class CorrelationAlertService:
             self._ensure_dir()
             with closing(duckdb.connect(self.db_path)) as conn:
                 conn.execute(_CREATE_TABLE_SQL)
+                for stmt in _MIGRATE_COLUMNS:
+                    try:
+                        conn.execute(stmt)
+                    except Exception:
+                        pass  # column already exists or not supported — safe to ignore
         except Exception:
             LOGGER.exception("Failed to create correlation_events table")
 
@@ -95,8 +115,20 @@ class CorrelationAlertService:
         self,
         alert: Dict[str, Any],
         alert_fired: bool = True,
+        *,
+        realized_impact_score: Optional[float] = None,
+        price_t0: Optional[float] = None,
+        price_t15: Optional[float] = None,
+        price_ticker: Optional[str] = None,
+        is_noise: Optional[bool] = None,
     ) -> None:
-        """Persist a correlation event (alert or no-alert) to DuckDB."""
+        """Persist a correlation event (alert or no-alert) to DuckDB.
+
+        The ``realized_impact_*`` keyword arguments are populated asynchronously
+        by :class:`~src.services.market_mover_analyzer.MarketMoverAnalyzer` once
+        enough post-event market data exists.  They default to NULL on initial
+        insert and can be back-filled via :meth:`backfill_realized_impact`.
+        """
         try:
             social = alert.get("social_event", {})
             signals = alert.get("market_signals", {})
@@ -116,11 +148,49 @@ class CorrelationAlertService:
                 "gex_change_pct": signals.get("gex_change_pct"),
                 "price_change_pct": signals.get("price_change_pct"),
                 "config_snapshot": None,
+                "realized_impact_score": realized_impact_score,
+                "price_t0": price_t0,
+                "price_t15": price_t15,
+                "price_ticker": price_ticker,
+                "is_noise": is_noise,
             }
 
             self._insert_row(row)
         except Exception:
             LOGGER.exception("Failed to log correlation event")
+
+    def backfill_realized_impact(
+        self,
+        social_event_id: str,
+        realized_impact_score: float,
+        price_t0: Optional[float],
+        price_t15: Optional[float],
+        price_ticker: str,
+        is_noise: bool,
+    ) -> None:
+        """Update realized impact columns for an event already in the DB."""
+        try:
+            self._ensure_dir()
+            with closing(duckdb.connect(self.db_path)) as conn:
+                conn.execute(
+                    f"""
+                    UPDATE {TABLE_NAME}
+                    SET realized_impact_score = ?,
+                        price_t0             = ?,
+                        price_t15            = ?,
+                        price_ticker         = ?,
+                        is_noise             = ?
+                    WHERE social_event_id = ?
+                    """,
+                    [
+                        realized_impact_score, price_t0, price_t15,
+                        price_ticker, is_noise, social_event_id,
+                    ],
+                )
+        except Exception:
+            LOGGER.exception(
+                "Failed to backfill realized impact for event %s", social_event_id
+            )
 
     def query_events(
         self,
