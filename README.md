@@ -47,7 +47,7 @@ Example:
 ```bash
 python3 scripts/orchestrator.py --start 2025-11-11 --end 2025-11-12 --workers 2 \
    --scid-dir /mnt/c/SierraChart/Data --depth-dir /mnt/c/SierraChart/Data/MarketDepthData \
-   --depth-prefix MNQZ25_FUT_CME --convert-timestamp-to-ms --timestamp-tz America/New_York
+   --depth-prefix MNQM26_FUT_CME --convert-timestamp-to-ms --timestamp-tz America/New_York
 ```
 ### Installation
 

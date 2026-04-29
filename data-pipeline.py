@@ -59,9 +59,13 @@ from src.services.gexbot_poller import (
 from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreamer  # noqa: E402
 from src.services.redis_timeseries import RedisTimeSeriesClient  # noqa: E402
 from src.services.redis_flush_worker import FlushWorkerSettings, RedisFlushWorker  # noqa: E402
-from src.services.discord_bot_service import DiscordBotService  # noqa: E402
 from src.services.lookup_service import LookupService  # noqa: E402
 from src.services.schwab_streamer import SchwabStreamClient, build_streamer  # noqa: E402
+from src.services.social_feed_service import SocialFeedService, FeedConfig, KeywordScorer  # noqa: E402
+from src.services.social_feed_service import SOCIAL_ALL_EVENTS_CHANNEL, SOCIAL_HISTORY_KEY  # noqa: E402
+from src.services.correlation_engine import CorrelationEngine  # noqa: E402
+from src.services.market_mover_analyzer import MarketMoverAnalyzer, MarketMoverResult  # noqa: E402
+from src.models.social_event import SocialSource  # noqa: E402
 
 # Trading panel router
 from backend.src.api.trading import router as trading_router  # noqa: E402
@@ -209,9 +213,10 @@ class ServiceManager:
         self.redis_client: Optional[RedisClient] = None
         self.rts: Optional[RedisTimeSeriesClient] = None
         self.flush_worker: Optional[RedisFlushWorker] = None
-        self.discord_bot: Optional[DiscordBotService] = None
         self.lookup_service: Optional[LookupService] = None
         self.schwab_service = SchwabStreamingService(self)
+        self.social_feed: Optional[SocialFeedService] = None
+        self.correlation_engine: Optional[CorrelationEngine] = None
         self.trade_count = 0
         self.depth_count = 0
         self.trade_counts: Dict[str, int] = {}
@@ -252,19 +257,21 @@ class ServiceManager:
             "gex_poller",
             "gex_nq_poller",
             "redis_flush",
-            "discord_bot",
+            "social_feed",
+            "correlation",
         ):
             self.start_service(service)
 
     async def stop(self) -> None:
         """Stop all managed services in a best-effort fashion."""
         for service in (
+            "correlation",
+            "social_feed",
             "tastytrade",
             "schwab",
             "gex_poller",
             "gex_nq_poller",
             "redis_flush",
-            "discord_bot",
         ):
             await self.stop_service(service)
 
@@ -297,11 +304,6 @@ class ServiceManager:
             "gex_poller": getattr(self.gex_poller, "status", lambda: {})(),
             "gex_nq_poller": getattr(self.gex_nq_poller, "status", lambda: {})(),
             "redis_flush_worker": getattr(self.flush_worker, "status", lambda: {})(),
-            "discord_bot": getattr(
-                self.discord_bot,
-                "status",
-                lambda: {"running": False, "enabled": settings.discord_bot_enabled},
-            )(),
             "lookup_service": {
                 "ready": bool(self.lookup_service),
                 "recent_depth_diffs": list(self.last_depth_comparison.values())[:3],
@@ -412,12 +414,80 @@ class ServiceManager:
             )
             self.flush_worker.start()
             LOGGER.info("Redis flush worker started")
-        elif name == "discord_bot" and settings.discord_bot_enabled:
-            if not self.discord_bot:
-                script_path = PROJECT_ROOT / "discord-bot" / "run_discord_bot.py"
-                self.discord_bot = DiscordBotService(script_path)
-            self.discord_bot.start()
-            LOGGER.info("Discord bot started")
+        elif name == "social_feed" and settings.social_feed_enabled:
+            if self.social_feed:
+                return
+            feeds = []
+            priority_handles = {
+                h.strip().lower()
+                for h in settings.social_feed_priority_handles.split(",")
+                if h.strip()
+            }
+            for url in settings.social_feed_urls.split("|"):
+                url = url.strip()
+                if not url:
+                    continue
+                # Determine source type and author from URL
+                if url.startswith("ts:"):
+                    # Truth Social account: "ts:username:Display Name"
+                    parts = url.split(":", 2)
+                    username = parts[1] if len(parts) > 1 else ""
+                    author = parts[2] if len(parts) > 2 else username
+                    is_priority = username.lower() in priority_handles
+                    if username:
+                        feeds.append(FeedConfig(username, SocialSource.TRUTH_SOCIAL, author, priority=is_priority))
+                elif "nitter" in url:
+                    # Nitter RSS: extract @handle from path
+                    from urllib.parse import urlparse
+                    path = urlparse(url).path.strip("/")
+                    handle = path.split("/")[0] if "/" in path else path.replace("/rss", "")
+                    is_priority = handle.lower() in priority_handles
+                    feeds.append(FeedConfig(url, SocialSource.TWITTER, f"@{handle}", priority=is_priority))
+                else:
+                    # Derive a readable author name from the domain
+                    from urllib.parse import urlparse
+                    domain = urlparse(url).netloc.replace("www.", "").replace("feeds.", "").replace("search.", "")
+                    author_map = {
+                        "marketwatch.com": "MarketWatch",
+                        "cnbc.com": "CNBC",
+                        "finance.yahoo.com": "Yahoo Finance",
+                        "benzinga.com": "Benzinga",
+                        "bloomberg.com": "Bloomberg",
+                        "feedburner.com": "ZeroHedge",
+                        "news.google.com": "Google News",
+                        "seekingalpha.com": "Seeking Alpha",
+                        "investing.com": "Investing.com",
+                    }
+                    author = author_map.get(domain, domain)
+                    is_priority = domain.split(".")[0].lower() in priority_handles
+                    feeds.append(FeedConfig(url, SocialSource.NEWS_RSS, author, priority=is_priority))
+            if feeds:
+                self.social_feed = SocialFeedService(
+                    redis_client=self.redis_client,
+                    feeds=feeds,
+                    rth_interval_seconds=settings.social_feed_rth_interval_seconds,
+                    off_hours_interval_seconds=settings.social_feed_off_hours_interval_seconds,
+                    priority_interval_seconds=settings.social_feed_priority_interval_seconds,
+                    min_score_threshold=settings.social_min_score_threshold,
+                    dedup_ttl_seconds=settings.social_dedup_ttl_seconds,
+                )
+                self.social_feed.start()
+                LOGGER.info("Social feed service started with %d feeds", len(feeds))
+            else:
+                LOGGER.warning("Social feed enabled but no URLs configured")
+        elif name == "correlation" and settings.correlation_enabled:
+            if self.correlation_engine:
+                return
+            self.correlation_engine = CorrelationEngine(
+                redis_client=self.redis_client,
+                window_seconds=settings.correlation_window_seconds,
+                volume_spike_multiplier=settings.correlation_volume_spike_multiplier,
+                gex_shift_pct=settings.correlation_gex_shift_pct,
+                price_move_pct=settings.correlation_price_move_pct,
+                cooldown_seconds=settings.correlation_cooldown_seconds,
+            )
+            self.correlation_engine.start()
+            LOGGER.info("Correlation engine started")
 
     async def stop_service(self, name: str) -> None:
         """Stop a running service and clean up the local reference."""
@@ -441,10 +511,14 @@ class ServiceManager:
             await self.flush_worker.stop()
             self.flush_worker = None
             LOGGER.info("Redis flush worker stopped")
-        elif name == "discord_bot" and self.discord_bot:
-            await self.discord_bot.stop()
-            LOGGER.info("Discord bot stopped")
-            self.discord_bot = None
+        elif name == "social_feed" and self.social_feed:
+            await self.social_feed.stop()
+            self.social_feed = None
+            LOGGER.info("Social feed service stopped")
+        elif name == "correlation" and self.correlation_engine:
+            await self.correlation_engine.stop()
+            self.correlation_engine = None
+            LOGGER.info("Correlation engine stopped")
 
     async def restart_service(self, name: str) -> None:
         """Convenience helper for the ``/control`` endpoint."""
@@ -794,11 +868,15 @@ async def lifespan(app: FastAPI):
     """Ensure ServiceManager starts before handling requests and shuts down cleanly."""
     LOGGER.info("Starting services during FastAPI lifespan")
     service_manager.start()
+
     try:
         yield
     finally:
         LOGGER.info("Stopping services during FastAPI lifespan")
-        await service_manager.stop()
+        try:
+            await asyncio.wait_for(service_manager.stop(), timeout=5.0)
+        except Exception:
+            LOGGER.warning("Error during graceful service shutdown", exc_info=True)
 
 
 app = FastAPI(title="Data Pipeline", lifespan=lifespan)
@@ -825,7 +903,10 @@ async def order_panel():
 async def gex_monitor():
     from fastapi.responses import FileResponse
     monitor_path = PROJECT_ROOT / "frontend" / "src" / "gex_monitor.html"
-    return FileResponse(str(monitor_path))
+    return FileResponse(
+        str(monitor_path),
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @app.get("/gex-monitor/popout")
@@ -835,7 +916,7 @@ async def gex_monitor_popout(w: int = 360, h: int = 1200):
     return HTMLResponse(f"""<!DOCTYPE html><html><head><title>GEX Popout</title></head>
 <body style="background:#0d1117;color:#e6edf3;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh">
 <script>
-var popup = window.open('/gex-monitor','gex_monitor','width={w},height={h},resizable=yes,scrollbars=no,toolbar=no,menubar=no,location=no,status=no');
+var popup = window.open('/gex-monitor','gex_monitor','width={w},height={h},resizable=yes,scrollbars=yes,toolbar=no,menubar=no,location=no,status=no');
 if (popup) {{ document.body.innerHTML = '<p style="font-size:13px">GEX Monitor opened — you can close this tab.</p>'; }}
 else {{ document.body.innerHTML = '<p style="font-size:13px">Popup blocked. <a href="/gex-monitor" target="_blank" style="color:#58a6ff">Open manually</a></p>'; }}
 </script></body></html>""")
@@ -1008,6 +1089,99 @@ async def status_page(request: Request) -> str:
         "Status page requested from %s", getattr(request.client, "host", "unknown")
     )
     return STATUS_PAGE
+
+
+# ---------------------------------------------------------------------------
+# Market Movers API
+# ---------------------------------------------------------------------------
+
+class MarketMoversRequest(BaseModel):
+    """Parameters for the market-mover analysis endpoint."""
+    lookback_days:         int   = 21      # default 3 weeks
+    min_realized_impact:   float = 0.0    # 0 = return everything (noise flagged)
+    top_n:                 int   = 100
+    noise_floor:           float = 5.0    # events below this are flagged as noise
+    tickers:               list[str] = []  # [] = use defaults (ES_SPX, SPY, QQQ)
+
+
+class MarketMoversResponse(BaseModel):
+    lookback_days:         int
+    total_events:          int
+    mover_count:           int
+    noise_count:           int
+    results:               list[MarketMoverResult]
+
+
+@app.post("/api/market-movers", response_model=MarketMoversResponse)
+async def market_movers_endpoint(req: MarketMoversRequest) -> MarketMoversResponse:
+    """Rank historical social/news events by their *realized* market impact.
+
+    Returns events ordered by how much actual price movement, GEX shift, and
+    volume followed the post.  Low-impact events are flagged ``is_noise=true``
+    rather than silently dropped so callers can audit the full picture.
+    """
+    from src.services.market_mover_analyzer import DEFAULT_TICKERS
+
+    tickers = None
+    if req.tickers:
+        # Build sub-dict from requested tickers, fall back to defaults for unknowns
+        tickers = {
+            t: DEFAULT_TICKERS.get(t, t)
+            for t in req.tickers
+            if t in DEFAULT_TICKERS
+        } or None
+
+    analyzer = MarketMoverAnalyzer(noise_floor=req.noise_floor, tickers=tickers)
+    try:
+        results = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: analyzer.analyze(
+                lookback_days=req.lookback_days,
+                min_realized_impact=req.min_realized_impact,
+                top_n=req.top_n,
+            ),
+        )
+    except Exception as exc:
+        LOGGER.exception("market-movers analysis failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    movers = [r for r in results if not r.is_noise]
+    noise  = [r for r in results if r.is_noise]
+    return MarketMoversResponse(
+        lookback_days=req.lookback_days,
+        total_events=len(results),
+        mover_count=len(movers),
+        noise_count=len(noise),
+        results=results,
+    )
+
+
+@app.get("/api/market-movers/realtime", response_model=MarketMoversResponse)
+async def market_movers_realtime_endpoint(
+    hours: int = 24,
+    top_n: int = 50,
+    noise_floor: float = 5.0,
+) -> MarketMoversResponse:
+    """Convenience GET endpoint: last *hours* of events only."""
+    analyzer = MarketMoverAnalyzer(noise_floor=noise_floor)
+    try:
+        results = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: analyzer.analyze_realtime(lookback_hours=hours, top_n=top_n),
+        )
+    except Exception as exc:
+        LOGGER.exception("market-movers realtime failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    movers = [r for r in results if not r.is_noise]
+    noise  = [r for r in results if r.is_noise]
+    return MarketMoversResponse(
+        lookback_days=max(1, (hours + 23) // 24),
+        total_events=len(results),
+        mover_count=len(movers),
+        noise_count=len(noise),
+        results=results,
+    )
 
 
 @app.post("/gex_history_url")
@@ -1384,9 +1558,76 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
         "delta_risk_reversal", "maxchange", "max_priors",
     )
 
+    # Map primary symbol to a secondary symbol whose net_gex we display
+    CROSS_GEX_MAP = {"NQ_NDX": "ES_SPX", "ES_SPX": "NQ_NDX"}
+
+    def _summarize_wall(major_strike, strikes, prefer_positive):
+        """Compute wall ladder: major + up to 2 next candidates with %."""
+        filtered = []
+        for s, g in strikes:
+            if prefer_positive and g <= 0:
+                continue
+            if not prefer_positive and g >= 0:
+                continue
+            filtered.append((s, g))
+        if not filtered:
+            return None
+        filtered.sort(key=lambda p: abs(p[1]), reverse=True)
+        major = None
+        if isinstance(major_strike, (int, float)):
+            for s, g in filtered:
+                if abs(s - major_strike) <= 0.51:
+                    major = (s, g)
+                    break
+        if major is None:
+            major = filtered[0]
+        entries = []
+        for s, g in filtered:
+            if abs(s - major[0]) <= 0.51:
+                continue
+            pct = (abs(g) / abs(major[1]) * 100) if major[1] else None
+            entries.append({"strike": s, "pct": pct})
+            if len(entries) >= 2:
+                break
+        return {"major": major[0], "next": entries}
+
+    def _parse_strikes(raw):
+        """Normalize strikes list into [(strike, gamma), ...]."""
+        if not isinstance(raw, list):
+            return []
+        result = []
+        for entry in raw:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                try:
+                    result.append((float(entry[0]), float(entry[1])))
+                except (TypeError, ValueError):
+                    pass
+        return result
+
     def _extract(payload: Dict[str, Any]) -> Dict[str, Any]:
         out = {k: payload.get(k) for k in GEX_FIELDS}
         out["symbol"] = normalized
+        # Wall ladders from strikes data
+        strikes = _parse_strikes(payload.get("strikes"))
+        if strikes:
+            call_ladder = _summarize_wall(payload.get("major_pos_vol"), strikes, True)
+            put_ladder = _summarize_wall(payload.get("major_neg_vol"), strikes, False)
+            if call_ladder:
+                out["call_wall_ladder"] = call_ladder
+            if put_ladder:
+                out["put_wall_ladder"] = put_ladder
+        # Cross-symbol net GEX (e.g. ES_SPX net_gex when viewing NQ_NDX)
+        cross_sym = CROSS_GEX_MAP.get(normalized)
+        if cross_sym:
+            try:
+                cross_key = f"{SNAPSHOT_KEY_PREFIX}{cross_sym}"
+                cross_raw = redis_conn.get(cross_key)
+                if cross_raw:
+                    cross_snap = json.loads(cross_raw if isinstance(cross_raw, str) else cross_raw.decode("utf-8"))
+                    out["cross_symbol"] = cross_sym
+                    out["cross_net_gex"] = cross_snap.get("net_gex")
+            except Exception:
+                pass
         return out
 
     # Send the latest cached snapshot immediately
@@ -1427,6 +1668,220 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
             if (payload.get("symbol") or "").upper() != normalized:
                 continue
             await websocket.send_json(_extract(payload))
+    except WebSocketDisconnect:
+        return
+    finally:
+        try:
+            pubsub.close()
+        except Exception:
+            pass
+
+
+@app.websocket("/ws/social")
+async def social_events_websocket(websocket: WebSocket) -> None:
+    """Stream social media events (Truth Social, Twitter, News) to the GEX monitor."""
+    await websocket.accept()
+    redis_conn = _get_redis_client()
+
+    # Backfill recent history so the feed isn't empty on connect
+    try:
+        history = redis_conn.lrange(SOCIAL_HISTORY_KEY, 0, 199)
+        for item in reversed(history or []):
+            try:
+                if isinstance(item, (bytes, bytearray)):
+                    payload = json.loads(item.decode("utf-8"))
+                else:
+                    payload = json.loads(item)
+                await websocket.send_json(payload)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
+    pubsub.subscribe(SOCIAL_ALL_EVENTS_CHANNEL)
+
+    try:
+        while True:
+            try:
+                message = await asyncio.to_thread(pubsub.get_message, timeout=1.5)
+            except Exception:
+                message = None
+            if not message or message.get("type") != "message":
+                await asyncio.sleep(0.1)
+                continue
+            payload_raw = message.get("data")
+            try:
+                if isinstance(payload_raw, (bytes, bytearray)):
+                    payload = json.loads(payload_raw.decode("utf-8"))
+                elif isinstance(payload_raw, str):
+                    payload = json.loads(payload_raw)
+                elif isinstance(payload_raw, dict):
+                    payload = payload_raw
+                else:
+                    continue
+            except Exception:
+                continue
+            await websocket.send_json(payload)
+    except WebSocketDisconnect:
+        return
+    finally:
+        try:
+            pubsub.close()
+        except Exception:
+            pass
+
+
+CORRELATION_ALERT_CHANNEL = "correlation:alerts:stream"
+CORRELATION_HISTORY_KEY = "correlation:alerts:history"
+
+
+@app.websocket("/ws/correlation")
+async def correlation_alerts_websocket(websocket: WebSocket) -> None:
+    """Stream correlation alerts (social event + market signal coincidences) to the GEX monitor."""
+    await websocket.accept()
+    redis_conn = _get_redis_client()
+
+    # Backfill today's alerts so the banner repopulates on reconnect
+    try:
+        history = redis_conn.lrange(CORRELATION_HISTORY_KEY, 0, 49)
+        for item in reversed(history or []):
+            try:
+                payload = json.loads(item.decode("utf-8") if isinstance(item, (bytes, bytearray)) else item)
+                await websocket.send_json(payload)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
+    pubsub.subscribe(CORRELATION_ALERT_CHANNEL)
+
+    try:
+        while True:
+            try:
+                message = await asyncio.to_thread(pubsub.get_message, timeout=1.5)
+            except Exception:
+                message = None
+            if not message or message.get("type") != "message":
+                await asyncio.sleep(0.1)
+                continue
+            payload_raw = message.get("data")
+            try:
+                if isinstance(payload_raw, (bytes, bytearray)):
+                    payload = json.loads(payload_raw.decode("utf-8"))
+                elif isinstance(payload_raw, str):
+                    payload = json.loads(payload_raw)
+                elif isinstance(payload_raw, dict):
+                    payload = payload_raw
+                else:
+                    continue
+            except Exception:
+                continue
+            # Persist to history (keep last 50, today only via TTL)
+            try:
+                serialized = json.dumps(payload, default=str)
+                redis_conn.lpush(CORRELATION_HISTORY_KEY, serialized)
+                redis_conn.ltrim(CORRELATION_HISTORY_KEY, 0, 49)
+                redis_conn.expire(CORRELATION_HISTORY_KEY, 86400)  # expire at end of day
+            except Exception:
+                pass
+            await websocket.send_json(payload)
+    except WebSocketDisconnect:
+        return
+    finally:
+        try:
+            pubsub.close()
+        except Exception:
+            pass
+
+
+@app.websocket("/ws/market-sentiment")
+async def market_sentiment_websocket(websocket: WebSocket) -> None:
+    """Stream market sentiment data (put/call ratio, regime, premiums) to the GEX monitor."""
+    await websocket.accept()
+    redis_conn = _get_redis_client()
+
+    # Send latest cached market agg data immediately on connect
+    try:
+        raw = redis_conn.get("uw:market_agg:latest")
+        if raw:
+            latest = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
+            data = latest.get("data", {})
+            ratio_val = data.get("put_call_ratio")
+            ratio = float(ratio_val) if ratio_val else None
+            regime = "long" if ratio and ratio < 0.80 else ("short" if ratio and ratio > 1.0 else "neutral")
+            await websocket.send_json({
+                "type": "market_agg",
+                "put_call_ratio": ratio,
+                "regime": regime,
+                "call_premium": data.get("call_premium"),
+                "put_premium": data.get("put_premium"),
+                "call_volume": data.get("call_volume"),
+                "put_volume": data.get("put_volume"),
+                "date": data.get("date"),
+                "received_at": latest.get("received_at"),
+            })
+    except Exception:
+        LOGGER.debug("Failed to send initial market sentiment snapshot", exc_info=True)
+
+    # Subscribe to both market agg updates and alert channel
+    pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
+    pubsub.subscribe("uw:market_agg:stream", "market_agg:alerts")
+
+    try:
+        while True:
+            try:
+                message = await asyncio.to_thread(pubsub.get_message, timeout=1.5)
+            except Exception:
+                message = None
+            if not message or message.get("type") != "message":
+                await asyncio.sleep(0.1)
+                continue
+            payload_raw = message.get("data")
+            try:
+                if isinstance(payload_raw, (bytes, bytearray)):
+                    payload = json.loads(payload_raw.decode("utf-8"))
+                elif isinstance(payload_raw, str):
+                    payload = json.loads(payload_raw)
+                elif isinstance(payload_raw, dict):
+                    payload = payload_raw
+                else:
+                    continue
+            except Exception:
+                continue
+
+            channel = message.get("channel")
+            if isinstance(channel, bytes):
+                channel = channel.decode("utf-8")
+
+            if channel == "uw:market_agg:stream":
+                data = payload.get("data", {})
+                ratio_val = data.get("put_call_ratio")
+                ratio = float(ratio_val) if ratio_val else None
+                regime = "long" if ratio and ratio < 0.80 else ("short" if ratio and ratio > 1.0 else "neutral")
+                await websocket.send_json({
+                    "type": "market_agg",
+                    "put_call_ratio": ratio,
+                    "regime": regime,
+                    "call_premium": data.get("call_premium"),
+                    "put_premium": data.get("put_premium"),
+                    "call_volume": data.get("call_volume"),
+                    "put_volume": data.get("put_volume"),
+                    "date": data.get("date"),
+                    "received_at": payload.get("received_at"),
+                })
+            elif channel == "market_agg:alerts":
+                await websocket.send_json({
+                    "type": "sentiment_alert",
+                    "alert_type": payload.get("alert_type"),
+                    "current_ratio": payload.get("current_ratio"),
+                    "previous_ratio": payload.get("previous_ratio"),
+                    "from_regime": payload.get("from_regime"),
+                    "to_regime": payload.get("to_regime"),
+                    "direction": payload.get("direction"),
+                    "change_pct": payload.get("change_pct"),
+                })
     except WebSocketDisconnect:
         return
     finally:
@@ -1568,16 +2023,22 @@ def configure_logging(log_level: int = logging.INFO, log_dir: str = "logs") -> N
         fh.setFormatter(fmt)
         root.addHandler(fh)
 
-    # Disable console logging when file logging is active; otherwise keep a console handler
-    if _has_file_handler(root):
-        for handler in list(root.handlers):
-            if isinstance(handler, logging.StreamHandler):
-                root.removeHandler(handler)
-    elif not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+    # Ensure a console handler with timestamps is always present
+    has_console = any(
+        isinstance(h, logging.StreamHandler)
+        and not isinstance(h, RotatingFileHandler)
+        for h in root.handlers
+    )
+    if not has_console:
         ch = logging.StreamHandler(sys.stdout)
         ch.setLevel(log_level)
         ch.setFormatter(fmt)
         root.addHandler(ch)
+    else:
+        # Apply formatter to existing console handlers missing one
+        for h in root.handlers:
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler):
+                h.setFormatter(fmt)
 
     # Configure a separate logger for status page
     status_logger = logging.getLogger("data_pipeline.status")
@@ -1621,7 +2082,13 @@ def main() -> None:
             "SSL enabled: cert=%s, key=%s", args.ssl_certfile, args.ssl_keyfile
         )
     
-    uvicorn.run(**uvicorn_config)
+    try:
+        uvicorn.run(**uvicorn_config)
+    except (KeyboardInterrupt, RecursionError):
+        # Python 3.13 can hit RecursionError when _cancel_all_tasks walks
+        # deeply nested gather/child-task chains (e.g. tastytrade DXLinkStreamer).
+        # The signal handler in lifespan already stopped services; just exit.
+        pass
 
 
 if __name__ == "__main__":

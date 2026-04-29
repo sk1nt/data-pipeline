@@ -41,9 +41,9 @@ def test_list_futures_mock(monkeypatch):
 
     # Prepare a fake Future.get return
     fake_future = SimpleNamespace(
-        symbol="/NQZ5",
-        streamer_symbol="/NQZ25:XCME",
-        expiration_date=date(2025, 12, 19),
+        symbol="/NQM6",
+        streamer_symbol="/NQM26:XCME",
+        expiration_date=date(2026, 6, 19),
         is_tradeable=True,
         product_code="NQ",
         description="E-mini Nasdaq-100",
@@ -63,10 +63,10 @@ def test_list_futures_mock(monkeypatch):
 
     results = client.list_futures(["NQ"])
     assert isinstance(results, list)
-    assert any(r.get("symbol") == "/NQZ5" for r in results)
+    assert any(r.get("symbol") == "/NQM6" for r in results)
     # returned items contain expected keys
     item = results[0]
-    assert item.get("symbol") == "/NQZ5"
-    assert item.get("streamer_symbol") == "/NQZ25:XCME"
+    assert item.get("symbol") == "/NQM6"
+    assert item.get("streamer_symbol") == "/NQM26:XCME"
     assert item.get("is_tradeable") is True
     assert item.get("product_code") == "NQ"

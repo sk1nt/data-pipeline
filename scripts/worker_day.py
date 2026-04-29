@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--depth-prefix",
-        default="MNQZ25_FUT_CME",
+        default="MNQM26_FUT_CME",
         help="Depth filename prefix before .YYYY-MM-DD.depth",
     )
     parser.add_argument(

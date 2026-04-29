@@ -4,7 +4,7 @@ import datetime as dt
 from pathlib import Path
 
 # Load SCID
-scid_file = Path("/mnt/c/SierraChart/Data/MNQZ25_FUT_CME.scid")
+scid_file = Path("/mnt/c/SierraChart/Data/MNQM26_FUT_CME.scid")
 sciddtype = np.dtype(
     [
         ("SCDateTime", "<u8"),

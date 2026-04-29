@@ -17,10 +17,13 @@ from typing import List
 # to the next contract at the Sunday 22:00 UTC session prior to the third
 # Friday of March/June/September/December. For the historical window we're
 # backfilling, MNQU25 covers through 2025-09-17, then MNQZ25 starts at the
-# Globex session beginning 2025-09-18.
+# Globex session beginning 2025-09-18, MNQH26 from 2025-12-19, MNQM26 from
+# 2026-03-19.
 SCID_CONTRACT_WINDOWS = [
     (date(2025, 9, 2), date(2025, 9, 18), "MNQU25_FUT_CME.scid"),
-    (date(2025, 9, 18), date(9999, 12, 31), "MNQZ25_FUT_CME.scid"),
+    (date(2025, 9, 18), date(2025, 12, 19), "MNQZ25_FUT_CME.scid"),
+    (date(2025, 12, 19), date(2026, 3, 19), "MNQH26_FUT_CME.scid"),
+    (date(2026, 3, 19), date(9999, 12, 31), "MNQM26_FUT_CME.scid"),
 ]
 
 
@@ -49,7 +52,7 @@ def parse_args() -> argparse.Namespace:
         "--depth-dir", required=True, help="Directory with .depth files"
     )
     parser.add_argument(
-        "--depth-prefix", default="MNQZ25_FUT_CME", help="Depth filename prefix"
+        "--depth-prefix", default="MNQM26_FUT_CME", help="Depth filename prefix"
     )
     parser.add_argument(
         "--depth-parquet-dir", default="data/parquet/depth", help="Depth parquet root"

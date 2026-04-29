@@ -92,15 +92,15 @@ def get_current_depth_file(symbol: str) -> Path:
     today = datetime.now().strftime("%Y-%m-%d")
     depth_dir = DEFAULT_DEPTH_ROOT
     fallback_contracts = {
-        "ES": "ESZ25_FUT_CME",
-        "MES": "MESZ25_FUT_CME",
-        "NQ": "NQZ25_FUT_CME",
-        "MNQ": "MNQZ25_FUT_CME",
-        "YM": "YMZ25_FUT_CME",
-        "MYM": "MYMZ25_FUT_CME",
+        "ES": "ESM26_FUT_CME",
+        "MES": "MESM26_FUT_CME",
+        "NQ": "NQM26_FUT_CME",
+        "MNQ": "MNQM26_FUT_CME",
+        "YM": "YMM26_FUT_CME",
+        "MYM": "MYMM26_FUT_CME",
     }
     symbol_upper = symbol.upper()
-    contract_name = fallback_contracts.get(symbol_upper, f"{symbol_upper}Z25_FUT_CME")
+    contract_name = fallback_contracts.get(symbol_upper, f"{symbol_upper}M26_FUT_CME")
     return depth_dir / f"{contract_name}.{today}.depth"
 
 

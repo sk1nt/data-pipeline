@@ -52,7 +52,9 @@ SCID files are contract-specific. Reference:
 ```python
 SCID_CONTRACT_WINDOWS = [
     (date(2025, 9, 2), date(2025, 9, 18), "MNQU25_FUT_CME.scid"),
-    (date(2025, 9, 18), date(9999, 12, 31), "MNQZ25_FUT_CME.scid"),
+    (date(2025, 9, 18), date(2025, 12, 19), "MNQZ25_FUT_CME.scid"),
+    (date(2025, 12, 19), date(2026, 3, 19), "MNQH26_FUT_CME.scid"),
+    (date(2026, 3, 19), date(9999, 12, 31), "MNQM26_FUT_CME.scid"),
 ]
 ```
 

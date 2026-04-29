@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import threading
+
+import httpx
 import re
 from decimal import Decimal
 from dataclasses import dataclass
@@ -104,6 +106,8 @@ class TastyTradeClient:
         self._needs_reauth: bool = False
         self._reauth_backoff_seconds: int = 60
         self._reauth_thread: Optional[threading.Thread] = None
+        self._last_connect_failure: float = 0.0
+        self._connect_cooldown_seconds: float = 15.0
         # Start reauth worker thread (best-effort; don't raise on failure)
         try:
             self._start_reauth_worker()
@@ -485,13 +489,25 @@ class TastyTradeClient:
 
     def _ensure_session(self) -> Session:
         assert Session is not None  # for type checkers
+        # Fast-fail if we recently failed to connect (avoid repeated TCP timeouts)
+        if self._session is None and self._last_connect_failure:
+            elapsed = time.monotonic() - self._last_connect_failure
+            if elapsed < self._connect_cooldown_seconds:
+                raise ConnectionError(
+                    f"TastyTrade API unreachable (retry in {self._connect_cooldown_seconds - elapsed:.0f}s)"
+                )
         if self._session is None:
-            self._session = Session(
-                provider_secret=self._client_secret,
-                refresh_token=self._refresh_token,
-                is_test=self._use_sandbox,
-            )
-            self._session_expiration = self._derive_expiration(self._session)
+            try:
+                self._session = Session(
+                    provider_secret=self._client_secret,
+                    refresh_token=self._refresh_token,
+                    is_test=self._use_sandbox,
+                )
+                self._session_expiration = self._derive_expiration(self._session)
+                self._last_connect_failure = 0.0
+            except (httpx.TransportError, ConnectionError, TimeoutError, OSError) as exc:
+                self._last_connect_failure = time.monotonic()
+                raise ConnectionError(f"TastyTrade API unreachable: {exc}") from exc
         else:
             # refresh if token expired
             try:
@@ -681,8 +697,16 @@ class TastyTradeClient:
             except Exception:
                 time.sleep(self._reauth_backoff_seconds)
 
+    # Number of days before expiration to roll to the next quarterly contract.
+    ROLL_BUFFER_DAYS = 7
+
     def _resolve_front_month_symbol(self, product_code: str) -> Optional[str]:
-        """Return front-month TW symbol (like /NQZ5) for a product code like 'NQ'. Caches to avoid repeated API calls."""
+        """Return front-month TW symbol (like /NQM6) for a product code like 'NQ'.
+
+        Automatically rolls to the next quarterly contract when the nearest
+        expiration is within ``ROLL_BUFFER_DAYS`` days.  Caches to avoid
+        repeated API calls (1-hour TTL).
+        """
         product_code = product_code.upper().replace("/", "") if product_code else ""
         if not product_code:
             return None
@@ -696,13 +720,29 @@ class TastyTradeClient:
             # Use Future.get with product_codes to enumerate contracts
             futures = Future.get(session, symbols=None, product_codes=[product_code])
             candidates = [f for f in futures if getattr(f, "is_tradeable", True)]
-            # Always select the closest expiration
+            # Select the nearest expiration that is NOT within the roll buffer.
+            # This ensures we automatically roll to the next contract when the
+            # current one is about to expire.
             selected: Optional[Future] = None
             if candidates:
                 candidates.sort(
                     key=lambda f: getattr(f, "expiration_date", datetime.max)
                 )
-                selected = candidates[0]
+                roll_cutoff = (now + timedelta(days=self.ROLL_BUFFER_DAYS)).date()
+                for c in candidates:
+                    exp = getattr(c, "expiration_date", None)
+                    if exp is None:
+                        continue
+                    # expiration_date may be a datetime; normalise to date
+                    if hasattr(exp, "date"):
+                        exp = exp.date()
+                    if exp >= roll_cutoff:
+                        selected = c
+                        break
+                # Fallback: if every candidate expires within the buffer, use the
+                # last (furthest-out) one rather than trading an expiring contract.
+                if selected is None and candidates:
+                    selected = candidates[-1]
             if selected:
                 # Use streamer_symbol if available, otherwise symbol
                 sym = (
@@ -1574,12 +1614,25 @@ class TastyTradeClient:
             if resolved:
                 return resolved
             # fallback: return a reasonable default based on current date
+            # Futures use quarterly months: H(Mar), M(Jun), U(Sep), Z(Dec)
             now = datetime.now(timezone.utc)
-            month = (now.month % 12) + 1
-            month_codes = "FGHJKMNQUVXZ"
-            month_code = month_codes[month - 1]
-            year = now.year if month != 1 else now.year + 1
-            year_digit = str(year)[-2:]
+            quarterly = [
+                (3, "H"), (6, "M"), (9, "U"), (12, "Z"),
+            ]
+            # Pick the next quarterly month whose expiration hasn't passed yet,
+            # accounting for the roll buffer.
+            roll_month = now.month
+            roll_year = now.year
+            month_code = None
+            for q_month, q_code in quarterly:
+                if q_month >= roll_month:
+                    month_code = q_code
+                    break
+            if month_code is None:
+                # Past December — next is March of next year
+                month_code = "H"
+                roll_year += 1
+            year_digit = str(roll_year)[-2:]
             return f"/{symbol}{month_code}{year_digit}"
         # check for explicit contract codes like NQZ25 or NQH26 (with optional exchange suffix)
         # Accept patterns like 'NQZ25', 'NQZ25:XCME', '/NQZ25', '/NQZ25:XCME'

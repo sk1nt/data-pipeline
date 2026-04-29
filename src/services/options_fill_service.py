@@ -82,7 +82,8 @@ class OptionsFillService:
         return accounts[0]
 
     async def place_limit_order(
-        self, option: Option, quantity: Decimal, action: OrderAction, price: Decimal
+        self, option: Option, quantity: Decimal, action: OrderAction, price: Decimal,
+        time_in_force: OrderTimeInForce = OrderTimeInForce.DAY,
     ) -> Optional[str]:
         """Place a limit order for the option."""
         # Normalize action if a string alias was passed for compatibility
@@ -116,30 +117,33 @@ class OptionsFillService:
             # Non-fatal; continue if trading status is unavailable
             pass
 
-        # Preflight: verify buying power is sufficient for the requested quantity at the target price
-        try:
-            balances = account.get_balances(session)
-            buying_power = float(
-                getattr(balances, "available_trading_funds", None)
-                or getattr(balances, "derivative_buying_power", None)
-                or getattr(balances, "equity_buying_power", None)
-                or getattr(balances, "day_trading_buying_power", None)
-                or getattr(balances, "net_liquidating_value", 0)
-                or 0
-            )
-            contract_price = float(price) * 100
-            est_notional = float(quantity) * contract_price
-            if buying_power <= 0 or est_notional > buying_power:
-                msg = (
-                    f"Insufficient buying power for order: est_notional={est_notional} buying_power={buying_power}"
+        # Preflight: verify buying power is sufficient for opening orders only
+        # Closing orders (SELL_TO_CLOSE, BUY_TO_CLOSE) don't require buying power
+        is_closing = action in (OrderAction.SELL_TO_CLOSE, OrderAction.BUY_TO_CLOSE)
+        if not is_closing:
+            try:
+                balances = account.get_balances(session)
+                buying_power = float(
+                    getattr(balances, "available_trading_funds", None)
+                    or getattr(balances, "derivative_buying_power", None)
+                    or getattr(balances, "equity_buying_power", None)
+                    or getattr(balances, "day_trading_buying_power", None)
+                    or getattr(balances, "net_liquidating_value", 0)
+                    or 0
                 )
-                logger.warning(msg)
-                raise InsufficientBuyingPowerError(msg)
-        except InsufficientBuyingPowerError:
-            raise
-        except Exception:
-            # If we can't determine balances, continue and allow order to proceed
-            pass
+                contract_price = float(price) * 100
+                est_notional = float(quantity) * contract_price
+                if buying_power <= 0 or est_notional > buying_power:
+                    msg = (
+                        f"Insufficient buying power for order: est_notional={est_notional} buying_power={buying_power}"
+                    )
+                    logger.warning(msg)
+                    raise InsufficientBuyingPowerError(msg)
+            except InsufficientBuyingPowerError:
+                raise
+            except Exception:
+                # If we can't determine balances, continue and allow order to proceed
+                pass
 
         leg = option.build_leg(quantity, action)
         # Round price to tick increment ($0.05) to avoid invalid_price_increment errors
@@ -152,7 +156,7 @@ class OptionsFillService:
         signed_price = -abs(price) if is_buy else abs(price)
         
         order = NewOrder(
-            time_in_force=OrderTimeInForce.DAY,
+            time_in_force=time_in_force,
             order_type=OrderType.LIMIT,
             legs=[leg],
             price=signed_price,
@@ -562,7 +566,8 @@ class OptionsFillService:
         for attempt in range(max_exit_retries):
             try:
                 exit_order_id = await self.place_limit_order(
-                    option, Decimal(str(exit_qty)), OrderAction.SELL_TO_CLOSE, exit_price
+                    option, Decimal(str(exit_qty)), OrderAction.SELL_TO_CLOSE, exit_price,
+                    time_in_force=OrderTimeInForce.GTC,
                 )
                 if exit_order_id:
                     logger.info(
