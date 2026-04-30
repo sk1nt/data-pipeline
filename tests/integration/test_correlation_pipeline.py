@@ -134,7 +134,7 @@ class TestEndToEndConfluencePipeline:
 
         signal = _make_signal(
             volume_ratio=4.0, volume_1min=8000, volume_20bar_avg=2000,
-            gex_change_pct=-25.0, net_gex=-500000, prev_net_gex=-375000,
+            net_gex=-500000, prev_net_gex=-375000,
         )
 
         triggered = []
@@ -145,7 +145,7 @@ class TestEndToEndConfluencePipeline:
             triggered.append("volume_spike")
             messages.append(vol_msg)
 
-        gex_msg = _check_gex_shift(event, signal, pct_threshold=15.0)
+        gex_msg = _check_gex_shift(event, signal, abs_threshold=1500)
         if gex_msg:
             triggered.append("gex_shift")
             messages.append(gex_msg)
@@ -472,7 +472,7 @@ class TestNoSignalNoAlert:
     def test_gex_shift_rule_none_when_no_gex_data(self):
         event = _make_social_event("Fed minutes released")
         signal = _make_signal()
-        msg = _check_gex_shift(event, signal, pct_threshold=5.0)
+        msg = _check_gex_shift(event, signal, abs_threshold=1500)
         assert msg is None
 
     def test_price_move_rule_none_when_no_price_data(self):
