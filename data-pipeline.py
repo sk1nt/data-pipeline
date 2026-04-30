@@ -482,7 +482,7 @@ class ServiceManager:
                 redis_client=self.redis_client,
                 window_seconds=settings.correlation_window_seconds,
                 volume_spike_multiplier=settings.correlation_volume_spike_multiplier,
-                gex_shift_pct=settings.correlation_gex_shift_pct,
+                gex_shift_abs=settings.correlation_gex_shift_abs,
                 price_move_pct=settings.correlation_price_move_pct,
                 cooldown_seconds=settings.correlation_cooldown_seconds,
             )

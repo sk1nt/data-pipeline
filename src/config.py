@@ -244,8 +244,8 @@ class Settings(BaseSettings):
     correlation_volume_spike_multiplier: float = env_field(
         "CORRELATION_VOLUME_SPIKE_MULTIPLIER", default=2.0
     )
-    correlation_gex_shift_pct: float = env_field(
-        "CORRELATION_GEX_SHIFT_PCT", default=15.0
+    correlation_gex_shift_abs: float = env_field(
+        "CORRELATION_GEX_SHIFT_ABS", default=1500.0
     )
     correlation_price_move_pct: float = env_field(
         "CORRELATION_PRICE_MOVE_PCT", default=0.3
