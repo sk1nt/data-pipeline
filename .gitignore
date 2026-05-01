@@ -93,6 +93,7 @@ venv.bak/
 .tokens
 .env.back
 .env.*
+!.env.example
 
 # Spyder project settings
 .spyderproject
