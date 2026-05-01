@@ -35,12 +35,39 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     price_change_pct       DOUBLE,
     config_snapshot        VARCHAR,
     created_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- Classification (populated at insert by EventCategorizer)
+    event_category         VARCHAR,
+    category_severity      VARCHAR,
+    source_type            VARCHAR,
+    text_fingerprint       VARCHAR,
+    is_first_mention       BOOLEAN,
+    first_mention_id       VARCHAR,
+    credibility_rank       DOUBLE,
+    -- GEX regime at alert time (populated at insert)
+    gex_regime             VARCHAR,
+    net_gex_at_alert       DOUBLE,
     -- Realized market impact (back-filled by MarketMoverAnalyzer)
     realized_impact_score  DOUBLE,
-    price_t0               DOUBLE,
-    price_t15              DOUBLE,
     price_ticker           VARCHAR,
-    is_noise               BOOLEAN
+    is_noise               BOOLEAN,
+    -- GEX spot prices from timeseries parquet (back-filled)
+    price_t0               DOUBLE,
+    price_t5               DOUBLE,
+    price_t15              DOUBLE,
+    price_t30              DOUBLE,
+    price_t60              DOUBLE,
+    -- High-resolution tick prices from MNQ tick parquet (back-filled)
+    tick_price_t0          DOUBLE,
+    tick_price_t5          DOUBLE,
+    tick_price_t15         DOUBLE,
+    tick_price_t30         DOUBLE,
+    tick_price_t60         DOUBLE,
+    -- Move summaries (back-filled)
+    tick_move_t5_pct       DOUBLE,
+    tick_move_t15_pct      DOUBLE,
+    tick_move_t30_pct      DOUBLE,
+    tick_move_t60_pct      DOUBLE,
+    tick_move_direction    VARCHAR
 );
 """
 
@@ -51,6 +78,29 @@ _MIGRATE_COLUMNS = [
     f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS price_t15             DOUBLE",
     f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS price_ticker          VARCHAR",
     f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS is_noise              BOOLEAN",
+    # Phase 2: classification + multi-horizon tick data
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS event_category        VARCHAR",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS category_severity     VARCHAR",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS source_type           VARCHAR",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS text_fingerprint      VARCHAR",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS is_first_mention      BOOLEAN",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS first_mention_id      VARCHAR",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS credibility_rank      DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS gex_regime            VARCHAR",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS net_gex_at_alert      DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS price_t5              DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS price_t30             DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS price_t60             DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS tick_price_t0         DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS tick_price_t5         DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS tick_price_t15        DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS tick_price_t30        DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS tick_price_t60        DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS tick_move_t5_pct      DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS tick_move_t15_pct     DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS tick_move_t30_pct     DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS tick_move_t60_pct     DOUBLE",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS tick_move_direction   VARCHAR",
 ]
 
 
@@ -121,6 +171,17 @@ class CorrelationAlertService:
         price_t15: Optional[float] = None,
         price_ticker: Optional[str] = None,
         is_noise: Optional[bool] = None,
+        # Phase 2: classification fields (from EventCategorizer)
+        event_category: Optional[str] = None,
+        category_severity: Optional[str] = None,
+        source_type: Optional[str] = None,
+        text_fingerprint: Optional[str] = None,
+        is_first_mention: Optional[bool] = None,
+        first_mention_id: Optional[str] = None,
+        credibility_rank: Optional[float] = None,
+        # Phase 2: GEX regime at alert time
+        gex_regime: Optional[str] = None,
+        net_gex_at_alert: Optional[float] = None,
     ) -> None:
         """Persist a correlation event (alert or no-alert) to DuckDB.
 
@@ -148,11 +209,35 @@ class CorrelationAlertService:
                 "gex_change_pct": signals.get("gex_change_pct"),
                 "price_change_pct": signals.get("price_change_pct"),
                 "config_snapshot": None,
+                # Classification
+                "event_category": event_category or alert.get("event_category"),
+                "category_severity": category_severity or alert.get("category_severity"),
+                "source_type": source_type or alert.get("source_type"),
+                "text_fingerprint": text_fingerprint or alert.get("text_fingerprint"),
+                "is_first_mention": is_first_mention,
+                "first_mention_id": first_mention_id,
+                "credibility_rank": credibility_rank,
+                "gex_regime": gex_regime or alert.get("gex_regime"),
+                "net_gex_at_alert": net_gex_at_alert,
+                # Realized impact (back-filled later)
                 "realized_impact_score": realized_impact_score,
-                "price_t0": price_t0,
-                "price_t15": price_t15,
                 "price_ticker": price_ticker,
                 "is_noise": is_noise,
+                "price_t0": price_t0,
+                "price_t5": None,
+                "price_t15": price_t15,
+                "price_t30": None,
+                "price_t60": None,
+                "tick_price_t0": None,
+                "tick_price_t5": None,
+                "tick_price_t15": None,
+                "tick_price_t30": None,
+                "tick_price_t60": None,
+                "tick_move_t5_pct": None,
+                "tick_move_t15_pct": None,
+                "tick_move_t30_pct": None,
+                "tick_move_t60_pct": None,
+                "tick_move_direction": None,
             }
 
             self._insert_row(row)
@@ -163,10 +248,23 @@ class CorrelationAlertService:
         self,
         social_event_id: str,
         realized_impact_score: float,
-        price_t0: Optional[float],
-        price_t15: Optional[float],
         price_ticker: str,
         is_noise: bool,
+        price_t0: Optional[float] = None,
+        price_t5: Optional[float] = None,
+        price_t15: Optional[float] = None,
+        price_t30: Optional[float] = None,
+        price_t60: Optional[float] = None,
+        tick_price_t0: Optional[float] = None,
+        tick_price_t5: Optional[float] = None,
+        tick_price_t15: Optional[float] = None,
+        tick_price_t30: Optional[float] = None,
+        tick_price_t60: Optional[float] = None,
+        tick_move_t5_pct: Optional[float] = None,
+        tick_move_t15_pct: Optional[float] = None,
+        tick_move_t30_pct: Optional[float] = None,
+        tick_move_t60_pct: Optional[float] = None,
+        tick_move_direction: Optional[str] = None,
     ) -> None:
         """Update realized impact columns for an event already in the DB."""
         try:
@@ -176,15 +274,34 @@ class CorrelationAlertService:
                     f"""
                     UPDATE {TABLE_NAME}
                     SET realized_impact_score = ?,
-                        price_t0             = ?,
-                        price_t15            = ?,
                         price_ticker         = ?,
-                        is_noise             = ?
+                        is_noise             = ?,
+                        price_t0             = ?,
+                        price_t5             = ?,
+                        price_t15            = ?,
+                        price_t30            = ?,
+                        price_t60            = ?,
+                        tick_price_t0        = ?,
+                        tick_price_t5        = ?,
+                        tick_price_t15       = ?,
+                        tick_price_t30       = ?,
+                        tick_price_t60       = ?,
+                        tick_move_t5_pct     = ?,
+                        tick_move_t15_pct    = ?,
+                        tick_move_t30_pct    = ?,
+                        tick_move_t60_pct    = ?,
+                        tick_move_direction  = ?
                     WHERE social_event_id = ?
                     """,
                     [
-                        realized_impact_score, price_t0, price_t15,
-                        price_ticker, is_noise, social_event_id,
+                        realized_impact_score, price_ticker, is_noise,
+                        price_t0, price_t5, price_t15, price_t30, price_t60,
+                        tick_price_t0, tick_price_t5, tick_price_t15,
+                        tick_price_t30, tick_price_t60,
+                        tick_move_t5_pct, tick_move_t15_pct,
+                        tick_move_t30_pct, tick_move_t60_pct,
+                        tick_move_direction,
+                        social_event_id,
                     ],
                 )
         except Exception:

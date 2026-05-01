@@ -454,38 +454,43 @@ tr:hover { background: var(--bg3); }
   background: rgba(219,109,40,.2); padding: 1px 6px; border-radius: 8px;
 }
 .mover-banner.high    .mover-queue-count { color: var(--red); background: var(--red-bg); }
-.mover-body {
-  padding: 4px 12px 6px; font-size: 12px; line-height: 1.45;
+.mover-list {
+  max-height: 240px; overflow-y: auto;
 }
+.mover-list-item {
+  padding: 5px 12px 6px; border-bottom: 1px solid rgba(219,109,40,.18);
+  font-size: 12px; line-height: 1.45;
+}
+.mover-list-item:last-child { border-bottom: none; }
 .mover-source-row {
   display: flex; align-items: center; gap: 6px; margin-bottom: 3px;
 }
 .mover-author { font-size: 10px; font-weight: 700; color: var(--text2); }
 .mover-time   { font-size: 9px; color: var(--text2); margin-left: auto; }
 .mover-text   { color: var(--text); word-break: break-word; }
+.mover-list-footer {
+  display: flex; align-items: center; gap: 8px; margin-top: 4px;
+}
 .mover-metrics {
-  display: flex; gap: 10px; margin-top: 4px; flex-wrap: wrap;
+  display: flex; gap: 6px; flex-wrap: wrap;
 }
 .mover-metric {
   font-size: 10px; font-variant-numeric: tabular-nums;
   background: var(--bg3); padding: 2px 7px; border-radius: 3px; color: var(--text2);
 }
 .mover-metric span { font-weight: 700; color: var(--text); }
+.mover-driver-btn {
+  margin-left: auto; padding: 3px 10px; border-radius: var(--radius);
+  border: 1px solid var(--orange); background: rgba(219,109,40,.15);
+  color: var(--orange); font-size: 10px; font-weight: 700; cursor: pointer;
+  white-space: nowrap; transition: all .15s;
+}
+.mover-driver-btn:hover { background: rgba(219,109,40,.4); }
+.mover-banner.high .mover-driver-btn { border-color: var(--red); background: var(--red-bg); color: var(--red); }
 .mover-footer {
   display: flex; align-items: center; gap: 8px;
   padding: 5px 12px 6px; border-top: 1px solid rgba(219,109,40,.2);
 }
-.mover-ack-btn {
-  flex: 1; padding: 5px 0; border-radius: var(--radius);
-  border: 1px solid var(--orange); background: rgba(219,109,40,.15);
-  color: var(--orange); font-size: 11px; font-weight: 700; cursor: pointer;
-  letter-spacing: .3px; transition: all .15s;
-}
-.mover-ack-btn:hover { background: rgba(219,109,40,.35); }
-.mover-banner.high    .mover-ack-btn { border-color: var(--red); background: var(--red-bg); color: var(--red); }
-.mover-banner.high    .mover-ack-btn:hover { background: rgba(248,81,73,.3); }
-.mover-banner.bullish .mover-ack-btn { border-color: var(--green); background: var(--green-bg); color: var(--green); }
-.mover-banner.bullish .mover-ack-btn:hover { background: rgba(63,185,80,.3); }
 .mover-skip-btn {
   padding: 5px 10px; border-radius: var(--radius);
   border: 1px solid var(--border); background: none;
@@ -520,23 +525,12 @@ tr:hover { background: var(--bg3); }
 <!-- ===== MARKET MOVER BANNER ===== -->
 <div class="mover-banner" id="moverBanner">
   <div class="mover-header">
-    <span class="mover-label">&#x26A1; Market Mover</span>
-    <span class="mover-type" id="moverType"></span>
+    <span class="mover-label">&#x26A1; Which story drove this?</span>
     <span class="mover-signals" id="moverSignals"></span>
-    <span class="mover-queue-count" id="moverQueueCount" style="display:none"></span>
   </div>
-  <div class="mover-body">
-    <div class="mover-source-row">
-      <span class="social-source" id="moverSource"></span>
-      <span class="mover-author" id="moverAuthor"></span>
-      <span class="mover-time" id="moverTime"></span>
-    </div>
-    <div class="mover-text" id="moverText"></div>
-    <div class="mover-metrics" id="moverMetrics"></div>
-  </div>
+  <div class="mover-list" id="moverList"></div>
   <div class="mover-footer">
-    <button class="mover-ack-btn" id="moverAckBtn">&#x2713; Acknowledge &mdash; I see this is driving the move</button>
-    <button class="mover-skip-btn" id="moverSkipBtn" title="Not driving the market &mdash; skip">Not driving</button>
+    <button class="mover-skip-btn" id="moverDismissAllBtn">None of these &mdash; dismiss all</button>
   </div>
 </div>
 
@@ -594,6 +588,9 @@ tr:hover { background: var(--bg3); }
   </div>
 </div>
 
+<!-- ===== CALENDAR STRIP ===== -->
+<div id="calendarStrip" style="display:none;padding:4px 12px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:10px;color:var(--text2);white-space:nowrap;overflow-x:auto"></div>
+
 <!-- ===== TOP STORIES ===== -->
 <div class="top-section" id="topSection">
   <div class="top-header">
@@ -603,17 +600,13 @@ tr:hover { background: var(--bg3); }
   <div class="top-feed collapsible-body" id="topFeed"></div>
 </div>
 
-<!-- ===== NEWS / SOCIAL FEED ===== -->
-<div class="social-section" id="socialSection">
-  <div class="social-header">
-    <div class="section-title collapsible-toggle" onclick="toggleCollapse(this, 'socialFeed')">News / Social</div>
-    <div>
-      <span class="conn-item"><span class="dot warn" id="socialDot"></span><span id="socialLabel" style="font-size:10px;color:var(--text2)">News…</span></span>
-      <span class="social-count" id="socialCount"></span>
-    </div>
-  </div>
-  <div class="social-feed collapsible-body" id="socialFeed"></div>
+<!-- News/Social feed hidden — data still ingested for correlation/top stories -->
+<div id="socialSection" style="display:none">
+  <div id="socialFeed"></div>
 </div>
+<span id="socialDot" style="display:none"></span>
+<span id="socialLabel" style="display:none"></span>
+<span id="socialCount" style="display:none"></span>
 
 <!-- ===== SETTINGS PANEL ===== -->
 <div class="settings-panel" id="settingsPanel">
@@ -1018,8 +1011,8 @@ function toggleCollapse(el, bodyId) {
   var socialMsgCount = 0;
   var topMsgCount = 0;
   var MAX_SOCIAL_ITEMS = 50;
-  var MAX_TOP_ITEMS = 20;
-  var TOP_SCORE_THRESHOLD = 3;
+  var MAX_TOP_ITEMS = 8;
+  var TOP_SCORE_THRESHOLD = 6;
 
   function socialConnect() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1436,18 +1429,123 @@ function toggleCollapse(el, bodyId) {
   function ingestCorrAlert(alert) {
     var id = alert.alert_id;
     if (!id) return;
+    var alertType = (alert.alert_type || '').toLowerCase();
+    var alertAge = alert.timestamp ? (Date.now() - new Date(alert.timestamp).getTime()) : 0;
+
+    // Calendar alerts bypass the queue — flash the screen and add to Top Stories only
+    if (alertType === 'calendar_warning' || alertType === 'calendar_result') {
+      if (moverAcked[id]) return;
+      moverAcked[id] = { ts: Date.now(), confirmed: false, alert: alert };
+      corrSaveAcked();
+      _promoteCorrAlertToTopStories(alert);
+      if (alertAge < 60000) {
+        var isCalWarning = alertType === 'calendar_warning';
+        var minutesUntil = alert.minutes_until || 0;
+        var flashCount = isCalWarning ? (minutesUntil <= 2 ? 5 : 3) : 4;
+        var flashColor = isCalWarning ? (minutesUntil <= 10 ? 'red' : 'green') : (alert.surprise === 'miss' ? 'red' : 'green');
+        doFlash(flashColor, flashCount);
+        if (isCalWarning) playMoverAlarm(true); else playMoverChime();
+      }
+      return;
+    }
+
     // Skip already-acknowledged or already-queued
     if (moverAcked[id]) return;
-    if (moverQueue.some(function(a) { return a.alert_id === id; })) return;
-    moverQueue.unshift(alert);   // newest first
-    corrSaveQueue();
-    renderMoverBanner();
-    // Play a distinct alarm tone for confluence/high severity
-    if (alert.severity === 'high') {
-      playMoverAlarm(true);
-    } else {
-      playMoverChime();
+    var alreadyQueued = moverQueue.some(function(a) { return a.alert_id === id; });
+    if (!alreadyQueued) {
+      moverQueue.unshift(alert);   // newest first
+      corrSaveQueue();
     }
+    renderMoverBanner();
+    // Auto-promote to Top Stories immediately
+    _promoteCorrAlertToTopStories(alert);
+    // Only play audio for fresh alerts (not backfill)
+    if (!alreadyQueued && alertAge < 60000) {
+      if (alert.severity === 'high') {
+        playMoverAlarm(true);
+      } else {
+        playMoverChime();
+      }
+    }
+  }
+
+  function _promoteCorrAlertToTopStories(alert) {
+    // Don't duplicate if already present
+    var existing = $('topFeed').querySelector('[data-corr-id="' + alert.alert_id + '"]');
+    if (existing) return;
+
+    var alertType = (alert.alert_type || '').toLowerCase();
+    var topItem = document.createElement('div');
+    topItem.setAttribute('data-corr-id', alert.alert_id);
+    var evtTime = null;
+    var timeStr = '';
+
+    if (alertType === 'calendar_warning' || alertType === 'calendar_result') {
+      var isWarning = alertType === 'calendar_warning';
+      var surpriseMap = { beat: '✅ BEAT', miss: '❌ MISS', inline: '➡️ inline' };
+      var surpriseBadge = alert.surprise ? (' ' + (surpriseMap[alert.surprise] || '')) : '';
+      topItem.className = 'top-item' + (alert.surprise === 'miss' ? ' bearish' : alert.surprise === 'beat' ? ' bullish' : '');
+      if (alert.event_time) { try { evtTime = new Date(alert.event_time); timeStr = evtTime.toLocaleTimeString('en-US', {timeZone:'America/New_York'}); } catch(e){} }
+      var metaBits = [];
+      if (alert.actual)   metaBits.push('Actual: ' + alert.actual);
+      if (alert.forecast) metaBits.push('Fcst: '   + alert.forecast);
+      if (alert.previous) metaBits.push('Prev: '   + alert.previous);
+      topItem.innerHTML =
+        '<div class="social-meta">' +
+          '<span class="social-source news_rss">📅 ' + (isWarning ? 'Event Warning' : 'Result') + '</span>' +
+          '<span style="font-size:9px;color:var(--yellow);margin-left:4px;font-weight:700">' +
+            (isWarning ? ('in ' + (alert.minutes_until || '?') + ' min') : surpriseBadge) +
+          '</span>' +
+          '<span class="social-time">' + timeStr + '</span>' +
+        '</div>' +
+        '<div class="social-text">' + escHtml(alert.event_title || '') + '</div>' +
+        (metaBits.length ? '<div style="font-size:9px;color:var(--text2);margin-top:2px">' + metaBits.join(' · ') + '</div>' : '');
+    } else if (alertType === 'sustained_move') {
+      // ── Sustained move — show direction + driver headlines ──
+      var direction = (alert.direction || 'neutral').toLowerCase();
+      topItem.className = 'top-item' + (direction === 'bearish' ? ' bearish' : direction === 'bullish' ? ' bullish' : '');
+      if (alert.timestamp) { try { evtTime = new Date(alert.timestamp); timeStr = evtTime.toLocaleTimeString('en-US', {timeZone:'America/New_York'}); } catch(e){} }
+      var drivers = alert.driver_events || [];
+      var pct = (alert.price_change_pct || 0);
+      var driverHtml = drivers.slice(0, 3).map(function(e) {
+        return '<div style="font-size:10px;color:var(--text2);margin-top:2px">\u2022 ' + escHtml((e.author||'') + ': ' + (e.text||'').substring(0,100)) + '</div>';
+      }).join('');
+      topItem.innerHTML =
+        '<div class="social-meta">' +
+          '<span class="social-source news_rss">' + (direction === 'bearish' ? '\uD83D\uDCC9 Sustained Drop' : '\uD83D\uDCC8 Sustained Rally') + '</span>' +
+          '<span style="font-size:9px;color:var(--orange);margin-left:4px;font-weight:700">\u26A0 Regime</span>' +
+          '<span style="font-size:9px;color:var(--text2);margin-left:4px">' + (alert.symbol||'') + ' ' + (pct > 0 ? '+' : '') + pct.toFixed(2) + '% / ' + (alert.window_minutes||10) + 'min</span>' +
+          '<span class="social-time">' + timeStr + '</span>' +
+        '</div>' +
+        (driverHtml || '<div class="social-text">No matching drivers in lookback</div>');
+    } else {
+      // ── Standard single-event correlation alert ──
+      var evt = alert.social_event || {};
+      var sig = alert.market_signals || {};
+      var sentiment = (evt.sentiment || 'neutral').toLowerCase();
+      var typeLabels = { volume_spike: '\uD83D\uDCCA Vol Spike', gex_shift: '\uD83E\uDDF2 GEX Shift',
+                         price_move: '\uD83D\uDCC9 Price Move', confluence: '\u26A1 Confluence' };
+      var badge = typeLabels[alertType] || alertType;
+      if (evt.timestamp) { try { evtTime = new Date(evt.timestamp); timeStr = evtTime.toLocaleTimeString('en-US', {timeZone:'America/New_York'}); } catch(e){} }
+      var metricsBits = [];
+      if (sig.volume_ratio   != null) metricsBits.push('Vol '   + sig.volume_ratio.toFixed(1) + '\xD7');
+      if (sig.gex_change_pct != null) metricsBits.push('GEX '   + (sig.gex_change_pct > 0 ? '+' : '') + sig.gex_change_pct.toFixed(1) + '%');
+      if (sig.price_change_pct != null) metricsBits.push('Price ' + (sig.price_change_pct > 0 ? '+' : '') + sig.price_change_pct.toFixed(2) + '%');
+      topItem.className = 'top-item' + (sentiment === 'bullish' ? ' bullish' : sentiment === 'bearish' ? ' bearish' : '');
+      topItem.innerHTML =
+        '<div class="social-meta">' +
+          '<span class="social-source news_rss">' + badge + '</span>' +
+          '<span class="social-author">' + escHtml(evt.author || '') + '</span>' +
+          '<span style="font-size:9px;color:var(--orange);margin-left:4px;font-weight:700">\u26A1 Move Driver</span>' +
+          '<span class="social-time">' + timeStr + '</span>' +
+        '</div>' +
+        '<div class="social-text">' + escHtml(evt.text || '') + '</div>' +
+        (metricsBits.length ? '<div style="font-size:9px;color:var(--text2);margin-top:2px">' + metricsBits.join(' \xB7 ') + '</div>' : '');
+    }
+
+    topMsgCount++;
+    $('topCount').textContent = topMsgCount + ' alert' + (topMsgCount !== 1 ? 's' : '');
+    insertByTime($('topFeed'), topItem, evtTime, MAX_TOP_ITEMS);
   }
 
   function playMoverChime() {
@@ -1483,106 +1581,166 @@ function toggleCollapse(el, bodyId) {
       banner.className = 'mover-banner';   // hide
       return;
     }
-    var alert = moverQueue[0];
-    var evt = alert.social_event || {};
-    var sig = alert.market_signals || {};
-    var sentiment = (evt.sentiment || 'neutral').toLowerCase();
-    var alertType = (alert.alert_type || '').toLowerCase();
-    var severity  = (alert.severity  || 'medium').toLowerCase();
 
-    // Banner colour class
+    // Determine severity class from the highest-urgency item in the queue
+    var hasHigh    = moverQueue.some(function(a) { return a.severity === 'high'; });
+    var hasBearish = moverQueue.some(function(a) {
+      var s = (a.social_event && a.social_event.sentiment) || a.direction || '';
+      return s === 'bearish';
+    });
+    var hasBullish = !hasBearish && moverQueue.some(function(a) {
+      var s = (a.social_event && a.social_event.sentiment) || a.direction || '';
+      return s === 'bullish';
+    });
     var cls = 'mover-banner visible';
-    if (severity === 'high')          cls += ' high';
-    else if (sentiment === 'bullish') cls += ' bullish';
-    else if (sentiment === 'bearish') cls += ' bearish';
+    if (hasHigh)         cls += ' high';
+    else if (hasBearish) cls += ' bearish';
+    else if (hasBullish) cls += ' bullish';
     banner.className = cls;
 
-    // Type badge
-    var typeLabels = { volume_spike: '📊 Volume Spike', gex_shift: '🧲 GEX Shift',
-                       price_move: '📈 Price Move',   confluence: '⚡ Confluence' };
-    $('moverType').textContent = typeLabels[alertType] || alertType;
+    $('moverSignals').textContent = moverQueue.length + ' candidate' + (moverQueue.length !== 1 ? 's' : '');
 
-    // Signals triggered
-    var signals = (alert.signals_triggered || []).join(' · ');
-    $('moverSignals').textContent = signals ? '(' + signals + ')' : '';
+    var listEl = $('moverList');
+    listEl.innerHTML = '';
+    moverQueue.forEach(function(a) {
+      var aType = (a.alert_type || '').toLowerCase();
+      var evt = a.social_event || {};
+      var sig = a.market_signals || {};
+      var timeStr = '';
+      var ts = evt.timestamp || a.timestamp;
+      if (ts) { try { timeStr = new Date(ts).toLocaleTimeString('en-US', {timeZone:'America/New_York'}); } catch(e){} }
 
-    // Queue count badge
-    var qEl = $('moverQueueCount');
-    if (moverQueue.length > 1) {
-      qEl.textContent = moverQueue.length + ' waiting'; qEl.style.display = '';
-    } else { qEl.style.display = 'none'; }
+      var typeLabels = {
+        volume_spike: '\uD83D\uDCCA Vol Spike', gex_shift: '\uD83E\uDDF2 GEX Shift',
+        price_move: '\uD83D\uDCC8 Price Move', confluence: '\u26A1 Confluence',
+        sustained_move: a.direction === 'bearish' ? '\uD83D\uDCC9 Sustained Drop' : '\uD83D\uDCC8 Sustained Rally'
+      };
+      var badge = typeLabels[aType] || aType;
+      var sourceCls = escHtml(evt.source || 'news_rss');
 
-    // Source / author / time
-    var source = evt.source || 'unknown';
-    var srcLabels = { truth_social: 'Truth Social', twitter: 'Twitter/X', news_rss: 'News' };
-    var srcEl = $('moverSource');
-    srcEl.className = 'social-source ' + source;
-    srcEl.textContent = srcLabels[source] || source;
-    $('moverAuthor').textContent = evt.author || '';
-    var tStr = '';
-    if (evt.timestamp) { try { tStr = new Date(evt.timestamp).toLocaleTimeString('en-US', {timeZone:'America/New_York'}); } catch(e){} }
-    $('moverTime').textContent = tStr;
+      var metricsBits = [];
+      if (aType === 'sustained_move') {
+        if (a.price_change_pct != null) metricsBits.push('Move ' + (a.price_change_pct > 0 ? '+' : '') + a.price_change_pct.toFixed(2) + '%');
+        if (a.window_minutes)           metricsBits.push(a.window_minutes + 'min');
+      } else {
+        if (sig.volume_ratio    != null) metricsBits.push('Vol '   + sig.volume_ratio.toFixed(1) + '\xD7');
+        if (sig.gex_change_pct  != null) metricsBits.push('GEX '   + (sig.gex_change_pct  > 0 ? '+' : '') + sig.gex_change_pct.toFixed(1)  + '%');
+        if (sig.price_change_pct != null) metricsBits.push('Price ' + (sig.price_change_pct > 0 ? '+' : '') + sig.price_change_pct.toFixed(2) + '%');
+      }
 
-    // Text (full, not truncated — this is the important thing to read)
-    $('moverText').textContent = evt.text || '';
+      var textContent;
+      if (aType === 'sustained_move') {
+        var drivers = a.driver_events || [];
+        textContent = drivers.length
+          ? drivers.slice(0, 2).map(function(e) { return '[' + (e.author||'') + '] ' + (e.text||'').substring(0, 110); }).join('  \u2022  ')
+          : 'Sustained price move \u2014 no news driver found';
+      } else {
+        textContent = evt.text || '';
+      }
 
-    // Market metrics
-    var metricsHtml = '';
-    if (sig.volume_ratio  != null) metricsHtml += '<div class="mover-metric">Vol Ratio <span>' + sig.volume_ratio.toFixed(1) + '×</span></div>';
-    if (sig.gex_change_pct != null) metricsHtml += '<div class="mover-metric">GEX Δ <span>' + (sig.gex_change_pct > 0 ? '+' : '') + sig.gex_change_pct.toFixed(1) + '%</span></div>';
-    if (sig.price_change_pct != null) metricsHtml += '<div class="mover-metric">Price Δ <span>' + (sig.price_change_pct > 0 ? '+' : '') + sig.price_change_pct.toFixed(2) + '%</span></div>';
-    if (sig.symbol) metricsHtml += '<div class="mover-metric">Symbol <span>' + escHtml(sig.symbol) + '</span></div>';
-    $('moverMetrics').innerHTML = metricsHtml;
+      var metricsHtml = metricsBits.map(function(m) {
+        return '<div class="mover-metric"><span>' + m + '</span></div>';
+      }).join('');
+
+      var item = document.createElement('div');
+      item.className = 'mover-list-item';
+      item.innerHTML =
+        '<div class="mover-source-row">' +
+          '<span class="social-source ' + sourceCls + '">' + badge + '</span>' +
+          (evt.author ? '<span class="mover-author">' + escHtml(evt.author) + '</span>' : '') +
+          '<span class="mover-time">' + timeStr + '</span>' +
+        '</div>' +
+        '<div class="mover-text">' + escHtml(textContent) + '</div>' +
+        '<div class="mover-list-footer">' +
+          (metricsHtml ? '<div class="mover-metrics">' + metricsHtml + '</div>' : '') +
+          '<button class="mover-driver-btn" data-aid="' + escHtml(a.alert_id) + '">This drove it \u2713</button>' +
+        '</div>';
+      listEl.appendChild(item);
+    });
+
+    // Wire up per-item driver buttons
+    listEl.querySelectorAll('.mover-driver-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() { moverMarkDriver(btn.getAttribute('data-aid')); });
+    });
   }
 
-  function moverAcknowledge(isDriverConfirmed) {
-    if (!moverQueue.length) return;
-    var alert = moverQueue.shift();
-    moverAcked[alert.alert_id] = { ts: Date.now(), confirmed: isDriverConfirmed };
+  function moverMarkDriver(alertId) {
+    // Tag the confirmed driver in Top Stories (already added by ingestCorrAlert)
+    var el = $('topFeed').querySelector('[data-corr-id="' + alertId + '"]');
+    if (el && !el.querySelector('.driver-tag')) {
+      var tag = document.createElement('span');
+      tag.className = 'driver-tag';
+      tag.style.cssText = 'color:var(--green);font-size:9px;margin-left:4px;font-weight:700';
+      tag.textContent = '\u2713 drove it';
+      var meta = el.querySelector('.social-meta');
+      if (meta) meta.appendChild(tag);
+    }
+    // Dismiss the whole queue — one story was the driver, rest were noise
+    moverQueue.forEach(function(a) {
+      moverAcked[a.alert_id] = { ts: Date.now(), confirmed: a.alert_id === alertId, alert: a };
+    });
+    moverQueue = [];
     corrSaveQueue(); corrSaveAcked();
-
-    // Promote to Top Stories feed
-    var evt = alert.social_event || {};
-    var sig = alert.market_signals || {};
-    topMsgCount++;
-    $('topCount').textContent = topMsgCount + ' alert' + (topMsgCount !== 1 ? 's' : '');
-    var topItem = document.createElement('div');
-    topItem.className = 'top-item' + (alert.severity === 'high' ? ' bearish' : '');
-    var sentiment = (evt.sentiment || 'neutral').toLowerCase();
-    if (sentiment === 'bullish') topItem.className += ' bullish';
-    else if (sentiment === 'bearish') topItem.className += ' bearish';
-    var typeLabels = { volume_spike: '📊 Vol', gex_shift: '🧲 GEX', price_move: '📈 Price', confluence: '⚡ Confluence' };
-    var badge = typeLabels[alert.alert_type] || alert.alert_type;
-    var ackMark = isDriverConfirmed ? ' <span style="color:var(--green);font-size:9px">✓ confirmed driver</span>' : ' <span style="color:var(--text2);font-size:9px">— not driving</span>';
-    var timeStr = '';
-    if (evt.timestamp) { try { timeStr = new Date(evt.timestamp).toLocaleTimeString('en-US', {timeZone:'America/New_York'}); } catch(e){} }
-    var metricsBits = [];
-    if (sig.volume_ratio  != null) metricsBits.push('Vol ' + sig.volume_ratio.toFixed(1) + '×');
-    if (sig.gex_change_pct != null) metricsBits.push('GEX ' + (sig.gex_change_pct > 0 ? '+' : '') + sig.gex_change_pct.toFixed(1) + '%');
-    if (sig.price_change_pct != null) metricsBits.push('Price ' + (sig.price_change_pct > 0 ? '+' : '') + sig.price_change_pct.toFixed(2) + '%');
-    topItem.innerHTML =
-      '<div class="social-meta">' +
-        '<span class="social-source ' + (evt.source||'') + '">' + badge + '</span>' +
-        '<span class="social-author">' + escHtml(evt.author || '') + '</span>' +
-        ackMark +
-        '<span class="social-time">' + timeStr + '</span>' +
-      '</div>' +
-      '<div class="social-text">' + escHtml(evt.text || '') + '</div>' +
-      (metricsBits.length ? '<div style="font-size:9px;color:var(--text2);margin-top:2px">' + metricsBits.join(' · ') + '</div>' : '');
-    insertByTime($('topFeed'), topItem, evt.timestamp ? new Date(evt.timestamp) : null, MAX_TOP_ITEMS);
     renderMoverBanner();
   }
 
-  $('moverAckBtn').addEventListener('click',  function() { moverAcknowledge(true);  });
-  $('moverSkipBtn').addEventListener('click', function() { moverAcknowledge(false); });
+  function moverDismissAll() {
+    moverQueue.forEach(function(a) {
+      moverAcked[a.alert_id] = { ts: Date.now(), confirmed: false, alert: a };
+    });
+    moverQueue = [];
+    corrSaveQueue(); corrSaveAcked();
+    renderMoverBanner();
+  }
 
-  // Restore queue on page load
-  if (moverQueue.length) renderMoverBanner();
+  $('moverDismissAllBtn').addEventListener('click', moverDismissAll);
+
+  // Restore queue on page load — rebuild Top Stories from saved correlation alerts
+  if (moverQueue.length) {
+    renderMoverBanner();
+    // Repopulate Top Stories with saved market movers (newest first, already in queue order)
+    for (var _qi = moverQueue.length - 1; _qi >= 0; _qi--) {
+      _promoteCorrAlertToTopStories(moverQueue[_qi]);
+    }
+  }
+  // Also repopulate from acknowledged alerts (they were drivers too)
+  Object.keys(moverAcked).forEach(function(aid) {
+    var entry = moverAcked[aid];
+    if (entry && entry.alert) _promoteCorrAlertToTopStories(entry.alert);
+  });
 
   // =====================================================================
   //  BOOT
   // =====================================================================
   document.addEventListener('click', function() { getAudioCtx(); }, { once: true });
+
+  // Fetch today's economic calendar and render the strip
+  (function fetchCalendar() {
+    fetch('/api/calendar').then(function(r) { return r.json(); }).then(function(data) {
+      var events = (data.events || []).filter(function(e) {
+        // Only show events still in the future (or within past 15 min)
+        var t = new Date(e.event_time).getTime();
+        return t > Date.now() - 15 * 60000;
+      });
+      if (!events.length) return;
+      var strip = $('calendarStrip');
+      strip.style.display = '';
+      var impactColor = { High: 'var(--red)', Medium: 'var(--yellow)', Low: 'var(--text2)' };
+      strip.innerHTML = '<span style="color:var(--text2);margin-right:8px">📅 Today:</span>' +
+        events.map(function(e) {
+          var tStr = '';
+          try { tStr = new Date(e.event_time).toLocaleTimeString('en-US', {timeZone:'America/New_York', hour:'2-digit', minute:'2-digit'}); } catch(ex) {}
+          var color = impactColor[e.impact] || 'var(--text2)';
+          return '<span style="margin-right:12px;color:' + color + '">' +
+            tStr + ' <strong>' + escHtml(e.title) + '</strong>' +
+            (e.forecast ? ' <span style="opacity:.7">Fcst:' + escHtml(e.forecast) + '</span>' : '') +
+          '</span>';
+        }).join('');
+    }).catch(function() {});
+    // Refresh strip every 5 min
+    setTimeout(fetchCalendar, 300000);
+  })();
+
   gexConnect();
   socialConnect();
   corrConnect();

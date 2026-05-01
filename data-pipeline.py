@@ -64,6 +64,7 @@ from src.services.schwab_streamer import SchwabStreamClient, build_streamer  # n
 from src.services.social_feed_service import SocialFeedService, FeedConfig, KeywordScorer  # noqa: E402
 from src.services.social_feed_service import SOCIAL_ALL_EVENTS_CHANNEL, SOCIAL_HISTORY_KEY  # noqa: E402
 from src.services.correlation_engine import CorrelationEngine  # noqa: E402
+from src.services.economic_calendar_service import EconomicCalendarService, CALENDAR_REDIS_KEY  # noqa: E402
 from src.services.market_mover_analyzer import MarketMoverAnalyzer, MarketMoverResult  # noqa: E402
 from src.models.social_event import SocialSource  # noqa: E402
 
@@ -217,6 +218,7 @@ class ServiceManager:
         self.schwab_service = SchwabStreamingService(self)
         self.social_feed: Optional[SocialFeedService] = None
         self.correlation_engine: Optional[CorrelationEngine] = None
+        self.calendar_service: Optional[EconomicCalendarService] = None
         self.trade_count = 0
         self.depth_count = 0
         self.trade_counts: Dict[str, int] = {}
@@ -259,6 +261,7 @@ class ServiceManager:
             "redis_flush",
             "social_feed",
             "correlation",
+            "calendar",
         ):
             self.start_service(service)
 
@@ -266,6 +269,7 @@ class ServiceManager:
         """Stop all managed services in a best-effort fashion."""
         for service in (
             "correlation",
+            "calendar",
             "social_feed",
             "tastytrade",
             "schwab",
@@ -488,6 +492,12 @@ class ServiceManager:
             )
             self.correlation_engine.start()
             LOGGER.info("Correlation engine started")
+        elif name == "calendar":
+            if self.calendar_service:
+                return
+            self.calendar_service = EconomicCalendarService(redis_client=self.redis_client)
+            self.calendar_service.start()
+            LOGGER.info("Economic calendar service started")
 
     async def stop_service(self, name: str) -> None:
         """Stop a running service and clean up the local reference."""
@@ -519,6 +529,10 @@ class ServiceManager:
             await self.correlation_engine.stop()
             self.correlation_engine = None
             LOGGER.info("Correlation engine stopped")
+        elif name == "calendar" and self.calendar_service:
+            await self.calendar_service.stop()
+            self.calendar_service = None
+            LOGGER.info("Economic calendar service stopped")
 
     async def restart_service(self, name: str) -> None:
         """Convenience helper for the ``/control`` endpoint."""
@@ -897,6 +911,20 @@ async def order_panel():
     from fastapi.responses import FileResponse
     panel_path = PROJECT_ROOT / "frontend" / "src" / "order_panel.html"
     return FileResponse(str(panel_path))
+
+
+@app.get("/api/calendar")
+async def get_calendar() -> Dict[str, Any]:
+    """Return today's high-impact economic events (cached from Forex Factory feed)."""
+    redis_conn = _get_redis_client()
+    try:
+        raw = redis_conn.get(CALENDAR_REDIS_KEY)
+        if raw:
+            events = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+            return {"events": events, "count": len(events)}
+    except Exception:
+        pass
+    return {"events": [], "count": 0}
 
 
 @app.get("/gex-monitor")
