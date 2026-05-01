@@ -57,9 +57,10 @@ TICK_SYMBOLS = {"MNQ", "MES", "NQ", "QQQ", "SPY"}
 
 # Measurement windows in seconds
 WINDOWS_SECONDS = {
-    "t5":  5 * 60,
+    "t5":  5  * 60,
     "t15": 15 * 60,
     "t30": 30 * 60,
+    "t60": 60 * 60,
 }
 
 # Impact scoring weights (must sum to 100)
@@ -92,17 +93,33 @@ class MarketMoverResult(BaseModel):
         description="0–100 composite score of actual price/GEX/volume move",
     )
     price_ticker:         str = ""
+    # GEX timeseries prices (1-min resolution from parquet)
     price_t0:             Optional[float] = None
     price_t5:             Optional[float] = None
     price_t15:            Optional[float] = None
     price_t30:            Optional[float] = None
+    price_t60:            Optional[float] = None
     price_move_pct:       Optional[float] = Field(
         default=None,
         description="Best horizon price move (% from T0)",
     )
+    # GEX aggregate signal
     gex_t0:               Optional[float] = None
     gex_t15:              Optional[float] = None
     gex_shift_pct:        Optional[float] = None
+    gex_regime:           Optional[str] = None   # above_zero_gamma | below_zero_gamma | unknown
+    net_gex_at_alert:     Optional[float] = None
+    # Tick-level high-resolution prices (second-resolution from MNQ tick parquet)
+    tick_price_t0:        Optional[float] = None
+    tick_price_t5:        Optional[float] = None
+    tick_price_t15:       Optional[float] = None
+    tick_price_t30:       Optional[float] = None
+    tick_price_t60:       Optional[float] = None
+    tick_move_t5_pct:     Optional[float] = None
+    tick_move_t15_pct:    Optional[float] = None
+    tick_move_t30_pct:    Optional[float] = None
+    tick_move_t60_pct:    Optional[float] = None
+    tick_move_direction:  Optional[str] = None   # up | down | flat
     volume_ratio:         Optional[float] = None
     sentiment:            str = "neutral"
     is_noise:             bool = False
@@ -226,7 +243,7 @@ class MarketMoverAnalyzer:
 
         # Try each tracked ticker until we get price data
         price_ticker = ""
-        price_t0 = price_t5 = price_t15 = price_t30 = None
+        price_t0 = price_t5 = price_t15 = price_t30 = price_t60 = None
         gex_t0 = gex_t15 = None
 
         for ticker_key, gex_suffix in self.tickers.items():
@@ -237,13 +254,42 @@ class MarketMoverAnalyzer:
                 price_t5  = p["t5"]
                 price_t15 = p["t15"]
                 price_t30 = p["t30"]
+                price_t60 = p["t60"]
                 g = self._fetch_gex_windows(gex_suffix, ts_ms)
                 gex_t0  = g["t0"]
                 gex_t15 = g["t15"]
                 break
 
-        # Best price move (largest absolute % across horizons)
-        price_move_pct = _best_price_move(price_t0, price_t5, price_t15, price_t30)
+        # High-res tick prices from MNQ parquet
+        tick = self._fetch_tick_price_windows(ts_ms)
+        tick_price_t0  = tick["t0"]
+        tick_price_t5  = tick["t5"]
+        tick_price_t15 = tick["t15"]
+        tick_price_t30 = tick["t30"]
+        tick_price_t60 = tick["t60"]
+
+        # Tick move %s
+        def _tick_move(end: Optional[float]) -> Optional[float]:
+            if tick_price_t0 and end and tick_price_t0 != 0:
+                return round(((end - tick_price_t0) / tick_price_t0) * 100, 3)
+            return None
+
+        tick_move_t5_pct  = _tick_move(tick_price_t5)
+        tick_move_t15_pct = _tick_move(tick_price_t15)
+        tick_move_t30_pct = _tick_move(tick_price_t30)
+        tick_move_t60_pct = _tick_move(tick_price_t60)
+
+        # Directional summary using best available T+15 tick or price
+        _best_move = tick_move_t15_pct
+        tick_move_direction: Optional[str] = None
+        if _best_move is not None:
+            tick_move_direction = "up" if _best_move > 0.05 else ("down" if _best_move < -0.05 else "flat")
+
+        # GEX regime at alert time
+        gex_regime, net_gex_at_alert = self._fetch_gex_regime(list(self.tickers.values())[0], ts_ms)
+
+        # Best price move (largest absolute % across horizons; prefer tick data)
+        price_move_pct = _best_price_move(price_t0, price_t5, price_t15, price_t30, price_t60)
 
         # GEX shift
         gex_shift_pct: Optional[float] = None
@@ -255,8 +301,9 @@ class MarketMoverAnalyzer:
         if volume_ratio is None:
             volume_ratio = self._fetch_volume_ratio(ts_ms)
 
-        # Realized impact score
-        realized_impact = _compute_impact_score(price_move_pct, gex_shift_pct, volume_ratio)
+        # Realized impact score (use tick move if available, otherwise GEX timeseries)
+        effective_move = tick_move_t15_pct if tick_move_t15_pct is not None else price_move_pct
+        realized_impact = _compute_impact_score(effective_move, gex_shift_pct, volume_ratio)
 
         # Noise classification
         is_noise = False
@@ -264,10 +311,10 @@ class MarketMoverAnalyzer:
         if realized_impact < self.noise_floor:
             is_noise = True
             parts = []
-            if price_move_pct is None:
+            if effective_move is None:
                 parts.append("no price data")
-            elif abs(price_move_pct) < 0.05:
-                parts.append(f"price flat ({price_move_pct:+.2f}%)")
+            elif abs(effective_move) < 0.05:
+                parts.append(f"price flat ({effective_move:+.2f}%)")
             if volume_ratio is None or volume_ratio < 1.2:
                 parts.append("volume normal")
             if gex_shift_pct is None or abs(gex_shift_pct) < 2.0:
@@ -288,12 +335,25 @@ class MarketMoverAnalyzer:
             price_t5=price_t5,
             price_t15=price_t15,
             price_t30=price_t30,
+            price_t60=price_t60,
             price_move_pct=round(price_move_pct, 3) if price_move_pct is not None else None,
             gex_t0=gex_t0,
             gex_t15=gex_t15,
             gex_shift_pct=round(gex_shift_pct, 2) if gex_shift_pct is not None else None,
+            gex_regime=gex_regime,
+            net_gex_at_alert=net_gex_at_alert,
+            tick_price_t0=tick_price_t0,
+            tick_price_t5=tick_price_t5,
+            tick_price_t15=tick_price_t15,
+            tick_price_t30=tick_price_t30,
+            tick_price_t60=tick_price_t60,
+            tick_move_t5_pct=tick_move_t5_pct,
+            tick_move_t15_pct=tick_move_t15_pct,
+            tick_move_t30_pct=tick_move_t30_pct,
+            tick_move_t60_pct=tick_move_t60_pct,
+            tick_move_direction=tick_move_direction,
             volume_ratio=round(volume_ratio, 2) if volume_ratio is not None else None,
-            sentiment=_infer_sentiment(price_move_pct),
+            sentiment=_infer_sentiment(effective_move),
             is_noise=is_noise,
             noise_reason=noise_reason,
         )
@@ -314,6 +374,7 @@ class MarketMoverAnalyzer:
         t5  = ts_ms + WINDOWS_SECONDS["t5"]  * 1_000
         t15 = ts_ms + WINDOWS_SECONDS["t15"] * 1_000
         t30 = ts_ms + WINDOWS_SECONDS["t30"] * 1_000
+        t60 = ts_ms + WINDOWS_SECONDS["t60"] * 1_000
 
         query = f"""
             SELECT
@@ -324,12 +385,14 @@ class MarketMoverAnalyzer:
                 min(CASE WHEN ts >= {t15}  AND ts < {t15 + 60_000}
                           THEN value END) AS p_t15,
                 min(CASE WHEN ts >= {t30}  AND ts < {t30 + 60_000}
-                          THEN value END) AS p_t30
+                          THEN value END) AS p_t30,
+                min(CASE WHEN ts >= {t60}  AND ts < {t60 + 60_000}
+                          THEN value END) AS p_t60
             FROM read_parquet({glob!r}, union_by_name=true)
             WHERE key = {key!r}
-              AND ts BETWEEN {ts_ms} AND {t30 + 60_000}
+              AND ts BETWEEN {ts_ms} AND {t60 + 60_000}
         """
-        return self._run_scalar_query(query, ["t0", "t5", "t15", "t30"])
+        return self._run_scalar_query(query, ["t0", "t5", "t15", "t30", "t60"])
 
     def _fetch_gex_windows(
         self, gex_suffix: str, ts_ms: int
@@ -352,6 +415,74 @@ class MarketMoverAnalyzer:
               AND ts BETWEEN {ts_ms} AND {t15 + 60_000}
         """
         return self._run_scalar_query(query, ["t0", "t15"])
+
+    def _fetch_tick_price_windows(self, ts_ms: int) -> Dict[str, Optional[float]]:
+        """Return MNQ tick prices at T0, T+5, T+15, T+30, T+60 from tick parquet."""
+        event_dt = datetime.fromtimestamp(ts_ms / 1_000, tz=timezone.utc)
+        results: Dict[str, Optional[float]] = {k: None for k in ("t0", "t5", "t15", "t30", "t60")}
+        for symbol in ("MNQ", "MES"):
+            day_str = event_dt.strftime("%Y%m%d")
+            tick_file = f"{self.tick_dir}/{symbol}/{day_str}.parquet"
+            if not os.path.exists(tick_file):
+                continue
+            windows = [
+                ("t0",  ts_ms,                              ts_ms + 10_000),
+                ("t5",  ts_ms + WINDOWS_SECONDS["t5"]  * 1_000, ts_ms + WINDOWS_SECONDS["t5"]  * 1_000 + 10_000),
+                ("t15", ts_ms + WINDOWS_SECONDS["t15"] * 1_000, ts_ms + WINDOWS_SECONDS["t15"] * 1_000 + 10_000),
+                ("t30", ts_ms + WINDOWS_SECONDS["t30"] * 1_000, ts_ms + WINDOWS_SECONDS["t30"] * 1_000 + 10_000),
+                ("t60", ts_ms + WINDOWS_SECONDS["t60"] * 1_000, ts_ms + WINDOWS_SECONDS["t60"] * 1_000 + 10_000),
+            ]
+            cases = " ".join(
+                f"min(CASE WHEN timestamp_ms BETWEEN {lo} AND {hi} THEN price END) AS p_{k}"
+                for k, lo, hi in windows
+            )
+            t_end = ts_ms + WINDOWS_SECONDS["t60"] * 1_000 + 10_000
+            query = f"""
+                SELECT {cases}
+                FROM read_parquet({tick_file!r})
+                WHERE timestamp_ms BETWEEN {ts_ms} AND {t_end}
+            """
+            try:
+                row = duckdb.query(query).fetchone()
+                if row:
+                    for (k, *_), val in zip(windows, row):
+                        if val is not None:
+                            results[k] = float(val)
+                    if results["t0"] is not None:
+                        return results  # found data, stop trying symbols
+            except Exception:
+                LOGGER.debug("Tick price query failed for %s on %s", symbol, day_str, exc_info=True)
+        return results
+
+    def _fetch_gex_regime(
+        self, gex_suffix: str, ts_ms: int
+    ) -> Tuple[str, Optional[float]]:
+        """Return (regime_label, net_gex_value) from GEX timeseries parquet at T0."""
+        spot_key     = f"ts:gex:spot:{gex_suffix}"
+        net_gex_key  = f"ts:gex:net_gex:{gex_suffix}"
+        zero_key     = f"ts:gex:zero_gamma:{gex_suffix}"
+        glob = self._ts_glob_for_ms(ts_ms)
+        if not glob:
+            return ("unknown", None)
+        query = f"""
+            SELECT
+                max(CASE WHEN key = {spot_key!r}    THEN value END) AS spot,
+                max(CASE WHEN key = {net_gex_key!r} THEN value END) AS net_gex,
+                max(CASE WHEN key = {zero_key!r}    THEN value END) AS zero_gamma
+            FROM read_parquet({glob!r}, union_by_name=true)
+            WHERE key IN ({spot_key!r}, {net_gex_key!r}, {zero_key!r})
+              AND ts BETWEEN {ts_ms - 120_000} AND {ts_ms + 60_000}
+        """
+        try:
+            row = duckdb.query(query).fetchone()
+            if row:
+                spot, net_gex, zero_gamma = row
+                if spot is not None and zero_gamma is not None:
+                    regime = "above_zero_gamma" if float(spot) > float(zero_gamma) else "below_zero_gamma"
+                    return (regime, float(net_gex) if net_gex is not None else None)
+        except Exception:
+            LOGGER.debug("GEX regime query failed for %s", gex_suffix, exc_info=True)
+        return ("unknown", None)
 
     def _fetch_volume_ratio(self, ts_ms: int) -> Optional[float]:
         """Compute volume ratio from tick parquet (uses MNQ, falls back to SPY)."""
@@ -460,12 +591,13 @@ def _best_price_move(
     t5: Optional[float],
     t15: Optional[float],
     t30: Optional[float],
+    t60: Optional[float] = None,
 ) -> Optional[float]:
     """Return the largest absolute % move from T0 across all horizons."""
     if t0 is None or t0 == 0:
         return None
     candidates: List[float] = []
-    for p in (t5, t15, t30):
+    for p in (t5, t15, t30, t60):
         if p is not None:
             candidates.append(((p - t0) / t0) * 100)
     if not candidates:
