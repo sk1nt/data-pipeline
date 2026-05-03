@@ -12,18 +12,18 @@ file I/O — dom_snapshot.json, trade_flow.json, danger_trigger.json.
 ╠══════════════════════════════════════════════════════════════════════╣
 ║  Trading machine (Windows + WSL)                                     ║
 ║    ├── Sierra Chart                                                   ║
-║    │     └── dom_trade_bridge.cpp (ACSIL study, compiled as DLL)     ║
-║    │           Writes every 250 ms:                                   ║
-║    │             C:\SierraChart\Data\dom_snapshot.json  (DOM + OFI)  ║
-║    │             C:\SierraChart\Data\trade_flow.json    (CVD)        ║
+║    │     └── DTC Protocol Server  (port 11099, JSON Compact)         ║
+║    │           Streams in real time:                                  ║
+║    │             MARKET_DEPTH_SNAPSHOT/UPDATE_LEVEL2  (DOM)          ║
+║    │             MARKET_DATA_UPDATE_TRADE              (CVD)         ║
 ║    │           Polls every 100 ms:                                    ║
-║    │             C:\SierraChart\Data\danger_trigger.json             ║
+║    │             C:/SierraChart/Data/danger_trigger.json             ║
 ║    │                                                                   ║
 ║    └── WSL (Ubuntu 22.04 recommended)                                ║
 ║          ├── Redis  (redis-server, port 6379)                        ║
 ║          └── sweep_runner.py  ← YOU ARE HERE                        ║
 ║                ├── SierraDOMBridgeService                            ║
-║                │     • reads SC files via /mnt/c/...                 ║
+║                │     • DTC TCP client → SC DTC server                ║
 ║                │     • publishes  market:dom:MNQ   to Redis          ║
 ║                │     • publishes  market:cvd:MNQ   to Redis          ║
 ║                │     • subscribes sweep:danger:MNQ from Redis        ║
@@ -89,12 +89,15 @@ file I/O — dom_snapshot.json, trade_flow.json, danger_trigger.json.
 
    Minimum required keys for sweep_runner:
 
-       # Sierra Chart file paths (WSL maps C:\ to /mnt/c/)
+       # Sierra Chart file paths (WSL maps C:/ to /mnt/c/)
        SC_DATA_DIR=/mnt/c/SierraChart/Data
-       # Override individual file paths only if SC writes them elsewhere:
-       # SC_DOM_SNAPSHOT_PATH=/mnt/c/SierraChart/Data/dom_snapshot.json
-       # SC_TRADE_FLOW_PATH=/mnt/c/SierraChart/Data/trade_flow.json
+       # Override danger trigger path only if SC Data dir is non-standard:
        # SC_DANGER_TRIGGER_PATH=/mnt/c/SierraChart/Data/danger_trigger.json
+
+       # Full Sierra Chart symbol (update each quarterly roll)
+       SC_DTC_SYMBOL=MNQM26_FUT_CME
+       SC_DTC_HOST=       # leave blank to auto-detect from /etc/resolv.conf
+       SC_DTC_PORT=11099
 
        # Symbol to trade
        SC_DOM_SYMBOL=MNQ
@@ -127,15 +130,14 @@ file I/O — dom_snapshot.json, trade_flow.json, danger_trigger.json.
        SWEEP_CRITICAL_CONFIDENCE=0.85
        SWEEP_LEVEL2_ACKNOWLEDGE_SECONDS=10
 
-7. Install & load the ACSIL study in Sierra Chart
-   ──────────────────────────────────────────────────
-   See data/dom_trade_bridge.cpp header for full instructions.
-   Short version:
-     a. Copy data/dom_trade_bridge.cpp  →  C:\\SierraChart\\ACS_Source\\
-     b. In SC: Analysis → Build Custom Studies DLL
-     c. Add "DOM Trade Bridge" study to your MNQ/MES chart
-     d. Set "Output Directory" input to  C:\\SierraChart\\Data\\
-     e. Confirm dom_snapshot.json appears in that directory within 1 second
+7. Enable Sierra Chart DTC Protocol Server
+   ──────────────────────────────────────────
+   In SC: Global Settings → Data/Trade Service Settings → DTC Protocol Server
+     a. Enable DTC Protocol Server : Yes
+     b. Listening Port             : 11099
+     c. Require Authentication     : No
+     d. Encoding (List)            : JSON Compact
+   Click OK / Apply.  No ACSIL study or DLL compilation needed.
 
 8. Start Redis
    ─────────────

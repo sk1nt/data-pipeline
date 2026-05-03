@@ -167,7 +167,7 @@ class EventWindow:
         signal_cutoff = now - timedelta(seconds=self.window_seconds)
         while self._social_events and self._social_events[0].timestamp < social_cutoff:
             self._social_events.popleft()
-        while self._signals and self._signals[0].timestamp < cutoff:
+        while self._signals and self._signals[0].timestamp < signal_cutoff:
             self._signals.popleft()
 
 
