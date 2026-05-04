@@ -117,6 +117,11 @@ POLL_INTERVAL_MS   = int(os.getenv("SC_BRIDGE_POLL_MS",  "100"))
 STALE_THRESHOLD_MS = int(os.getenv("SC_BRIDGE_STALE_MS", "2000"))
 MNQ_TICK_SIZE      = float(os.getenv("MNQ_TICK_VALUE",    "0.25"))
 
+# When True, read dom_snapshot.json / cvd_snapshot.json written by the
+# sweep_dom_exporter ACSIL study instead of connecting via DTC.
+# Use when DTC "Allow Market Data/Depth" is not enabled in SC settings.
+USE_FILE_BRIDGE    = os.getenv("SC_USE_FILE_BRIDGE", "").lower() in ("1", "true", "yes")
+
 DOM_LEVELS       = 20
 HEARTBEAT_S      = 10
 RECONNECT_BASE_S = 2.0
@@ -340,17 +345,65 @@ class SierraDOMBridgeService:
         if self._redis is None:
             self._redis = await aioredis.from_url(REDIS_URL, decode_responses=True)
         self._running = True
-        LOGGER.info(
-            "SierraDOMBridgeService starting -- DTC %s:%d  symbol=%s  publish every %d ms",
-            self._dtc_host, self._dtc_port, self._dtc_symbol, POLL_INTERVAL_MS,
-        )
-        await asyncio.gather(
-            self._dtc_loop(),
-            self._danger_subscriber(),
-        )
+        if USE_FILE_BRIDGE:
+            LOGGER.info(
+                "SierraDOMBridgeService starting -- FILE BRIDGE mode  "
+                "reading %s/{dom,cvd}_snapshot.json  publish every %d ms",
+                SC_DATA_DIR, POLL_INTERVAL_MS,
+            )
+            await asyncio.gather(
+                self._file_bridge_loop(),
+                self._danger_subscriber(),
+            )
+        else:
+            LOGGER.info(
+                "SierraDOMBridgeService starting -- DTC %s:%d  symbol=%s  publish every %d ms",
+                self._dtc_host, self._dtc_port, self._dtc_symbol, POLL_INTERVAL_MS,
+            )
+            await asyncio.gather(
+                self._dtc_loop(),
+                self._danger_subscriber(),
+            )
 
     async def stop(self) -> None:
         self._running = False
+
+    # ------------------------------------------------------------------
+    # File-bridge mode (ACSIL sweep_dom_exporter study output)
+    # ------------------------------------------------------------------
+
+    async def _file_bridge_loop(self) -> None:
+        dom_path = Path(SC_DATA_DIR) / "dom_snapshot.json"
+        cvd_path = Path(SC_DATA_DIR) / "cvd_snapshot.json"
+        interval = POLL_INTERVAL_MS / 1000.0
+        dom_mtime: float = 0.0
+        cvd_mtime: float = 0.0
+
+        while self._running:
+            await asyncio.sleep(interval)
+            now_ms = int(time.time() * 1000)
+            try:
+                # Only re-read and re-publish when file was modified
+                new_dom_mt = dom_path.stat().st_mtime if dom_path.exists() else 0.0
+                new_cvd_mt = cvd_path.stat().st_mtime if cvd_path.exists() else 0.0
+
+                if new_dom_mt != dom_mtime and new_dom_mt > 0:
+                    dom_mtime = new_dom_mt
+                    dom_payload = json.loads(dom_path.read_text())
+                    if (now_ms - dom_payload.get("ts_ms", 0)) <= STALE_THRESHOLD_MS:
+                        await self._redis.publish(
+                            f"market:dom:{self._symbol}", json.dumps(dom_payload)
+                        )
+
+                if new_cvd_mt != cvd_mtime and new_cvd_mt > 0:
+                    cvd_mtime = new_cvd_mt
+                    cvd_payload = json.loads(cvd_path.read_text())
+                    await self._redis.publish(
+                        f"market:cvd:{self._symbol}", json.dumps(cvd_payload)
+                    )
+
+            except Exception:
+                LOGGER.debug("File bridge read error", exc_info=True)
 
     # ------------------------------------------------------------------
     # DTC reconnect wrapper
