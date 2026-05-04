@@ -64,8 +64,8 @@ LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # DTC protocol constants
 # ---------------------------------------------------------------------------
-_DTC_PROTOCOL_VERSION          = 7
-_JSON_COMPACT_ENCODING         = 3   # DTC spec: 0=Binary 1=BinVLS 2=JSON 3=JSONCompact 4=Protobuf
+_DTC_PROTOCOL_VERSION          = 8
+_JSON_ENCODING                 = 2   # DTC spec: 0=Binary 1=BinVLS 2=JSON 3=JSONCompact 4=Protobuf
 
 _T_LOGON_REQUEST               = 1
 _T_LOGON_RESPONSE              = 2
@@ -95,11 +95,11 @@ _SYMBOL_ID     = 1   # arbitrary SymbolID for this session
 # 16-byte binary ENCODING_REQUEST (always sent as binary before JSON negotiation)
 _ENCODING_REQUEST_BYTES = struct.pack(
     "<HHii4s",
-    16,                        # Size (total message bytes)
-    _T_ENCODING_REQUEST,       # Type = 6
-    _DTC_PROTOCOL_VERSION,     # ProtocolVersion = 7
-    _JSON_COMPACT_ENCODING,    # Encoding = 4
-    b"DTC\x00",                # ProtocolType
+    16,                  # Size (total message bytes)
+    _T_ENCODING_REQUEST, # Type = 6
+    _DTC_PROTOCOL_VERSION,
+    _JSON_ENCODING,      # Encoding = 2 (plain JSON)
+    b"DTC\x00",         # ProtocolType
 )
 
 # ---------------------------------------------------------------------------
@@ -153,19 +153,17 @@ def _get_dtc_host() -> str:
 # ---------------------------------------------------------------------------
 
 def _pack_json(msg: Dict[str, Any]) -> bytes:
-    """Encode one DTC JSON message: 4-byte LE size prefix + JSON bytes."""
-    body = json.dumps(msg, separators=(",", ":")).encode()
-    return struct.pack("<I", len(body)) + body
+    """Encode one DTC JSON message: JSON bytes + null terminator."""
+    return json.dumps(msg, separators=(",", ":")).encode() + b"\x00"
 
 
 async def _read_message(reader: asyncio.StreamReader) -> Optional[Dict[str, Any]]:
-    """Read one DTC JSON message. Returns None on clean EOF."""
-    header = await reader.readexactly(4)
-    size = struct.unpack("<I", header)[0]
-    if size == 0:
-        return {}
-    body = await reader.readexactly(size)
-    return json.loads(body)
+    """Read one null-terminated DTC JSON message. Returns None on clean EOF."""
+    try:
+        raw = await reader.readuntil(b"\x00")
+        return json.loads(raw.rstrip(b"\x00"))
+    except asyncio.IncompleteReadError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -386,16 +384,10 @@ class SierraDOMBridgeService:
 
         try:
             # 1. Encoding negotiation (binary, always first)
+            # SC acknowledges implicitly -- it does NOT send a binary ENCODING_RESPONSE.
             writer.write(_ENCODING_REQUEST_BYTES)
             await writer.drain()
-            enc_resp = await asyncio.wait_for(reader.readexactly(16), timeout=5.0)
-            enc_type     = struct.unpack_from("<H", enc_resp, 2)[0]
-            enc_encoding = struct.unpack_from("<i", enc_resp, 8)[0]
-            if enc_type != _T_ENCODING_RESPONSE or enc_encoding != _JSON_COMPACT_ENCODING:
-                raise ValueError(
-                    f"Unexpected encoding response: type={enc_type} enc={enc_encoding}"
-                )
-            LOGGER.debug("DTC encoding negotiated: JSON Compact")
+            LOGGER.debug("DTC encoding request sent (plain JSON, proto v8)")
 
             # 2. Logon
             writer.write(_pack_json({
