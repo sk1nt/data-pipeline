@@ -65,7 +65,7 @@ LOGGER = logging.getLogger(__name__)
 # DTC protocol constants
 # ---------------------------------------------------------------------------
 _DTC_PROTOCOL_VERSION          = 7
-_JSON_COMPACT_ENCODING         = 4
+_JSON_COMPACT_ENCODING         = 3   # DTC spec: 0=Binary 1=BinVLS 2=JSON 3=JSONCompact 4=Protobuf
 
 _T_LOGON_REQUEST               = 1
 _T_LOGON_RESPONSE              = 2
@@ -468,7 +468,8 @@ class SierraDOMBridgeService:
                 await writer.drain()
 
             elif msg_type == _T_LOGON_RESPONSE:
-                if msg.get("Result", 0) != 1:
+                result = msg.get("Result", 1)  # SC omits Result on success for some builds
+                if result not in (0, 1):  # 0 = no explicit result, 1 = success
                     raise ValueError(f"DTC logon rejected: {msg.get('ResultText', '')}")
                 LOGGER.info("DTC logon OK  server=%s", msg.get("ServerName", "SC"))
 
