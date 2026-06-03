@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sweep Intelligence</title>
+<style>
+:root {
+  --bg:      #0d1117;
+  --bg2:     #161b22;
+  --bg3:     #21262d;
+  --border:  #30363d;
+  --text:    #e6edf3;
+  --text2:   #8b949e;
+  --green:   #3fb950;
+  --green-bg: rgba(63,185,80,.12);
+  --red:     #f85149;
+  --red-bg:  rgba(248,81,73,.12);
+  --blue:    #58a6ff;
+  --yellow:  #d29922;
+  --orange:  #db6d28;
+  --radius:  6px;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 13px; overflow-y: auto; overflow-x: hidden;
+}
+
+/* ─── Header ─────────────────────────────────────────────────────────────── */
+.header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 12px; background: var(--bg2); border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 10;
+}
+.header h1 { font-size: 13px; font-weight: 600; letter-spacing: .3px; }
+.header-right { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text2); }
+.dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.dot.ok   { background: var(--green); }
+.dot.err  { background: var(--red);   }
+.dot.warn { background: var(--yellow);}
+#clock    { font-variant-numeric: tabular-nums; }
+
+/* ─── Danger Banner ───────────────────────────────────────────────────────── */
+#danger-banner {
+  padding: 10px 16px; text-align: center; font-weight: 700; font-size: 14px;
+  letter-spacing: .5px; transition: background .25s, color .25s, box-shadow .25s;
+  border-bottom: 1px solid var(--border);
+}
+#danger-banner.level-0 { background: var(--bg2); color: var(--text2); }
+#danger-banner.level-1 {
+  background: rgba(210,153,34,.15); color: var(--yellow);
+  box-shadow: inset 0 -2px 0 var(--yellow);
+}
+#danger-banner.level-2 {
+  background: rgba(219,109,40,.18); color: var(--orange);
+  box-shadow: inset 0 -2px 0 var(--orange);
+}
+#danger-banner.level-3 {
+  background: rgba(248,81,73,.22); color: var(--red);
+  box-shadow: inset 0 -2px 0 var(--red);
+  animation: danger-pulse 1s ease-in-out infinite;
+}
+@keyframes danger-pulse {
+  0%,100% { box-shadow: inset 0 -2px 0 var(--red), 0 0 0 0 rgba(248,81,73,0); }
+  50%     { box-shadow: inset 0 -2px 0 var(--red), 0 2px 18px 0 rgba(248,81,73,.5); }
+}
+
+/* ─── Body grid ───────────────────────────────────────────────────────────── */
+.body {
+  display: grid;
+  grid-template-columns: 220px 1fr 1fr;
+  grid-template-rows: auto;
+  gap: 1px; background: var(--border);
+  min-height: calc(100vh - 72px);
+}
+.panel {
+  background: var(--bg); padding: 10px 10px 12px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.panel-title {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .5px;
+  color: var(--text2); margin-bottom: 2px; font-weight: 600;
+}
+
+/* ─── DOM Ladder ─────────────────────────────────────────────────────────── */
+#dom-panel { grid-column: 1; grid-row: 1 / 3; }
+.dom-row {
+  display: flex; align-items: center; gap: 4px;
+  font-variant-numeric: tabular-nums; font-size: 11.5px; height: 17px;
+  position: relative; overflow: hidden; border-radius: 2px;
+}
+.dom-row .dp  { width: 68px; text-align: right; flex-shrink: 0; padding-right: 6px; }
+.dom-row .ds  { width: 46px; text-align: right; flex-shrink: 0; color: var(--text2); font-size: 11px; }
+.dom-bar {
+  position: absolute; right: 0; top: 0; bottom: 0;
+  opacity: .28; border-radius: 2px; pointer-events: none;
+  transition: width .08s ease;
+}
+.dom-sep {
+  height: 2px; background: var(--border); margin: 1px 0; flex-shrink: 0;
+}
+.ask-row .dp { color: var(--red);   }
+.bid-row .dp { color: var(--green); }
+.ask-row .dom-bar { background: var(--red);   }
+.bid-row .dom-bar { background: var(--green); }
+
+.imbalance-bar-wrap {
+  display: flex; height: 6px; border-radius: 3px; overflow: hidden;
+  margin-top: 4px; background: var(--bg3);
+}
+#imbal-bid-bar { background: var(--green); transition: width .2s; }
+#imbal-ask-bar { background: var(--red);   transition: width .2s; flex: 1; }
+.imbalance-labels {
+  display: flex; justify-content: space-between;
+  font-size: 10px; color: var(--text2); margin-top: 2px;
+}
+
+/* ─── Sweep Alert Feed ───────────────────────────────────────────────────── */
+#alert-feed { grid-column: 2; grid-row: 1; }
+.alert-card {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 8px 10px; font-size: 11.5px; animation: slideIn .18s ease;
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.alert-card.directional { border-color: rgba(248,81,73,.45); background: var(--red-bg); }
+.alert-card.sweep       { border-color: rgba(63,185,80,.35); background: var(--green-bg); }
+.alert-card.tp          { border-color: rgba(88,166,255,.45); background: rgba(88,166,255,.08); }
+.alert-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
+.alert-cls  { font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .3px; }
+.alert-cls.directional { color: var(--red);   }
+.alert-cls.sweep       { color: var(--green); }
+.alert-cls.tp-signal   { color: var(--blue);  }
+.alert-time { font-size: 10px; color: var(--text2); }
+.alert-row  { display: flex; gap: 12px; flex-wrap: wrap; color: var(--text2); }
+.alert-row span { white-space: nowrap; }
+.alert-row .hi  { color: var(--text); }
+.conf-badge {
+  display: inline-block; padding: 1px 5px; border-radius: 3px;
+  font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.conf-badge.l3 { background: rgba(248,81,73,.25); color: var(--red);    }
+.conf-badge.l2 { background: rgba(219,109,40,.25); color: var(--orange); }
+.conf-badge.l1 { background: rgba(210,153,34,.25); color: var(--yellow); }
+.conf-badge.l0 { background: var(--bg3);           color: var(--text2);  }
+
+/* ─── CVD Panel ──────────────────────────────────────────────────────────── */
+#cvd-panel { grid-column: 3; grid-row: 1; }
+.cvd-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px;
+}
+.cvd-metric { display: flex; flex-direction: column; gap: 1px; }
+.cvd-lbl { font-size: 10px; color: var(--text2); text-transform: uppercase; letter-spacing: .3px; }
+.cvd-val { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.cvd-val.pos { color: var(--green); }
+.cvd-val.neg { color: var(--red);   }
+.cvd-val.zero{ color: var(--text2); }
+
+.vol-bars { display: flex; gap: 6px; align-items: flex-end; height: 40px; margin-top: 6px; }
+.vol-bar-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.vol-bar-inner { width: 100%; border-radius: 2px 2px 0 0; min-height: 2px; transition: height .2s; }
+.vol-bar-wrap.buy  .vol-bar-inner { background: var(--green); }
+.vol-bar-wrap.sell .vol-bar-inner { background: var(--red);   }
+.vol-bar-lbl { font-size: 9px; color: var(--text2); }
+
+/* Canvas sparkline for CVD */
+#cvd-canvas-wrap { margin-top: 6px; }
+canvas#cvd-spark  { border-radius: 3px; }
+
+/* ─── Monitor Events ─────────────────────────────────────────────────────── */
+#monitor-panel { grid-column: 2 / 4; grid-row: 2; }
+.event-feed { display: flex; flex-direction: column; gap: 4px; }
+.event-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: 4px; font-size: 11.5px;
+  background: var(--bg2); border: 1px solid var(--border);
+}
+.event-badge {
+  font-size: 10px; font-weight: 700; padding: 2px 5px; border-radius: 3px;
+  text-transform: uppercase; white-space: nowrap;
+}
+.ev-l0  { background: var(--bg3);                color: var(--text2); }
+.ev-l1  { background: rgba(210,153,34,.2);        color: var(--yellow); }
+.ev-l2  { background: rgba(219,109,40,.2);        color: var(--orange); }
+.ev-l3  { background: rgba(248,81,73,.2);         color: var(--red); }
+.ev-tp  { background: rgba(88,166,255,.18);       color: var(--blue); }
+.event-text { flex: 1; color: var(--text2); }
+.event-text .hi { color: var(--text); font-weight: 500; }
+.event-time { font-size: 10px; color: var(--text2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.event-mode-dry  { font-size: 9px; color: var(--text2); background: var(--bg3); padding: 1px 4px; border-radius: 2px; }
+.event-mode-live { font-size: 9px; color: var(--red);   background: rgba(248,81,73,.15); padding: 1px 4px; border-radius: 2px; }
+
+/* ─── Stats row (bottom) ─────────────────────────────────────────────────── */
+.stats-row {
+  grid-column: 1 / -1;
+  background: var(--bg); padding: 6px 12px;
+  display: flex; gap: 18px; align-items: center;
+  border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--text2);
+}
+.stats-row .s { white-space: nowrap; }
+.stats-row .s b { color: var(--text); }
+
+/* ─── Misc ───────────────────────────────────────────────────────────────── */
+.empty-state { color: var(--text2); font-size: 11px; padding: 10px 0; }
+.ofi-val { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ofi-val.pos { color: var(--green); }
+.ofi-val.neg { color: var(--red);   }
+.ofi-val.zero{ color: var(--text2); }
+
+@keyframes flash-red {
+  0%,100% { background: var(--bg); }
+  25%,75% { background: rgba(248,81,73,.22); }
+}
+body.alert-flash { animation: flash-red 400ms ease; }
+</style>
+</head>
+<body>
+
+<!-- ─── Header ────────────────────────────────────────────────────────────── -->
+<div class="header">
+  <h1>&#9889; Sweep Intelligence &nbsp;<span id="hdr-symbol" style="color:var(--blue)">MNQ</span></h1>
+  <div class="header-right">
+    <span id="mode-badge" class="event-mode-dry">DRY RUN</span>
+    <span class="dot err" id="conn-dot"></span>
+    <span id="conn-label">connecting&hellip;</span>
+    <span>&bull;</span>
+    <span id="clock">--:--:--</span>
+  </div>
+</div>
+
+<!-- ─── Danger Banner ─────────────────────────────────────────────────────── -->
+<div id="danger-banner" class="level-0">LEVEL 0 &mdash; CLEAR</div>
+
+<!-- ─── Body ──────────────────────────────────────────────────────────────── -->
+<div class="body">
+
+  <!-- Left: DOM heat ladder -->
+  <div class="panel" id="dom-panel">
+    <div class="panel-title">DOM Ladder</div>
+    <div id="ask-levels"></div>
+    <div class="dom-sep"></div>
+    <div id="bid-levels"></div>
+    <div style="margin-top:8px;">
+      <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px;">
+        Imbalance &nbsp;<span id="imbal-pct" style="color:var(--text)">--</span>
+      </div>
+      <div class="imbalance-bar-wrap">
+        <div id="imbal-bid-bar" style="width:50%"></div>
+        <div id="imbal-ask-bar"></div>
+      </div>
+      <div class="imbalance-labels">
+        <span>Bid</span>
+        <span>Ask</span>
+      </div>
+    </div>
+    <div style="margin-top:6px;display:flex;justify-content:space-between;font-size:10px;color:var(--text2);">
+      OFI&nbsp;1s &nbsp;<span id="ofi-val" class="ofi-val zero">—</span>
+    </div>
+    <div style="margin-top:6px;font-size:10px;color:var(--text2);">
+      Bid5&nbsp;<span id="bd5" style="color:var(--text)">—</span>
+      &nbsp;|&nbsp;
+      Ask5&nbsp;<span id="ad5" style="color:var(--text)">—</span>
+    </div>
+  </div>
+
+  <!-- Center: Sweep Alert Feed -->
+  <div class="panel" id="alert-feed">
+    <div class="panel-title">Sweep Alerts <span id="alert-count" style="color:var(--text2)">(0)</span></div>
+    <div id="alert-list"><div class="empty-state">Awaiting data&hellip;</div></div>
+  </div>
+
+  <!-- Right: CVD -->
+  <div class="panel" id="cvd-panel">
+    <div class="panel-title">Cumulative Volume Delta</div>
+    <div class="cvd-grid" id="cvd-grid">
+      <div class="cvd-metric"><div class="cvd-lbl">1 min</div><div class="cvd-val zero" id="cvd-1m">—</div></div>
+      <div class="cvd-metric"><div class="cvd-lbl">5 min</div><div class="cvd-val zero" id="cvd-5m">—</div></div>
+      <div class="cvd-metric"><div class="cvd-lbl">15 min</div><div class="cvd-val zero" id="cvd-15m">—</div></div>
+      <div class="cvd-metric"><div class="cvd-lbl">Day</div><div class="cvd-val zero" id="cvd-day">—</div></div>
+    </div>
+    <div class="vol-bars" id="vol-bars">
+      <div class="vol-bar-wrap buy">
+        <div class="vol-bar-inner" id="buy-bar" style="height:4px"></div>
+        <div class="vol-bar-lbl">Buy</div>
+        <div id="buy-vol" style="font-size:10px;color:var(--green)">—</div>
+      </div>
+      <div class="vol-bar-wrap sell">
+        <div class="vol-bar-inner" id="sell-bar" style="height:4px"></div>
+        <div class="vol-bar-lbl">Sell</div>
+        <div id="sell-vol" style="font-size:10px;color:var(--red)">—</div>
+      </div>
+    </div>
+    <div id="cvd-canvas-wrap" style="margin-top:8px;">
+      <div class="panel-title" style="margin-bottom:3px;">1-min CVD History</div>
+      <canvas id="cvd-spark" width="240" height="50" style="width:100%;height:50px;background:var(--bg2);border-radius:3px;"></canvas>
+    </div>
+  </div>
+
+  <!-- Bottom: Monitor events feed -->
+  <div class="panel" id="monitor-panel">
+    <div class="panel-title">Position Monitor Events <span id="event-count" style="color:var(--text2)">(0)</span></div>
+    <div class="event-feed" id="event-list"><div class="empty-state">Awaiting data&hellip;</div></div>
+  </div>
+
+</div><!-- .body -->
+
+<script>
+// ============================================================
+//  Config
+// ============================================================
+var cfg = {
+  symbol: (new URLSearchParams(location.search).get('symbol') || 'MNQ').toUpperCase(),
+  maxAlerts: 20,
+  maxEvents: 30,
+  domLevels: 10,
+};
+
+// ============================================================
+//  State
+// ============================================================
+var ws = null;
+var reconnectDelay = 1000;
+var stats = { sweeps: 0, directionals: 0, tpSignals: 0, totalEvents: 0 };
+var cvdHistory = [];   // [{ts, val}] for sparkline
+var maxCvdBar = 1;     // max vol seen for bar scaling
+
+// ============================================================
+//  DOM helpers
+// ============================================================
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function fmtNum(v, dec) {
+  if (v == null || v === '') return '—';
+  return Number(v).toFixed(dec != null ? dec : 1);
+}
+function fmtSigned(v, dec) {
+  if (v == null || v === '') return '—';
+  var n = Number(v).toFixed(dec != null ? dec : 1);
+  return (Number(v) >= 0 ? '+' : '') + n;
+}
+function fmtTime(tsMs) {
+  var d = new Date(tsMs);
+  return d.toLocaleTimeString('en-US', {hour12: false, timeZone: 'America/New_York'});
+}
+function cvdClass(v) {
+  if (v == null) return 'zero';
+  return Number(v) > 0 ? 'pos' : (Number(v) < 0 ? 'neg' : 'zero');
+}
+function confBadgeClass(dl) {
+  return ['l0','l1','l2','l3'][Math.min(dl, 3)];
+}
+
+// ============================================================
+//  Clock
+// ============================================================
+function tickClock() {
+  var now = new Date();
+  document.getElementById('clock').textContent =
+    now.toLocaleTimeString('en-US', {hour12: false, timeZone: 'America/New_York'}) + ' ET';
+}
+setInterval(tickClock, 1000);
+tickClock();
+
+// ============================================================
+//  Danger Banner
+// ============================================================
+var LEVEL_LABELS = ['LEVEL 0 \u2014 CLEAR', 'LEVEL 1 \u2014 WARNING', 'LEVEL 2 \u2014 DANGER', 'LEVEL 3 \u2014 CRITICAL \u26a0'];
+function updateDangerBanner(level, event) {
+  var banner = document.getElementById('danger-banner');
+  banner.className = 'level-' + level;
+  var label = LEVEL_LABELS[level] || ('LEVEL ' + level);
+  if (event) label += '  (' + event.replace(/_/g, ' ') + ')';
+  banner.textContent = label;
+  if (level >= 2) {
+    document.body.classList.remove('alert-flash');
+    void document.body.offsetWidth;
+    document.body.classList.add('alert-flash');
+  }
+}
+
+// ============================================================
+//  DOM Ladder
+// ============================================================
+function renderDOM(data) {
+  var asks = (data.asks || []).slice(0, cfg.domLevels).reverse();  // highest first for display
+  var bids = (data.bids || []).slice(0, cfg.domLevels);
+
+  var allSizes = asks.concat(bids).map(function(r) { return r.size; });
+  var maxSz = Math.max.apply(null, allSizes.concat([1]));
+
+  function makeRow(r, cls) {
+    var pct = Math.round(r.size / maxSz * 100);
+    return '<div class="dom-row ' + cls + '">' +
+      '<div class="dom-bar" style="width:' + pct + '%"></div>' +
+      '<div class="dp">' + fmtNum(r.price, 2) + '</div>' +
+      '<div class="ds">' + fmtNum(r.size, 0) + '</div>' +
+      '</div>';
+  }
+
+  document.getElementById('ask-levels').innerHTML = asks.map(function(r) {
+    return makeRow(r, 'ask-row');
+  }).join('');
+  document.getElementById('bid-levels').innerHTML = bids.map(function(r) {
+    return makeRow(r, 'bid-row');
+  }).join('');
+
+  // Imbalance bar
+  var imbal = Number(data.imbalance_ratio || 0.5);
+  var bidPct = Math.round(imbal * 100);
+  document.getElementById('imbal-bid-bar').style.width = bidPct + '%';
+  document.getElementById('imbal-pct').textContent = bidPct + '% bid';
+
+  // OFI
+  var ofi = data.ofi_1s;
+  var ofiEl = document.getElementById('ofi-val');
+  ofiEl.textContent = ofi != null ? fmtSigned(ofi, 1) : '—';
+  ofiEl.className = 'ofi-val ' + (ofi == null ? 'zero' : (ofi > 0 ? 'pos' : (ofi < 0 ? 'neg' : 'zero')));
+
+  // Depth labels
+  document.getElementById('bd5').textContent = fmtNum(data.bid_depth_5, 0);
+  document.getElementById('ad5').textContent = fmtNum(data.ask_depth_5, 0);
+}
+
+// ============================================================
+//  CVD Panel
+// ============================================================
+function renderCVD(data) {
+  function setEl(id, v, dec) {
+    var el = document.getElementById(id);
+    el.textContent = v != null ? fmtSigned(v, dec != null ? dec : 0) : '—';
+    el.className = 'cvd-val ' + cvdClass(v);
+  }
+  setEl('cvd-1m',  data.cvd_1min);
+  setEl('cvd-5m',  data.cvd_5min);
+  setEl('cvd-15m', data.cvd_15min);
+  setEl('cvd-day', data.cvd_running_day);
+
+  var buy = Number(data.buy_vol_1min || 0);
+  var sell = Number(data.sell_vol_1min || 0);
+  document.getElementById('buy-vol').textContent  = buy  > 0 ? '+' + fmtNum(buy, 0)  : fmtNum(buy, 0);
+  document.getElementById('sell-vol').textContent = sell > 0 ? '-' + fmtNum(sell, 0) : fmtNum(sell, 0);
+  maxCvdBar = Math.max(maxCvdBar, buy, sell);
+  var H = 32;
+  document.getElementById('buy-bar').style.height  = Math.max(2, Math.round(buy / maxCvdBar * H)) + 'px';
+  document.getElementById('sell-bar').style.height = Math.max(2, Math.round(sell / maxCvdBar * H)) + 'px';
+
+  // Sparkline history (1-min CVD rolling)
+  cvdHistory.push({ ts: data.ts_ms, val: Number(data.cvd_1min || 0) });
+  if (cvdHistory.length > 120) cvdHistory = cvdHistory.slice(-120);
+  drawSparkline();
+}
+
+function drawSparkline() {
+  var canvas = document.getElementById('cvd-spark');
+  var ctx = canvas.getContext('2d');
+  var W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  if (cvdHistory.length < 2) return;
+  var vals = cvdHistory.map(function(p) { return p.val; });
+  var mn = Math.min.apply(null, vals), mx = Math.max.apply(null, vals);
+  var span = Math.max(mx - mn, 1);
+  var zero = Math.max(0, Math.min(H, H - Math.round((-mn / span) * H)));
+
+  // Fill area
+  ctx.beginPath();
+  ctx.moveTo(0, zero);
+  for (var i = 0; i < vals.length; i++) {
+    var x = Math.round(i / (vals.length - 1) * W);
+    var y = H - Math.round((vals[i] - mn) / span * H);
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(W, zero);
+  ctx.closePath();
+  var grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, 'rgba(63,185,80,.28)');
+  grad.addColorStop(1, 'rgba(248,81,73,.18)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  for (var j = 0; j < vals.length; j++) {
+    var x2 = Math.round(j / (vals.length - 1) * W);
+    var y2 = H - Math.round((vals[j] - mn) / span * H);
+    if (j === 0) ctx.moveTo(x2, y2); else ctx.lineTo(x2, y2);
+  }
+  ctx.strokeStyle = vals[vals.length - 1] >= 0 ? '#3fb950' : '#f85149';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Zero line
+  ctx.beginPath();
+  ctx.moveTo(0, zero);
+  ctx.lineTo(W, zero);
+  ctx.strokeStyle = 'rgba(139,148,158,.3)';
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+}
+
+// ============================================================
+//  Sweep Alert Feed
+// ============================================================
+var alertList = [];
+function addAlert(data) {
+  stats.sweeps    += (data.classification === 'sweep' ? 1 : 0);
+  stats.directionals += (data.classification === 'directional' ? 1 : 0);
+  renderAlert(data);
+  updateStats();
+}
+
+function renderAlert(data) {
+  var cls  = data.classification || 'sweep';
+  var dir  = data.direction || '—';
+  var conf = Number(data.confidence || 0);
+  var dl   = data.danger_level || 0;
+  var ts   = data.ts_ms ? fmtTime(data.ts_ms) : '—';
+  var gex  = data.gex_regime || '—';
+  var html =
+    '<div class="alert-card ' + esc(cls) + '">' +
+      '<div class="alert-head">' +
+        '<span class="alert-cls ' + esc(cls) + '">' + esc(cls) + ' ' +
+          (dir === 'up' ? '&#8593;' : (dir === 'down' ? '&#8595;' : '')) +
+        '</span>' +
+        '<span class="conf-badge ' + confBadgeClass(dl) + '">L' + dl + ' &nbsp;' + Math.round(conf * 100) + '%</span>' +
+        '<span class="alert-time">' + ts + '</span>' +
+      '</div>' +
+      '<div class="alert-row">' +
+        '<span>Px&nbsp;<span class="hi">' + fmtNum(data.trigger_price, 2) + '</span></span>' +
+        '<span>Ticks&nbsp;<span class="hi">' + fmtNum(data.trigger_ticks, 0) + '</span></span>' +
+        '<span>GEX&nbsp;<span class="hi" style="color:' + gexColor(gex) + '">' + esc(gex) + '</span></span>' +
+        (data.through_wall ? '<span style="color:var(--orange)">&#9762; wall breach</span>' : '') +
+        (data.at_wall      ? '<span style="color:var(--yellow)">at wall</span>' : '') +
+      '</div>' +
+    '</div>';
+
+  var list = document.getElementById('alert-list');
+  if (list.querySelector('.empty-state')) list.innerHTML = '';
+  list.insertAdjacentHTML('afterbegin', html);
+  var cards = list.querySelectorAll('.alert-card');
+  if (cards.length > cfg.maxAlerts) cards[cards.length - 1].remove();
+  document.getElementById('alert-count').textContent = '(' + list.querySelectorAll('.alert-card').length + ')';
+}
+
+function gexColor(regime) {
+  return regime === 'positive' ? 'var(--green)' : (regime === 'negative' ? 'var(--red)' : 'var(--text2)');
+}
+
+// ============================================================
+//  Monitor Event Feed
+// ============================================================
+var EVENT_LABELS = {
+  'directional_warning': 'L1 Warning',
+  'directional_danger':  'L2 Danger',
+  'critical_flatten':    'L3 Critical',
+  'sweep_detected':      'Sweep Reset',
+  'tp_wall_proximity':   'TP Signal',
+};
+
+function addMonitorEvent(data) {
+  stats.totalEvents++;
+  if (data.event === 'tp_wall_proximity') stats.tpSignals++;
+  var dl     = data.danger_level != null ? data.danger_level : 0;
+  var isTp   = data.event === 'tp_wall_proximity';
+  var ts     = data.ts_ms ? fmtTime(data.ts_ms) : '—';
+  var label  = EVENT_LABELS[data.event] || (data.event || '—');
+  var evCls  = isTp ? 'ev-tp' : ('ev-l' + dl);
+  var liveBadge = data.live_mode ? '<span class="event-mode-live">LIVE</span>' : '<span class="event-mode-dry">DRY</span>';
+  var desc = '';
+  if (!isTp && data.trigger_price != null) {
+    desc = 'conf&nbsp;<span class="hi">' + Math.round((data.confidence || 0) * 100) + '%</span>' +
+           '&nbsp;&bull;&nbsp;px&nbsp;<span class="hi">' + fmtNum(data.trigger_price, 2) + '</span>' +
+           (data.direction ? '&nbsp;&bull;&nbsp;dir&nbsp;<span class="hi">' + esc(data.direction) + '</span>' : '');
+  } else if (isTp) {
+    desc = 'price approaching GEX wall in profit direction';
+  }
+
+  var html =
+    '<div class="event-row">' +
+      '<span class="event-badge ' + evCls + '">' + esc(label) + '</span>' +
+      '<span class="event-text">' + desc + '</span>' +
+      liveBadge +
+      '<span class="event-time">' + ts + '</span>' +
+    '</div>';
+
+  var list = document.getElementById('event-list');
+  if (list.querySelector('.empty-state')) list.innerHTML = '';
+  list.insertAdjacentHTML('afterbegin', html);
+  var rows = list.querySelectorAll('.event-row');
+  if (rows.length > cfg.maxEvents) rows[rows.length - 1].remove();
+  document.getElementById('event-count').textContent = '(' + rows.length + ')';
+  updateDangerBanner(dl, data.event);
+
+  // Update mode badge
+  var modeBadge = document.getElementById('mode-badge');
+  if (data.live_mode) {
+    modeBadge.textContent = 'LIVE';
+    modeBadge.className = 'event-mode-live';
+  } else {
+    modeBadge.textContent = 'DRY RUN';
+    modeBadge.className = 'event-mode-dry';
+  }
+}
+
+// ============================================================
+//  Stats bar
+// ============================================================
+function updateStats() {
+  // Build/update stats row at bottom (lazy-create)
+  var statsEl = document.getElementById('stats-bar');
+  if (!statsEl) {
+    statsEl = document.createElement('div');
+    statsEl.id = 'stats-bar';
+    statsEl.className = 'stats-row';
+    document.querySelector('.body').appendChild(statsEl);
+  }
+  var total = stats.sweeps + stats.directionals;
+  var dirPct = total > 0 ? Math.round(stats.directionals / total * 100) : 0;
+  statsEl.innerHTML =
+    '<span class="s">Sweeps&nbsp;<b>' + stats.sweeps + '</b></span>' +
+    '<span class="s">Directionals&nbsp;<b>' + stats.directionals + '</b></span>' +
+    '<span class="s">Dir%&nbsp;<b>' + dirPct + '%</b></span>' +
+    '<span class="s">TP signals&nbsp;<b>' + stats.tpSignals + '</b></span>' +
+    '<span class="s">Monitor events&nbsp;<b>' + stats.totalEvents + '</b></span>';
+}
+
+// ============================================================
+//  WebSocket
+// ============================================================
+function connect() {
+  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var url = proto + '//' + location.host + '/ws/sweep?symbol=' + encodeURIComponent(cfg.symbol);
+  ws = new WebSocket(url);
+
+  var dot   = document.getElementById('conn-dot');
+  var label = document.getElementById('conn-label');
+  var hdr   = document.getElementById('hdr-symbol');
+
+  ws.onopen = function() {
+    dot.className   = 'dot ok';
+    label.textContent = cfg.symbol + ' \u2713';
+    hdr.textContent   = cfg.symbol;
+    reconnectDelay  = 1000;
+  };
+
+  ws.onclose = function() {
+    dot.className   = 'dot err';
+    label.textContent = 'disconnected';
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
+  };
+
+  ws.onerror = function() { ws.close(); };
+
+  ws.onmessage = function(evt) {
+    var d;
+    try { d = JSON.parse(evt.data); } catch(e) { return; }
+    var t = d.type;
+    if (t === 'sweep_alert')   addAlert(d);
+    else if (t === 'monitor_event') addMonitorEvent(d);
+    else if (t === 'dom_snapshot')  renderDOM(d);
+    else if (t === 'cvd_snapshot')  renderCVD(d);
+  };
+}
+
+// ============================================================
+//  Boot
+// ============================================================
+connect();
+updateStats();
+</script>
+</body>
+</html>

@@ -181,10 +181,13 @@ class TestDangerLevel:
         assert alert.danger_level == 0
 
     def test_low_confidence_directional_is_level_1_or_0(self):
-        # Just barely directional, low confidence
-        alert = self._alert_from_features(gex_regime="negative")
-        # Single negative GEX vote gives ~0.5 conf — may not reach level 1
-        assert alert.danger_level in (0, 1)
+        # Mixed signals: negative GEX (dir) vs at_wall (strong sweep) → low net confidence
+        alert = self._alert_from_features(
+            gex_regime="negative",   # 1 dir vote
+            at_wall=True,            # 2 sweep votes → dir_prob = 1/3 ≈ 0.33 → sweep
+        )
+        # With sweep outcome danger_level must be 0
+        assert alert.danger_level == 0
 
     def test_high_confidence_directional_is_danger(self):
         alert = self._alert_from_features(

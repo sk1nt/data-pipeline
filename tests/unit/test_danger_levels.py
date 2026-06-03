@@ -173,7 +173,13 @@ class TestMonitorEscalation:
         pos = _make_long_position(entry_price=20000.0)
         monitor._level2_fired_at = time.time() - 15  # 15s ago (> ACK_TIMEOUT_SECONDS=10)
         monitor._current_level   = 2
+        # Patch dynamic thresholds to return static base values regardless of TOD
+        from src.services import position_monitor_service as pms
+        static = (pms.WARNING_CONFIDENCE, pms.DANGER_CONFIDENCE, pms.CRITICAL_CONFIDENCE,
+                  pms.WARNING_TICKS, pms.DANGER_TICKS, pms.CRITICAL_TICKS)
         with patch("src.services.position_monitor_service.SWEEP_LIVE_MODE", False), \
+             patch("src.services.position_monitor_service._dynamic_thresholds",
+                   return_value=static), \
              patch("src.services.position_monitor_service.get_current_position",
                    return_value=pos):
             await monitor._handle_alert(alert)

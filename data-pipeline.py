@@ -1919,6 +1919,109 @@ async def market_sentiment_websocket(websocket: WebSocket) -> None:
             pass
 
 
+@app.websocket("/ws/sweep")
+async def sweep_intelligence_websocket(websocket: WebSocket, symbol: str = "MNQ") -> None:
+    """Stream sweep classifier alerts and position monitor events for the intelligence dashboard.
+
+    Subscribes to:
+        sweep:alert:{symbol}   — SweepAlert payloads from SweepClassifierService
+        sweep:monitor:{symbol} — PositionMonitorService level updates + TP signals
+        market:dom:{symbol}    — DOM snapshots (price/imbalance heat data)
+        market:cvd:{symbol}    — CVD rolling windows
+
+    Each message sent to the client has a ``type`` field:
+        sweep_alert    — classification result (sweep/directional + confidence)
+        monitor_event  — danger level escalation or TP wall proximity signal
+        dom_snapshot   — DOM depth/imbalance update (throttled to 2 Hz)
+        cvd_snapshot   — CVD rolling windows update (throttled to 1 Hz)
+    """
+    await websocket.accept()
+    sym = (symbol or "MNQ").upper()
+    redis_conn = _get_redis_client()
+    pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
+    pubsub.subscribe(
+        f"sweep:alert:{sym}",
+        f"sweep:monitor:{sym}",
+        f"market:dom:{sym}",
+        f"market:cvd:{sym}",
+    )
+
+    # Channel → message type mapping
+    _CHANNEL_TYPE = {
+        f"sweep:alert:{sym}":   "sweep_alert",
+        f"sweep:monitor:{sym}": "monitor_event",
+        f"market:dom:{sym}":    "dom_snapshot",
+        f"market:cvd:{sym}":    "cvd_snapshot",
+    }
+
+    # Throttle DOM/CVD to avoid overwhelming the browser
+    _THROTTLE_INTERVAL = {
+        "dom_snapshot": 0.5,   # 2 Hz
+        "cvd_snapshot": 1.0,   # 1 Hz
+    }
+    _last_sent: dict[str, float] = {}
+
+    # Send cached latest DOM/CVD on connect so the page isn't blank
+    try:
+        for ch in (f"market:dom:{sym}", f"market:cvd:{sym}"):
+            raw = redis_conn.get(ch + ":latest")
+            if raw:
+                try:
+                    payload = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
+                    msg_type = _CHANNEL_TYPE.get(ch, "dom_snapshot")
+                    await websocket.send_json({"type": msg_type, **payload})
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        while True:
+            try:
+                message = await asyncio.to_thread(pubsub.get_message, timeout=1.5)
+            except Exception:
+                message = None
+            if not message or message.get("type") != "message":
+                await asyncio.sleep(0.05)
+                continue
+
+            channel = message.get("channel", "")
+            if isinstance(channel, bytes):
+                channel = channel.decode("utf-8")
+
+            msg_type = _CHANNEL_TYPE.get(channel)
+            if not msg_type:
+                continue
+
+            # Throttle high-frequency streams
+            throttle = _THROTTLE_INTERVAL.get(msg_type)
+            if throttle:
+                now = asyncio.get_event_loop().time()
+                if now - _last_sent.get(msg_type, 0) < throttle:
+                    continue
+                _last_sent[msg_type] = now
+
+            raw = message.get("data")
+            try:
+                if isinstance(raw, (bytes, bytearray)):
+                    payload = json.loads(raw.decode("utf-8"))
+                elif isinstance(raw, str):
+                    payload = json.loads(raw)
+                else:
+                    continue
+            except Exception:
+                continue
+
+            await websocket.send_json({"type": msg_type, **payload})
+    except WebSocketDisconnect:
+        return
+    finally:
+        try:
+            pubsub.close()
+        except Exception:
+            pass
+
+
 async def _trigger_queue_processing() -> None:
     """Kick processing of any queued historical imports on a worker thread."""
     try:
