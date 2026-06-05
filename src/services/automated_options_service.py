@@ -341,8 +341,13 @@ class AutomatedOptionsService:
 
     def _compute_quantity(self, alert_data: dict, channel_id: str) -> tuple[int, float, float]:
         """Compute contract quantity using allocation, price, and account balances."""
-        # Get allocation percentage from config (percentage, e.g., 10.0 = 10%)
-        alloc_pct = config.tastytrade_allocation_percentage / 100.0
+        # Lotto / Super Lotto trades use a fixed 5% BP allocation
+        trade_label = (alert_data.get("trade_label") or "").lower()
+        if trade_label in ("lotto", "super_lotto"):
+            alloc_pct = 0.05
+        else:
+            # Get allocation percentage from config (percentage, e.g., 10.0 = 10%)
+            alloc_pct = config.tastytrade_allocation_percentage / 100.0
         price = float(alert_data.get("price") or 0.0)
         contract_price = max(price, 0.01) * 100  # options are 100x multiplier
 

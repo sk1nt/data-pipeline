@@ -133,3 +133,61 @@ async def test_on_message_processes_first_message(monkeypatch):
     await bot.on_message(msg)
     assert called["count"] == 1
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [
+    "Lotto: BTO UNH 397.5c 06/12 @ 1.90",
+    "Super Lotto: BTO AAPL 200c 06/20 @ 0.50",
+    "BTO TSLA 250c 07/18 @ 1.25",
+    "STC TSLA 250c 07/18 @ 2.50",
+    "BUY SPY 530c 06/20 @ 0.80",
+    "SELL SPY 530c 06/20 @ 1.60",
+])
+async def test_on_message_routes_all_alert_prefixes(content, monkeypatch):
+    """All alert-style prefixes must be routed to _process_alert_message."""
+    config = SimpleNamespace(allowed_channel_ids=[1255265167113978008], option_alert_channel_ids=[1255265167113978008])
+    monkeypatch.setattr("bot.trade_bot.TradeBot._init_tastytrade_client", lambda self: SimpleNamespace())
+    bot = TradeBot(config)
+
+    async def noop_process_commands(self, message):
+        return None
+    monkeypatch.setattr("bot.trade_bot.TradeBot.process_commands", noop_process_commands, raising=False)
+
+    called = {"count": 0}
+
+    async def fake_process_alert(self, message):
+        called["count"] += 1
+
+    monkeypatch.setattr("bot.trade_bot.TradeBot._process_alert_message", fake_process_alert, raising=False)
+    msg = FakeMessage(content, author_id=12345, channel_id="1255265167113978008", is_reply=False)
+    await bot.on_message(msg)
+    assert called["count"] == 1, f"Expected _process_alert_message called for: {content!r}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [
+    "Lotto: BTO UNH 397.5c 06/12 @ 1.90",
+    "Super Lotto: BTO AAPL 200c 06/20 @ 0.50",
+    "BTO TSLA 250c 07/18 @ 1.25",
+    "Alert: BTO UBER 78p 12/05 @ 0.75",
+])
+async def test_on_message_skips_replies_for_all_prefixes(content, monkeypatch):
+    """Replies must never trigger alert processing regardless of prefix."""
+    config = SimpleNamespace(allowed_channel_ids=[1255265167113978008], option_alert_channel_ids=[1255265167113978008])
+    monkeypatch.setattr("bot.trade_bot.TradeBot._init_tastytrade_client", lambda self: SimpleNamespace())
+    bot = TradeBot(config)
+
+    async def noop_process_commands(self, message):
+        return None
+    monkeypatch.setattr("bot.trade_bot.TradeBot.process_commands", noop_process_commands, raising=False)
+
+    called = {"count": 0}
+
+    async def fake_process_alert(self, message):
+        called["count"] += 1
+
+    monkeypatch.setattr("bot.trade_bot.TradeBot._process_alert_message", fake_process_alert, raising=False)
+    msg = FakeMessage(content, author_id=12345, channel_id="1255265167113978008", is_reply=True)
+    await bot.on_message(msg)
+    assert called["count"] == 0, f"Reply should not trigger alert for: {content!r}"
+

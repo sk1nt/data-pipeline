@@ -22,6 +22,20 @@ LOGGER = logging.getLogger(__name__)
 
 CORRELATION_ALERT_CHANNEL = "correlation:alerts:stream"
 
+# ---------------------------------------------------------------------------
+# Sustained move detection thresholds
+# ---------------------------------------------------------------------------
+# Minimum net price move (%) over the window to qualify as "sustained"
+SUSTAINED_MOVE_PCT = 0.20
+# Minimum fraction of 1-min bars that must trend in the move direction
+SUSTAINED_TREND_RATIO = 0.55
+# How many minutes of price history to examine
+SUSTAINED_WINDOW_MINUTES = 10
+# How far back to look for news stories to blame (minutes)
+SUSTAINED_NEWS_LOOKBACK_MINUTES = 30
+# Cooldown between sustained-move alerts (seconds)
+SUSTAINED_COOLDOWN_SECONDS = 600
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -81,6 +95,24 @@ class CorrelationAlert(BaseModel):
     severity: str = "medium"
 
 
+class SustainedMoveAlert(BaseModel):
+    """Alert fired when price trends consistently in one direction for SUSTAINED_WINDOW_MINUTES."""
+
+    alert_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    alert_type: str = "sustained_move"
+    severity: str = "high"
+    direction: str  # "bullish" or "bearish"
+    symbol: str
+    price_start: float
+    price_now: float
+    price_change_pct: float
+    window_minutes: int
+    # Top matching news stories ranked by directional relevance
+    driver_events: List[SocialEvent] = Field(default_factory=list)
+    message: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Rolling event window
 # ---------------------------------------------------------------------------
@@ -89,7 +121,10 @@ class EventWindow:
     """Thread-safe rolling buffer of social events and market signal snapshots."""
 
     def __init__(self, window_seconds: int = 300) -> None:
-        self.window_seconds = window_seconds
+        # Keep signals for at least the sustained-move window so the detector has enough data
+        self.window_seconds = max(window_seconds, SUSTAINED_WINDOW_MINUTES * 60 + 60)
+        # Social events keep the longer of the two windows (news lookback)
+        self._social_window = max(self.window_seconds, SUSTAINED_NEWS_LOOKBACK_MINUTES * 60 + 60)
         self._social_events: deque[SocialEvent] = deque()
         self._signals: deque[MarketSignalSnapshot] = deque()
         self._lock = Lock()
@@ -116,11 +151,23 @@ class EventWindow:
         with self._lock:
             return self._signals[-1] if self._signals else None
 
+    def get_price_bars(self, symbol: str, within_seconds: int) -> List[Tuple[datetime, float]]:
+        """Return (timestamp, price) pairs for a symbol within the window."""
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=within_seconds)
+        with self._lock:
+            return [
+                (s.timestamp, s.price)
+                for s in self._signals
+                if s.symbol == symbol and s.price is not None and s.timestamp >= cutoff
+            ]
+
     def _evict(self) -> None:
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.window_seconds)
-        while self._social_events and self._social_events[0].timestamp < cutoff:
+        now = datetime.now(timezone.utc)
+        social_cutoff = now - timedelta(seconds=self._social_window)
+        signal_cutoff = now - timedelta(seconds=self.window_seconds)
+        while self._social_events and self._social_events[0].timestamp < social_cutoff:
             self._social_events.popleft()
-        while self._signals and self._signals[0].timestamp < cutoff:
+        while self._signals and self._signals[0].timestamp < signal_cutoff:
             self._signals.popleft()
 
 
@@ -207,6 +254,9 @@ class CorrelationEngine:
         self._cooldowns: Dict[str, datetime] = {}  # event_id:rule → last_alert_time
         self._task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
+
+        # Sustained move detector state
+        self._last_sustained_alert: Dict[str, datetime] = {}  # symbol → last fire time
 
         # Market state tracked from Redis streams (per-symbol)
         self._volume_bars: Dict[str, deque] = {}  # symbol → deque of (ts, vol)
@@ -355,6 +405,8 @@ class CorrelationEngine:
         recent_events = self.window.get_recent_social_events()
         for event in recent_events:
             self._check_correlations(event)
+        # Also check for sustained directional moves (independent of any single event)
+        self._check_sustained_move()
 
     def _check_correlations(self, event: SocialEvent) -> None:
         """Run all correlation rules for a social event against the latest market signal."""
@@ -452,3 +504,102 @@ class CorrelationEngine:
             )
         except Exception:
             LOGGER.exception("Failed to publish correlation alert %s", alert.alert_id)
+
+    def _check_sustained_move(self) -> None:
+        """Detect if price has been trending consistently in one direction.
+
+        Runs market-first: if the market IS moving, find what news explains it.
+        Fires a SustainedMoveAlert with the top matching stories attached.
+        """
+        now = datetime.now(timezone.utc)
+        window_secs = SUSTAINED_WINDOW_MINUTES * 60
+
+        for symbol in list(self._price_history.keys()):
+            # Cooldown check
+            last = self._last_sustained_alert.get(symbol)
+            if last and (now - last).total_seconds() < SUSTAINED_COOLDOWN_SECONDS:
+                continue
+
+            bars = self.window.get_price_bars(symbol, within_seconds=window_secs)
+            if len(bars) < 6:  # need at least 6 data points
+                continue
+
+            # Sort by time
+            bars = sorted(bars, key=lambda x: x[0])
+            price_start = bars[0][1]
+            price_now = bars[-1][1]
+
+            if price_start == 0:
+                continue
+
+            net_pct = ((price_now - price_start) / price_start) * 100
+
+            if abs(net_pct) < SUSTAINED_MOVE_PCT:
+                continue
+
+            direction = "bearish" if net_pct < 0 else "bullish"
+
+            # Count how many consecutive bar-pairs trend in the move direction
+            trending = 0
+            for i in range(1, len(bars)):
+                delta = bars[i][1] - bars[i - 1][1]
+                if direction == "bearish" and delta < 0:
+                    trending += 1
+                elif direction == "bullish" and delta > 0:
+                    trending += 1
+
+            trend_ratio = trending / (len(bars) - 1)
+            if trend_ratio < SUSTAINED_TREND_RATIO:
+                continue
+
+            # Move confirmed — find best matching news stories
+            lookback_secs = SUSTAINED_NEWS_LOOKBACK_MINUTES * 60
+            recent_events = self.window.get_recent_social_events(within_seconds=lookback_secs)
+
+            # Score each event: prefer same sentiment direction + higher relevance score
+            def _event_score(evt: SocialEvent) -> int:
+                sent = evt.sentiment.value if hasattr(evt.sentiment, "value") else str(evt.sentiment)
+                directional_match = (
+                    (direction == "bearish" and sent == "bearish") or
+                    (direction == "bullish" and sent == "bullish")
+                )
+                return evt.relevance_score * (3 if directional_match else 1)
+
+            driver_events = sorted(recent_events, key=_event_score, reverse=True)[:4]
+
+            direction_emoji = "📉" if direction == "bearish" else "📈"
+            driver_lines = "\n".join(
+                f"  • [{e.author}] {e.text[:100]}" for e in driver_events
+            ) or "  • No recent matching stories"
+
+            msg = (
+                f"{direction_emoji} **SUSTAINED {direction.upper()} MOVE** — "
+                f"{symbol} {net_pct:+.2f}% over {SUSTAINED_WINDOW_MINUTES}min "
+                f"({price_start:.2f} → {price_now:.2f}) | "
+                f"{trend_ratio*100:.0f}% bars trending\n"
+                f"Likely drivers:\n{driver_lines}"
+            )
+
+            sustained_alert = SustainedMoveAlert(
+                direction=direction,
+                symbol=symbol,
+                price_start=price_start,
+                price_now=price_now,
+                price_change_pct=net_pct,
+                window_minutes=SUSTAINED_WINDOW_MINUTES,
+                driver_events=driver_events,
+                message=msg,
+            )
+
+            self._last_sustained_alert[symbol] = now
+
+            try:
+                payload = sustained_alert.model_dump(mode="json")
+                serialized = json.dumps(payload, default=str)
+                self.redis.client.publish(CORRELATION_ALERT_CHANNEL, serialized)
+                LOGGER.info(
+                    "Sustained move alert: %s %s net_pct=%.2f trend_ratio=%.2f drivers=%d",
+                    symbol, direction, net_pct, trend_ratio, len(driver_events),
+                )
+            except Exception:
+                LOGGER.exception("Failed to publish sustained move alert")

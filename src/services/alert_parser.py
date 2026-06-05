@@ -13,11 +13,14 @@ class AlertParser:
     def __init__(self):
         # Flexible pattern for alerts supporting formats like:
         # - "Alert: BTO UBER 78p 12/05 @ 0.75"
+        # - "Super Lotto: BTO DELL 260c 1DTE @ 0.93"
+        # - "Lotto: BTO UBER 78p 12/05 0.75"
         # - "BTO UBER 78p 12/05 0.75"
         # - "BUY UBER 78p 12/05 0.75"
         # Price is optional and may be provided with or without '@'
+        # Expiry supports MM/DD, MM/DD/YY, and NDte formats (e.g. 1DTE)
         self.pattern = re.compile(
-            r"^(?:Alert:)?\s*(BTO|STC|BUY|SELL)\s+(?P<symbol>[A-Z0-9_.-]+)\s+(?P<strike>\d+(?:\.\d+)?)\s*(?P<option_type>[cp])\s+(?P<expiry>\d{1,2}/\d{1,2}(?:/\d{2,4})?)(?:\s*(?:@|\s)\s*(?P<price>[\d.]+))?",
+            r"^(?:(?P<label>Super\s+Lotto|Lotto|Alert)\s*:\s*)?\s*(BTO|STC|BUY|SELL)\s+(?P<symbol>[A-Z0-9_.-]+)\s+(?P<strike>\d+(?:\.\d+)?)\s*(?P<option_type>[cp])\s+(?P<expiry>\d{1,2}DTE|\d{1,2}/\d{1,2}(?:/\d{2,4})?)(?:\s*(?:@|\s)\s*(?P<price>[\d.]+))?",
             re.IGNORECASE,
         )
 
@@ -28,7 +31,8 @@ class AlertParser:
         if not match:
             return None
 
-        action = match.group(1)
+        label = match.group("label")
+        action = match.group(2)  # group(1)=label, group(2)=BTO/STC/BUY/SELL
         symbol = match.group("symbol")
         strike = match.group("strike")
         option_type = match.group("option_type")
@@ -45,6 +49,8 @@ class AlertParser:
         # Price may be missing; return None for price in that case
         parsed_price = float(price) if price is not None else None
 
+        trade_label = label.lower().replace(" ", "_") if label else None
+
         return {
             "action": action.upper(),
             "symbol": symbol.upper(),
@@ -53,6 +59,7 @@ class AlertParser:
             "expiry": expiry,
             "price": parsed_price,
             "user_id": user_id,
+            "trade_label": trade_label,  # e.g. 'super_lotto', 'lotto', 'alert', or None
         }
 
     def is_buy_message(self, channel_id: str) -> bool:

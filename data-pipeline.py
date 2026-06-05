@@ -64,7 +64,9 @@ from src.services.schwab_streamer import SchwabStreamClient, build_streamer  # n
 from src.services.social_feed_service import SocialFeedService, FeedConfig, KeywordScorer  # noqa: E402
 from src.services.social_feed_service import SOCIAL_ALL_EVENTS_CHANNEL, SOCIAL_HISTORY_KEY  # noqa: E402
 from src.services.correlation_engine import CorrelationEngine  # noqa: E402
+from src.services.economic_calendar_service import EconomicCalendarService, CALENDAR_REDIS_KEY  # noqa: E402
 from src.services.market_mover_analyzer import MarketMoverAnalyzer, MarketMoverResult  # noqa: E402
+from src.services.uw_rest_poller import UWRestPoller, UWRestPollerSettings  # noqa: E402
 from src.models.social_event import SocialSource  # noqa: E402
 
 # Trading panel router
@@ -217,6 +219,8 @@ class ServiceManager:
         self.schwab_service = SchwabStreamingService(self)
         self.social_feed: Optional[SocialFeedService] = None
         self.correlation_engine: Optional[CorrelationEngine] = None
+        self.calendar_service: Optional[EconomicCalendarService] = None
+        self.uw_rest_poller: Optional[UWRestPoller] = None
         self.trade_count = 0
         self.depth_count = 0
         self.trade_counts: Dict[str, int] = {}
@@ -259,6 +263,8 @@ class ServiceManager:
             "redis_flush",
             "social_feed",
             "correlation",
+            "calendar",
+            "uw_rest",
         ):
             self.start_service(service)
 
@@ -266,6 +272,8 @@ class ServiceManager:
         """Stop all managed services in a best-effort fashion."""
         for service in (
             "correlation",
+            "calendar",
+            "uw_rest",
             "social_feed",
             "tastytrade",
             "schwab",
@@ -304,6 +312,7 @@ class ServiceManager:
             "gex_poller": getattr(self.gex_poller, "status", lambda: {})(),
             "gex_nq_poller": getattr(self.gex_nq_poller, "status", lambda: {})(),
             "redis_flush_worker": getattr(self.flush_worker, "status", lambda: {})(),
+            "uw_rest_poller": getattr(self.uw_rest_poller, "status", lambda: {})(),
             "lookup_service": {
                 "ready": bool(self.lookup_service),
                 "recent_depth_diffs": list(self.last_depth_comparison.values())[:3],
@@ -488,6 +497,30 @@ class ServiceManager:
             )
             self.correlation_engine.start()
             LOGGER.info("Correlation engine started")
+        elif name == "calendar":
+            if self.calendar_service:
+                return
+            self.calendar_service = EconomicCalendarService(redis_client=self.redis_client)
+            self.calendar_service.start()
+            LOGGER.info("Economic calendar service started")
+        elif name == "uw_rest" and settings.uw_rest_poller_enabled and settings.uw_api_key:
+            if self.uw_rest_poller:
+                return
+            self.uw_rest_poller = UWRestPoller(
+                UWRestPollerSettings(
+                    api_key=settings.uw_api_key,
+                    sweep_interval_rth=settings.uw_sweep_interval_rth,
+                    alert_interval_rth=settings.uw_alert_interval_rth,
+                    tide_interval_rth=settings.uw_tide_interval_rth,
+                    darkpool_interval_rth=settings.uw_darkpool_interval_rth,
+                    sector_interval_rth=settings.uw_sector_interval_rth,
+                    off_hours_multiplier=settings.uw_off_hours_multiplier,
+                    min_sweep_premium=settings.uw_min_sweep_premium,
+                ),
+                redis_client=self.redis_client,
+            )
+            self.uw_rest_poller.start()
+            LOGGER.info("UW REST poller started")
 
     async def stop_service(self, name: str) -> None:
         """Stop a running service and clean up the local reference."""
@@ -519,6 +552,14 @@ class ServiceManager:
             await self.correlation_engine.stop()
             self.correlation_engine = None
             LOGGER.info("Correlation engine stopped")
+        elif name == "calendar" and self.calendar_service:
+            await self.calendar_service.stop()
+            self.calendar_service = None
+            LOGGER.info("Economic calendar service stopped")
+        elif name == "uw_rest" and self.uw_rest_poller:
+            await self.uw_rest_poller.stop()
+            self.uw_rest_poller = None
+            LOGGER.info("UW REST poller stopped")
 
     async def restart_service(self, name: str) -> None:
         """Convenience helper for the ``/control`` endpoint."""
@@ -897,6 +938,20 @@ async def order_panel():
     from fastapi.responses import FileResponse
     panel_path = PROJECT_ROOT / "frontend" / "src" / "order_panel.html"
     return FileResponse(str(panel_path))
+
+
+@app.get("/api/calendar")
+async def get_calendar() -> Dict[str, Any]:
+    """Return today's high-impact economic events (cached from Forex Factory feed)."""
+    redis_conn = _get_redis_client()
+    try:
+        raw = redis_conn.get(CALENDAR_REDIS_KEY)
+        if raw:
+            events = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+            return {"events": events, "count": len(events)}
+    except Exception:
+        pass
+    return {"events": [], "count": 0}
 
 
 @app.get("/gex-monitor")
@@ -1882,6 +1937,109 @@ async def market_sentiment_websocket(websocket: WebSocket) -> None:
                     "direction": payload.get("direction"),
                     "change_pct": payload.get("change_pct"),
                 })
+    except WebSocketDisconnect:
+        return
+    finally:
+        try:
+            pubsub.close()
+        except Exception:
+            pass
+
+
+@app.websocket("/ws/sweep")
+async def sweep_intelligence_websocket(websocket: WebSocket, symbol: str = "MNQ") -> None:
+    """Stream sweep classifier alerts and position monitor events for the intelligence dashboard.
+
+    Subscribes to:
+        sweep:alert:{symbol}   — SweepAlert payloads from SweepClassifierService
+        sweep:monitor:{symbol} — PositionMonitorService level updates + TP signals
+        market:dom:{symbol}    — DOM snapshots (price/imbalance heat data)
+        market:cvd:{symbol}    — CVD rolling windows
+
+    Each message sent to the client has a ``type`` field:
+        sweep_alert    — classification result (sweep/directional + confidence)
+        monitor_event  — danger level escalation or TP wall proximity signal
+        dom_snapshot   — DOM depth/imbalance update (throttled to 2 Hz)
+        cvd_snapshot   — CVD rolling windows update (throttled to 1 Hz)
+    """
+    await websocket.accept()
+    sym = (symbol or "MNQ").upper()
+    redis_conn = _get_redis_client()
+    pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
+    pubsub.subscribe(
+        f"sweep:alert:{sym}",
+        f"sweep:monitor:{sym}",
+        f"market:dom:{sym}",
+        f"market:cvd:{sym}",
+    )
+
+    # Channel → message type mapping
+    _CHANNEL_TYPE = {
+        f"sweep:alert:{sym}":   "sweep_alert",
+        f"sweep:monitor:{sym}": "monitor_event",
+        f"market:dom:{sym}":    "dom_snapshot",
+        f"market:cvd:{sym}":    "cvd_snapshot",
+    }
+
+    # Throttle DOM/CVD to avoid overwhelming the browser
+    _THROTTLE_INTERVAL = {
+        "dom_snapshot": 0.5,   # 2 Hz
+        "cvd_snapshot": 1.0,   # 1 Hz
+    }
+    _last_sent: dict[str, float] = {}
+
+    # Send cached latest DOM/CVD on connect so the page isn't blank
+    try:
+        for ch in (f"market:dom:{sym}", f"market:cvd:{sym}"):
+            raw = redis_conn.get(ch + ":latest")
+            if raw:
+                try:
+                    payload = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
+                    msg_type = _CHANNEL_TYPE.get(ch, "dom_snapshot")
+                    await websocket.send_json({"type": msg_type, **payload})
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        while True:
+            try:
+                message = await asyncio.to_thread(pubsub.get_message, timeout=1.5)
+            except Exception:
+                message = None
+            if not message or message.get("type") != "message":
+                await asyncio.sleep(0.05)
+                continue
+
+            channel = message.get("channel", "")
+            if isinstance(channel, bytes):
+                channel = channel.decode("utf-8")
+
+            msg_type = _CHANNEL_TYPE.get(channel)
+            if not msg_type:
+                continue
+
+            # Throttle high-frequency streams
+            throttle = _THROTTLE_INTERVAL.get(msg_type)
+            if throttle:
+                now = asyncio.get_event_loop().time()
+                if now - _last_sent.get(msg_type, 0) < throttle:
+                    continue
+                _last_sent[msg_type] = now
+
+            raw = message.get("data")
+            try:
+                if isinstance(raw, (bytes, bytearray)):
+                    payload = json.loads(raw.decode("utf-8"))
+                elif isinstance(raw, str):
+                    payload = json.loads(raw)
+                else:
+                    continue
+            except Exception:
+                continue
+
+            await websocket.send_json({"type": msg_type, **payload})
     except WebSocketDisconnect:
         return
     finally:
