@@ -66,6 +66,7 @@ from src.services.social_feed_service import SOCIAL_ALL_EVENTS_CHANNEL, SOCIAL_H
 from src.services.correlation_engine import CorrelationEngine  # noqa: E402
 from src.services.economic_calendar_service import EconomicCalendarService, CALENDAR_REDIS_KEY  # noqa: E402
 from src.services.market_mover_analyzer import MarketMoverAnalyzer, MarketMoverResult  # noqa: E402
+from src.services.uw_rest_poller import UWRestPoller, UWRestPollerSettings  # noqa: E402
 from src.models.social_event import SocialSource  # noqa: E402
 
 # Trading panel router
@@ -219,6 +220,7 @@ class ServiceManager:
         self.social_feed: Optional[SocialFeedService] = None
         self.correlation_engine: Optional[CorrelationEngine] = None
         self.calendar_service: Optional[EconomicCalendarService] = None
+        self.uw_rest_poller: Optional[UWRestPoller] = None
         self.trade_count = 0
         self.depth_count = 0
         self.trade_counts: Dict[str, int] = {}
@@ -262,6 +264,7 @@ class ServiceManager:
             "social_feed",
             "correlation",
             "calendar",
+            "uw_rest",
         ):
             self.start_service(service)
 
@@ -270,6 +273,7 @@ class ServiceManager:
         for service in (
             "correlation",
             "calendar",
+            "uw_rest",
             "social_feed",
             "tastytrade",
             "schwab",
@@ -308,6 +312,7 @@ class ServiceManager:
             "gex_poller": getattr(self.gex_poller, "status", lambda: {})(),
             "gex_nq_poller": getattr(self.gex_nq_poller, "status", lambda: {})(),
             "redis_flush_worker": getattr(self.flush_worker, "status", lambda: {})(),
+            "uw_rest_poller": getattr(self.uw_rest_poller, "status", lambda: {})(),
             "lookup_service": {
                 "ready": bool(self.lookup_service),
                 "recent_depth_diffs": list(self.last_depth_comparison.values())[:3],
@@ -498,6 +503,24 @@ class ServiceManager:
             self.calendar_service = EconomicCalendarService(redis_client=self.redis_client)
             self.calendar_service.start()
             LOGGER.info("Economic calendar service started")
+        elif name == "uw_rest" and settings.uw_rest_poller_enabled and settings.uw_api_key:
+            if self.uw_rest_poller:
+                return
+            self.uw_rest_poller = UWRestPoller(
+                UWRestPollerSettings(
+                    api_key=settings.uw_api_key,
+                    sweep_interval_rth=settings.uw_sweep_interval_rth,
+                    alert_interval_rth=settings.uw_alert_interval_rth,
+                    tide_interval_rth=settings.uw_tide_interval_rth,
+                    darkpool_interval_rth=settings.uw_darkpool_interval_rth,
+                    sector_interval_rth=settings.uw_sector_interval_rth,
+                    off_hours_multiplier=settings.uw_off_hours_multiplier,
+                    min_sweep_premium=settings.uw_min_sweep_premium,
+                ),
+                redis_client=self.redis_client,
+            )
+            self.uw_rest_poller.start()
+            LOGGER.info("UW REST poller started")
 
     async def stop_service(self, name: str) -> None:
         """Stop a running service and clean up the local reference."""
@@ -533,6 +556,10 @@ class ServiceManager:
             await self.calendar_service.stop()
             self.calendar_service = None
             LOGGER.info("Economic calendar service stopped")
+        elif name == "uw_rest" and self.uw_rest_poller:
+            await self.uw_rest_poller.stop()
+            self.uw_rest_poller = None
+            LOGGER.info("UW REST poller stopped")
 
     async def restart_service(self, name: str) -> None:
         """Convenience helper for the ``/control`` endpoint."""

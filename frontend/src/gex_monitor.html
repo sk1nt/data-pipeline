@@ -568,7 +568,7 @@ tr:hover { background: var(--bg3); }
     <span class="val neutral" id="deltaRiskRev">&mdash;</span>
   </div>
   <div class="metric">
-    <span class="lbl">GEX &Delta;</span>
+    <span class="lbl">GEX &Delta; <span style="font-size:0.75em;opacity:0.6">(15s avg)</span></span>
     <span class="val neutral" id="gexDelta">&mdash;</span>
   </div>
 </div>
@@ -779,6 +779,8 @@ function toggleCollapse(el, bodyId) {
   let reconnectDelay = 1000;
   let prevMaxchangeCurrent = null;
   let prevNetGex = null;
+  const GEX_DELTA_WINDOW_MS = 15000;
+  let gexHistory = []; // [{t: ms, v: net_gex}]
   let alertTotal = 0;
   let flashQueue = 0;
   let flashing = false;
@@ -973,17 +975,31 @@ function toggleCollapse(el, bodyId) {
     var drr = data.delta_risk_reversal;
     var drrEl = $('deltaRiskRev');
     drrEl.textContent = fmtPrice(drr); drrEl.className = 'val ' + valClass(drr);
-    // GEX Delta: change between consecutive net_gex values
+    // GEX Delta: average of tick-by-tick changes over a 15-second rolling window
     var curGex = data.net_gex;
-    if (typeof curGex === 'number' && prevNetGex !== null) {
-      var gexDiff = curGex - prevNetGex;
-      gexDeltaEl.textContent = (gexDiff >= 0 ? '+' : '') + fmtBn(gexDiff);
-      gexDeltaEl.className = 'val ' + valClass(gexDiff);
-      if (Math.abs(gexDiff) >= cfg.threshold) triggerAlert(gexDiff, 'gex_delta');
+    if (typeof curGex === 'number') {
+      var now = Date.now();
+      gexHistory.push({ t: now, v: curGex });
+      // Drop entries older than the window
+      var cutoff = now - GEX_DELTA_WINDOW_MS;
+      gexHistory = gexHistory.filter(function(e) { return e.t >= cutoff; });
+      // Compute average of consecutive differences within the window
+      if (gexHistory.length >= 2) {
+        var diffs = [];
+        for (var i = 1; i < gexHistory.length; i++) {
+          diffs.push(gexHistory[i].v - gexHistory[i - 1].v);
+        }
+        var gexDiff = diffs.reduce(function(a, b) { return a + b; }, 0) / diffs.length;
+        gexDeltaEl.textContent = (gexDiff >= 0 ? '+' : '') + fmtBn(gexDiff);
+        gexDeltaEl.className = 'val ' + valClass(gexDiff);
+        if (Math.abs(gexDiff) >= cfg.threshold) triggerAlert(gexDiff, 'gex_delta');
+      } else {
+        gexDeltaEl.textContent = '\u2014'; gexDeltaEl.className = 'val neutral';
+      }
+      prevNetGex = curGex;
     } else {
       gexDeltaEl.textContent = '\u2014'; gexDeltaEl.className = 'val neutral';
     }
-    if (typeof curGex === 'number') prevNetGex = curGex;
     updateMaxchange(data.maxchange, data.max_priors);
     var ts = data.timestamp;
     if (typeof ts === 'number') ts = new Date(ts * 1000).toLocaleTimeString('en-US', { timeZone: 'America/New_York' });
@@ -1001,7 +1017,7 @@ function toggleCollapse(el, bodyId) {
     ws.onerror = function() { ws.close(); };
     ws.onmessage = function(evt) { try { onSnapshot(JSON.parse(evt.data)); } catch(e) { console.warn('Bad WS msg', e); } };
   }
-  function gexReconnect() { prevMaxchangeCurrent = null; prevNetGex = null; if (ws) { ws.onclose = null; ws.close(); } gexConnect(); }
+  function gexReconnect() { prevMaxchangeCurrent = null; prevNetGex = null; gexHistory = []; if (ws) { ws.onclose = null; ws.close(); } gexConnect(); }
 
   // =====================================================================
   //  SOCIAL FEED SECTION

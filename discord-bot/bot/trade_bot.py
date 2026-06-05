@@ -316,7 +316,7 @@ class TradeBot(commands.Bot):
                 await ctx.send(formatted)
 
             async def _tt_cmd(ctx, *args):
-                if not await self._ensure_status_channel_access(ctx):
+                if not await self._ensure_privileged(ctx):
                     return
                 if not self.tastytrade_client:
                     await self._send_dm_or_warn(
@@ -881,6 +881,75 @@ class TradeBot(commands.Bot):
                 message = self.format_tastytrade_summary(summary)
                 await self._send_dm_or_warn(ctx, message)
 
+            async def _help_cmd(ctx, *args):
+                topic = args[0].lower() if args else None
+                if topic == "gex":
+                    part1 = (
+                        "**GEX Command: `!gex [symbol]`**\n"
+                        "Shows the Gamma Exposure snapshot. Supported: NQ, MNQ, ES, MES, SPY, QQQ, etc.\n\n"
+                        "**─── Fields ───**\n\n"
+                        "**Spot Price** — Current market price. All GEX levels are relative to this.\n\n"
+                        "**Zero Gamma (Gamma Flip)** — Price where dealer net gamma flips sign.\n"
+                        "  • Spot **above** → long gamma regime: dealers buy dips/sell rips, vol compresses, price ranges.\n"
+                        "  • Spot **below** → short gamma regime: dealers chase price, vol expands, moves accelerate.\n\n"
+                        "**Call Wall** — Strike with the largest positive GEX (calls) by volume.\n"
+                        "  • Overhead resistance: dealers must sell into this level to stay delta-neutral.\n\n"
+                        "**Put Wall** — Strike with the largest negative GEX (puts) by volume.\n"
+                        "  • Downside support: dealers must buy as price falls here. A break below accelerates selling.\n\n"
+                        "**Net GEX (vol)** — Aggregate gamma across all strikes, weighted by volume.\n"
+                        "  • Positive (green) → mean-reversion, vol compression, pinning.\n"
+                        "  • Negative (red) → trending market, vol expansion. Shown in Bn.\n\n"
+                        "**Net GEX (OI)** *(right column)* — Same but by open interest; structural positioning.\n"
+                        "  • Divergence from vol GEX signals positioning shifts.\n\n"
+                        "**Delta Risk Reversal** — Put/call vol skew in delta terms.\n"
+                        "  • Negative → puts cost more → fear/downside demand → **bearish skew**.\n"
+                        "  • Positive → calls cost more → upside speculation → **bullish skew**.\n"
+                        "  • This is the primary vol skew / put-call skew indicator in the feed.\n\n"
+                        "**Largest Delta** — Strike with the highest instantaneous gamma change rate.\n"
+                        "  • Shows where active options hedging is concentrated right now.\n\n"
+                        "**Max Change GEX (1/5/10/15/30 min)** — GEX shift at the most active strike per interval.\n"
+                        "  • Positive = gamma being added (options bought, hedging builds).\n"
+                        "  • Negative = gamma being removed (options closing/expiring).\n"
+                        "  • Compare 1-min vs 30-min to gauge acceleration vs exhaustion."
+                    )
+                    part2 = (
+                        "**─── Market Bias ───**\n\n"
+                        "```\n"
+                        "Signal                Bullish              Bearish\n"
+                        "────────────────────  ───────────────────  ───────────────────\n"
+                        "Spot vs Zero Gamma    Above (long gamma)   Below (short gamma)\n"
+                        "Net GEX               Positive (green)     Negative (red)\n"
+                        "Delta Risk Reversal   Positive (call skew) Negative (put skew)\n"
+                        "Call Wall             Far above            Close overhead\n"
+                        "Put Wall              Far below            Close below\n"
+                        "Max Change GEX trend  Rising/positive      Falling/negative\n"
+                        "```\n\n"
+                        "**Signals compound.** Multiple aligned = strong conviction.\n\n"
+                        "Bullish example: spot above zero gamma + net GEX positive + delta RR positive → dealers supporting upside, vol suppressed.\n"
+                        "Bearish example: spot below zero gamma + net GEX negative + delta RR negative → dealers amplifying downside, elevated vol.\n\n"
+                        "**Vol/Put-Call Skew:** Watch `delta_risk_reversal`. A sustained reading of -0.05 to -0.20 means the market is paying up for downside protection (fear). Near zero or positive = complacency or upside demand.\n\n"
+                        "**Commands:** `!gex` · `!gex nq` · `!gex es` · `!gex spy`"
+                    )
+                    await ctx.send(part1)
+                    await ctx.send(part2)
+                    return
+
+                # General help
+                general_help = (
+                    "**Bot Commands:**\n\n"
+                    "• `!gex [symbol]` — GEX snapshot (gamma exposure). Use `!help gex` for detailed field explanations.\n"
+                    "• `!market` — Current market state snapshot\n"
+                    "• `!uw` — Recent unusual whales option alerts\n"
+                    "• `!status` — Pipeline service status *(status channel or DM only)*\n"
+                    "• `!tt` — TastyTrade account summary. Use `!tt help` for full trading commands.\n"
+                    "• `!ping` — Health check\n\n"
+                    "**Help Topics:** `!help gex`"
+                )
+                await ctx.send(general_help)
+
+            # Remove discord.py built-in help before registering our own
+            self.remove_command("help")
+            self.add_command(commands.Command(_help_cmd, name="help"))
             self.add_command(commands.Command(_ping_cmd, name="ping"))
             self.add_command(commands.Command(_gex_cmd, name="gex"))
             self.add_command(commands.Command(_status_cmd, name="status"))
@@ -1010,8 +1079,9 @@ class TradeBot(commands.Bot):
             is_reply = getattr(message, "reference", None) is not None
         except Exception:
             is_reply = False
-        
-        if not is_reply and message.content.startswith("Alert"):
+
+        _ALERT_PREFIXES = ("Alert", "Lotto", "Super Lotto", "BTO", "STC", "BUY", "SELL")
+        if not is_reply and message.content.startswith(_ALERT_PREFIXES):
             print(f"Alert detected! Processing...")
             await self._process_alert_message(message)
             return  # Don't process as command after handling alert

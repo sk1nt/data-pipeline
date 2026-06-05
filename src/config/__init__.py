@@ -253,6 +253,17 @@ class Settings(BaseSettings):
         "CORRELATION_COOLDOWN_SECONDS", default=60
     )
 
+    # Unusual Whales REST poller
+    uw_api_key: Optional[str] = env_field("UW_API_KEY")
+    uw_rest_poller_enabled: bool = env_field("UW_REST_POLLER_ENABLED", default=False)
+    uw_sweep_interval_rth: float = env_field("UW_SWEEP_INTERVAL_RTH", default=15.0)
+    uw_alert_interval_rth: float = env_field("UW_ALERT_INTERVAL_RTH", default=30.0)
+    uw_tide_interval_rth: float = env_field("UW_TIDE_INTERVAL_RTH", default=300.0)
+    uw_darkpool_interval_rth: float = env_field("UW_DARKPOOL_INTERVAL_RTH", default=60.0)
+    uw_sector_interval_rth: float = env_field("UW_SECTOR_INTERVAL_RTH", default=600.0)
+    uw_off_hours_multiplier: float = env_field("UW_OFF_HOURS_MULTIPLIER", default=12.0)
+    uw_min_sweep_premium: int = env_field("UW_MIN_SWEEP_PREMIUM", default=100_000)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=False,

@@ -137,7 +137,8 @@ class GEXBotPoller:
                 LOGGER.debug(
                     "poll-loop symbols=%s interval=%.3fs", symbols, interval_seconds
                 )
-                for symbol in symbols:
+
+                async def _fetch_and_store(symbol: str) -> None:
                     try:
                         fetch_start = asyncio.get_event_loop().time()
                         snapshot = await self._fetch_symbol(session, symbol)
@@ -154,6 +155,8 @@ class GEXBotPoller:
                             LOGGER.debug("no snapshot returned for %s", symbol)
                     except Exception:  # pragma: no cover - defensive logging
                         LOGGER.exception("Failed to poll GEXBot for %s", symbol)
+
+                await asyncio.gather(*[_fetch_and_store(sym) for sym in symbols])
                 interval_seconds = self._current_interval_seconds()
                 label = "RTH" if self._is_rth_now() else "off-hours"
                 if label != self._last_interval_setting:
@@ -271,13 +274,11 @@ class GEXBotPoller:
                 LOGGER.debug("GEXBot %s maxchange request failed: %s", symbol, exc)
                 return None
 
-        zero = await _endpoint()
+        # Fetch zero and maxchange endpoints concurrently
+        zero, maxchange_data = await asyncio.gather(_endpoint(), _maxchange_endpoint())
         if not zero:
             LOGGER.debug("GEXBot %s returned no data", symbol)
             return None
-
-        # Fetch dedicated maxchange endpoint (more reliable than embedded field)
-        maxchange_data = await _maxchange_endpoint()
 
         result = self._combine_payloads(symbol, zero, maxchange_data=maxchange_data)
         result["raw"] = {"zero": zero, "maxchange": maxchange_data}

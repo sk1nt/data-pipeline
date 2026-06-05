@@ -43,3 +43,50 @@ def test_parse_unauthorized_user(monkeypatch):
     msg = "Alert: BTO UBER 78p 12/05 @ 0.75"
     assert parser.parse_alert(msg, "blocked") is None
 
+
+
+import pytest
+
+@pytest.mark.parametrize("msg,expected_label,expected_action", [
+    ("Lotto: BTO UNH 397.5c 06/12 @ 1.90",         "lotto",       "BTO"),
+    ("Super Lotto: BTO AAPL 200c 06/20 @ 0.50",    "super_lotto", "BTO"),
+    ("Alert: BTO UBER 78p 12/05 @ 0.75",            "alert",       "BTO"),
+    ("BTO TSLA 250c 07/18 @ 1.25",                  None,          "BTO"),
+    ("STC TSLA 250c 07/18 @ 2.50",                  None,          "STC"),
+    ("BUY SPY 530c 06/20 @ 0.80",                   None,          "BUY"),
+    ("SELL SPY 530c 06/20 @ 1.60",                  None,          "SELL"),
+])
+def test_parse_all_prefixes(msg, expected_label, expected_action, monkeypatch):
+    """Parser must correctly parse action and trade_label for all supported prefixes."""
+    parser = AlertParser()
+    monkeypatch.setattr(svc_auth.AuthService, "verify_user_for_alerts", lambda uid: True)
+    result = parser.parse_alert(msg, "someuser")
+    assert result is not None, f"Parser returned None for: {msg!r}"
+    assert result["action"].upper() == expected_action, \
+        f"Expected action {expected_action!r}, got {result['action']!r} for: {msg!r}"
+    assert result["trade_label"] == expected_label, \
+        f"Expected trade_label {expected_label!r}, got {result['trade_label']!r} for: {msg!r}"
+
+
+def test_lotto_trade_label_is_lotto(monkeypatch):
+    """Lotto prefix sets trade_label='lotto' which triggers 5% allocation."""
+    parser = AlertParser()
+    monkeypatch.setattr(svc_auth.AuthService, "verify_user_for_alerts", lambda uid: True)
+    result = parser.parse_alert("Lotto: BTO UNH 397.5c 06/12 @ 1.90", "user")
+    assert result is not None
+    assert result["trade_label"] == "lotto"
+    assert result["symbol"] == "UNH"
+    assert result["strike"] == 397.5
+    assert result["option_type"] == "c"
+    assert result["price"] == 1.90
+
+
+def test_super_lotto_trade_label(monkeypatch):
+    """Super Lotto prefix sets trade_label='super_lotto'."""
+    parser = AlertParser()
+    monkeypatch.setattr(svc_auth.AuthService, "verify_user_for_alerts", lambda uid: True)
+    result = parser.parse_alert("Super Lotto: BTO AAPL 200c 06/20 @ 0.50", "user")
+    assert result is not None
+    assert result["trade_label"] == "super_lotto"
+    assert result["symbol"] == "AAPL"
+    assert result["price"] == 0.50
