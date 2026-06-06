@@ -1,5 +1,9 @@
 # Spec 002 — Sweep Classifier & Sierra Chart DOM Bridge
 
+> **Implementation:** `~/projects/data-trading` (trading machine).  
+> **This repo:** GEX ingest + `gex:snapshot:stream` + dashboard `/ws/sweep` relay only.  
+> See `docs/SWEEP_MOVED_TO_DATA_TRADING.md`.
+
 **Status**: Implementation ready  
 **Priority**: P0 — directly supports live manual trading  
 **Language decisions**: C++ (ACSIL study), Python (bridge service + ML), with notes on when to diverge

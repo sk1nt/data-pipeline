@@ -32,6 +32,7 @@ dev = [
     "pytest-asyncio>=0.21.0",
     "ruff>=0.1.0",
 ]
+# Deprecated: sweep stack runs from data-trading. Kept for old install scripts only.
 sweep = [
     "redis>=5.0.0",
     "duckdb>=0.10.0",

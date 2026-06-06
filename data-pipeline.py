@@ -1948,11 +1948,11 @@ async def market_sentiment_websocket(websocket: WebSocket) -> None:
 
 @app.websocket("/ws/sweep")
 async def sweep_intelligence_websocket(websocket: WebSocket, symbol: str = "MNQ") -> None:
-    """Stream sweep classifier alerts and position monitor events for the intelligence dashboard.
+    """Stream sweep alerts for intelligence.html (Redis relay only).
 
-    Subscribes to:
-        sweep:alert:{symbol}   — SweepAlert payloads from SweepClassifierService
-        sweep:monitor:{symbol} — PositionMonitorService level updates + TP signals
+    Publishers run on the trading machine (data-trading / sweep_runner.py):
+        sweep:alert:{symbol}   — SweepClassifierService
+        sweep:monitor:{symbol} — PositionMonitorService
         market:dom:{symbol}    — DOM snapshots (price/imbalance heat data)
         market:cvd:{symbol}    — CVD rolling windows
 

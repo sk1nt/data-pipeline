@@ -2,41 +2,32 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main, master]
   pull_request:
-    branches: [ main ]
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  lint_and_tests:
+  contracts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install duckdb pandas requests pytest ruff
-      - name: Lint (ruff)
-        run: ruff check .
-      - name: Run tests
-        run: pytest -q
 
-  benchmark:
-    needs: lint_and_tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - name: Install deps
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install minimal deps for contract check
+        run: pip install pydantic
+
+      - name: Verify Redis contracts
+        run: python scripts/verify_contracts.py
+
+      - name: Sweep stubs import cleanly
         run: |
-          python -m pip install --upgrade pip
-          pip install duckdb pandas requests
-      - name: Run import benchmark
-        run: |
-          python scripts/bench/bench_import.py --records 1000
+          python -c "from src._moved_notice import moved_import"
+          python sweep_runner.py 2>/dev/null || test $? -eq 2

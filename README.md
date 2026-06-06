@@ -1,5 +1,9 @@
 # Financial Tick Data Pipeline
 
+> **Sweep / DOM / position monitor** → https://github.com/sk1nt/data-trading (Sierra Chart host).  
+> **This repo** = server: GEX, ingest, API, Redis, `intelligence.html`.  
+> Docs: [docs/ONBOARDING.md](docs/ONBOARDING.md) · [docs/INTER_REPO.md](docs/INTER_REPO.md) · [docs/SWEEP_MOVED_TO_DATA_TRADING.md](docs/SWEEP_MOVED_TO_DATA_TRADING.md)
+
 A high-performance data pipeline platform designed for financial tick data, providing secure real-time and historical data access for AI models used in trading and backtesting applications.
 
 ## Features
