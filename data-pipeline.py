@@ -301,16 +301,6 @@ class ServiceManager:
                 "tastytrade", self.last_depth_ts
             ),
         }
-        schwab_status = {
-            "running": self.schwab_service.is_running,
-            "enabled": settings.schwab_enabled,
-            "paused": settings.schwab_stream_paused,
-            "trade_samples": self.trade_counts.get("schwab", 0),
-            "depth_samples": self.depth_counts.get("schwab", 0),
-            "last_trade_ts": self.last_trade_timestamps.get("schwab"),
-            "last_depth_ts": self.last_depth_timestamps.get("schwab"),
-            "symbols": settings.schwab_symbol_list,
-        }
         return {
             "tastytrade_auth": (
                 self.tastytrade_auth.status() if self.tastytrade_auth else {}
@@ -323,7 +313,6 @@ class ServiceManager:
                 )
             },
             "tastytrade_streamer": tasty_status,
-            "schwab_streamer": schwab_status,
             "gex_poller": getattr(self.gex_poller, "status", lambda: {})(),
             "gex_nq_poller": getattr(self.gex_nq_poller, "status", lambda: {})(),
             "redis_flush_worker": getattr(self.flush_worker, "status", lambda: {})(),
@@ -332,7 +321,7 @@ class ServiceManager:
                 "ready": bool(self.lookup_service),
                 "recent_depth_diffs": list(self.last_depth_comparison.values())[:3],
             },
-            "market_data_metrics": self.metrics_snapshot(),
+            "market_data_metrics": self._status_metrics_snapshot(),
         }
 
     def _ensure_redis_clients(self) -> None:
@@ -908,6 +897,26 @@ class ServiceManager:
             "redis_key": MARKET_DATA_METRICS_KEY,
         }
 
+    def _status_metrics_snapshot(self) -> Dict[str, Any]:
+        """Return market metrics for /status without temporarily hidden providers."""
+        snapshot = self.metrics_snapshot()
+        for key in (
+            "trades_by_source",
+            "level2_by_source",
+            "last_trade_timestamps",
+            "last_depth_timestamps",
+        ):
+            values = snapshot.get(key)
+            if isinstance(values, dict):
+                values.pop("schwab", None)
+        for key in ("trades_by_symbol", "level2_by_symbol"):
+            values = snapshot.get(key)
+            if isinstance(values, dict):
+                for per_symbol in values.values():
+                    if isinstance(per_symbol, dict):
+                        per_symbol.pop("schwab", None)
+        return snapshot
+
     def _maybe_persist_metrics(self) -> None:
         """Serialize metrics into Redis at a throttled cadence for dashboards."""
         if not self.redis_client:
@@ -1168,7 +1177,7 @@ STATUS_PAGE = """
         }
 
         function renderControls() {
-            const services = ['tastytrade', 'schwab', 'gex_poller', 'gex_nq_poller', 'redis_flush', 'discord_bot'];
+            const services = ['tastytrade', 'gex_poller', 'gex_nq_poller', 'redis_flush', 'discord_bot'];
             const div = document.createElement('div');
             div.style.marginTop = '1rem';
             services.forEach(s => {
