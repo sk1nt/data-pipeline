@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import math
 import os
 import tempfile
 from contextlib import closing
 from datetime import datetime, timezone, timedelta
-from typing import Optional
-from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest

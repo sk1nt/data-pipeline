@@ -27,7 +27,6 @@ async def process_alert_admin(request: Request, payload: Dict[str, Any]):
     message = payload.get("message")
     channel_id = payload.get("channel_id")
     user_id = payload.get("user_id")
-    dry_run = payload.get("dry_run", True)
     if not message or not channel_id or not user_id:
         raise HTTPException(status_code=400, detail="Missing required fields")
     svc = AutomatedOptionsService(tastytrade_client=tastytrade_client)

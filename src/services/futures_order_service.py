@@ -25,6 +25,7 @@ class FuturesOrderService:
     async def place_order(self, params: FuturesOrderParams, user_id: str) -> str:
         """Place a futures order via Tastytrade API."""
 
+        tastytrade_client.ensure_authorized()
         session = tastytrade_client.get_session()
 
         # Get account

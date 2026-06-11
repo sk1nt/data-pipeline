@@ -1,4 +1,3 @@
-import math
 import pytest
 
 from bot.tastytrade_client import round_to_tick

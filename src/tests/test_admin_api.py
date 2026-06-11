@@ -5,7 +5,6 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.getcwd(), "src"))
 from src.api.app import app
-from src.services.automated_options_service import AutomatedOptionsService
 
 
 def test_admin_process_alert(monkeypatch):

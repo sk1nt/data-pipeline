@@ -8,7 +8,6 @@ sys.path.insert(0, os.path.join(os.getcwd(), "src"))
 sys.path.insert(0, os.path.join(os.getcwd(), "discord-bot"))
 
 from bot.trade_bot import TradeBot
-from services.auth_service import AuthService
 
 
 class FakeCtx:

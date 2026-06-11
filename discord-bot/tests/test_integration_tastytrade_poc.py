@@ -9,7 +9,6 @@ sys.path.insert(0, os.path.join(os.getcwd(), "src"))
 sys.path.insert(0, os.path.join(os.getcwd(), "discord-bot"))
 
 from src.services.automated_options_service import AutomatedOptionsService
-from src.services.options_fill_service import OptionsFillService
 from services.auth_service import AuthService
 
 

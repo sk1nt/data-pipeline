@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-from decimal import Decimal
 from typing import Optional
 
 import httpx
@@ -42,7 +41,8 @@ def _get_tt_client():
 
     # Import here to avoid circular / missing-dep issues at module level
     try:
-        import sys, pathlib
+        import sys
+        import pathlib
 
         # Add discord-bot to path so we can reuse its client
         bot_path = str(pathlib.Path(__file__).resolve().parents[3] / "discord-bot")

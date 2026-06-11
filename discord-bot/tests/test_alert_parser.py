@@ -1,6 +1,5 @@
 import os
 import sys
-from types import SimpleNamespace
 import pytest
 
 # Ensure project root and src dir are on sys.path
@@ -45,7 +44,6 @@ def test_parse_unauthorized_user(monkeypatch):
 
 
 
-import pytest
 
 @pytest.mark.parametrize("msg,expected_label,expected_action", [
     ("Lotto: BTO UNH 397.5c 06/12 @ 1.90",         "lotto",       "BTO"),

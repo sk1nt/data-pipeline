@@ -1,7 +1,6 @@
 """Tests for market hours utilities."""
 
-from datetime import datetime, time
-import pytest
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from src.lib.market_hours import (
@@ -10,8 +9,6 @@ from src.lib.market_hours import (
     is_market_holiday,
     is_market_open,
     get_next_market_open,
-    RTH_START,
-    RTH_END,
 )
 
 

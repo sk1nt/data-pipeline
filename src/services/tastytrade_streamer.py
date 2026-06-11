@@ -42,6 +42,7 @@ class TastyTradeStreamer:
         *,
         on_trade: Optional[TradeHandler] = None,
         on_depth: Optional[DepthHandler] = None,
+        auth_service=None,
     ) -> None:
         if DXLinkStreamer is None:
             raise RuntimeError("tastytrade SDK is not installed; cannot start streamer")
@@ -49,6 +50,7 @@ class TastyTradeStreamer:
         self.settings = settings
         self._on_trade = on_trade
         self._on_depth = on_depth
+        self._auth_service = auth_service
         self._task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
 
@@ -79,10 +81,13 @@ class TastyTradeStreamer:
             self.settings.symbols,
             self.settings.depth_levels,
         )
-        session = Session(
-            provider_secret=self.settings.client_secret,
-            refresh_token=self.settings.refresh_token,
-        )
+        if self._auth_service is not None:
+            session = await asyncio.to_thread(self._auth_service.get_session)
+        else:
+            session = Session(
+                provider_secret=self.settings.client_secret,
+                refresh_token=self.settings.refresh_token,
+            )
         try:
             async with DXLinkStreamer(session) as streamer:
                 formatted_symbols = [

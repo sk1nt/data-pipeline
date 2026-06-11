@@ -1,7 +1,5 @@
 """Tests for the CorrelationAlertService — formatting, sanitization, and DuckDB persistence."""
 
-import os
-import tempfile
 from datetime import datetime, timezone
 
 import pytest

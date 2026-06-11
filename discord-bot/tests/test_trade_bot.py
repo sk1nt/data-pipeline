@@ -1,6 +1,5 @@
 import os
 import sys
-import asyncio
 from types import SimpleNamespace
 import pytest
 
@@ -8,9 +7,7 @@ sys.path.insert(0, os.path.join(os.getcwd()))
 sys.path.insert(0, os.path.join(os.getcwd(), "src"))
 sys.path.insert(0, os.path.join(os.getcwd(), "discord-bot"))
 
-from discord import Message
 from discord import ChannelType
-from discord import Object
 
 from bot.trade_bot import TradeBot
 

@@ -6,11 +6,9 @@ Uses a real Redis instance if REDIS_URL is set; otherwise skips.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 

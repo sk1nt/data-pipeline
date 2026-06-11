@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -125,11 +125,14 @@ def _compute_surprise(actual_str: str, forecast_str: str, event_title: str) -> O
             s = s.strip().replace("%", "").replace(",", "")
             multiplier = 1.0
             if s.endswith("K"):
-                multiplier = 1_000; s = s[:-1]
+                multiplier = 1_000
+                s = s[:-1]
             elif s.endswith("M"):
-                multiplier = 1_000_000; s = s[:-1]
+                multiplier = 1_000_000
+                s = s[:-1]
             elif s.endswith("B"):
-                multiplier = 1_000_000_000; s = s[:-1]
+                multiplier = 1_000_000_000
+                s = s[:-1]
             return float(s) * multiplier
 
         actual = _parse(actual_str)

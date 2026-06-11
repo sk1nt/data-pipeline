@@ -9,7 +9,7 @@ import uuid
 from collections import deque
 from datetime import datetime, timezone, timedelta, time
 from threading import Lock
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
@@ -121,6 +121,7 @@ class EventWindow:
     """Thread-safe rolling buffer of social events and market signal snapshots."""
 
     def __init__(self, window_seconds: int = 300) -> None:
+        self.correlation_window_seconds = window_seconds
         # Keep signals for at least the sustained-move window so the detector has enough data
         self.window_seconds = max(window_seconds, SUSTAINED_WINDOW_MINUTES * 60 + 60)
         # Social events keep the longer of the two windows (news lookback)
@@ -141,7 +142,7 @@ class EventWindow:
 
     def get_recent_social_events(self, within_seconds: Optional[int] = None) -> List[SocialEvent]:
         cutoff = datetime.now(timezone.utc) - timedelta(
-            seconds=within_seconds or self.window_seconds
+            seconds=within_seconds or self.correlation_window_seconds
         )
         with self._lock:
             self._evict()

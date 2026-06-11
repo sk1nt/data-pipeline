@@ -10,7 +10,6 @@ Usage:
   manage_allowlist.py remove channel 67890
 """
 import argparse
-import sys
 
 from services.auth_service import AuthService
 

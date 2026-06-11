@@ -4,7 +4,6 @@ and feature extraction helpers.  No Redis, no DuckDB, no file I/O required.
 
 from __future__ import annotations
 
-import pytest
 
 from src.services.sweep_classifier_service import (
     SweepFeatures,

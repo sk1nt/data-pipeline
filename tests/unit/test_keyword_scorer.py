@@ -1,6 +1,5 @@
 """Tests for keyword scoring engine."""
 
-import pytest
 
 from src.models.social_event import KeywordCategory
 from src.services.social_feed_service import KeywordScorer

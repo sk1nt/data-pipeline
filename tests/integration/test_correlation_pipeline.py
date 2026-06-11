@@ -333,7 +333,6 @@ class TestBackfillRealizedImpact:
 
 class TestQueryDateFilters:
     def test_start_date_excludes_older_rows(self, alert_service):
-        import time
         from datetime import timedelta
 
         old_event = _make_social_event("Old rate hike news")
@@ -507,7 +506,6 @@ class TestSentimentPersistence:
         assert rows[0]["social_text"][:50] == event.text[:50]
 
     def test_multiple_alerts_ordered_newest_first(self, alert_service):
-        from datetime import timedelta
         texts = ["First news", "Second news", "Third news"]
         for i, text in enumerate(texts):
             event = _make_social_event(text)

@@ -31,11 +31,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-from tastytrade import Session
-from tastytrade.dxfeed.candle import Candle
-from tastytrade.order import InstrumentType
-from tastytrade.streamer import DXLinkStreamer
-from tastytrade.instruments import Future
+from tastytrade import Session  # noqa: E402
+from tastytrade.dxfeed.candle import Candle  # noqa: E402
+from tastytrade.streamer import DXLinkStreamer  # noqa: E402
+from tastytrade.instruments import Future  # noqa: E402
 
 
 # ── Config ────────────────────────────────────────────────────────────────────

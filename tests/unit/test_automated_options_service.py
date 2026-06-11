@@ -2,6 +2,7 @@
 
 Tests the create_entry_order method and integration with AlertParser, OptionsFillService.
 """
+# ruff: noqa: E402
 
 import pytest
 from decimal import Decimal

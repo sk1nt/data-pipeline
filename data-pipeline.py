@@ -58,6 +58,7 @@ from src.services.gexbot_poller import (
     SNAPSHOT_PUBSUB_CHANNEL,
 )  # noqa: E402
 from src.services.tastytrade_streamer import StreamerSettings, TastyTradeStreamer  # noqa: E402
+from src.services.tastytrade_auth_service import get_tastytrade_auth_service  # noqa: E402
 from src.services.redis_timeseries import RedisTimeSeriesClient  # noqa: E402
 from src.services.redis_flush_worker import FlushWorkerSettings, RedisFlushWorker  # noqa: E402
 from src.services.lookup_service import LookupService  # noqa: E402
@@ -211,6 +212,8 @@ class ServiceManager:
 
     def __init__(self) -> None:
         self.tastytrade: Optional[TastyTradeStreamer] = None
+        self.tastytrade_auth = None
+        self.automated_options_service: Optional[Any] = None
         self.gex_poller: Optional[GEXBotPoller] = None
         self.gex_nq_poller: Optional[GEXBotPoller] = None
         self.redis_client: Optional[RedisClient] = None
@@ -277,6 +280,7 @@ class ServiceManager:
             "uw_rest",
             "social_feed",
             "tastytrade",
+            "tastytrade_auth",
             "schwab",
             "gex_poller",
             "gex_nq_poller",
@@ -308,6 +312,16 @@ class ServiceManager:
             "symbols": settings.schwab_symbol_list,
         }
         return {
+            "tastytrade_auth": (
+                self.tastytrade_auth.status() if self.tastytrade_auth else {}
+            ),
+            "tastytrade_order_replay": {
+                "running": bool(
+                    self.automated_options_service
+                    and self.automated_options_service._replay_task
+                    and not self.automated_options_service._replay_task.done()
+                )
+            },
             "tastytrade_streamer": tasty_status,
             "schwab_streamer": schwab_status,
             "gex_poller": getattr(self.gex_poller, "status", lambda: {})(),
@@ -339,9 +353,35 @@ class ServiceManager:
         name = name.lower()
         self._ensure_event_loop()
         self._ensure_redis_clients()
+        if name == "tastytrade_auth":
+            if self.tastytrade_auth:
+                return
+            if os.getenv("TASTYTRADE_AUTH_KEEPER_ENABLED", "false").lower() != "true":
+                LOGGER.info(
+                    "TastyTrade auth keeper disabled "
+                    "(set TASTYTRADE_AUTH_KEEPER_ENABLED=true to enable)"
+                )
+                return
+            if not settings.tastytrade_client_secret or not settings.tastytrade_refresh_token:
+                LOGGER.warning("TastyTrade auth keeper disabled; credentials missing")
+                return
+            from src.services.automated_options_service import AutomatedOptionsService
+
+            self.tastytrade_auth = get_tastytrade_auth_service()
+            self.tastytrade_auth.start()
+            self.automated_options_service = AutomatedOptionsService()
+            self.automated_options_service.start_pending_auth_replay_worker()
+            LOGGER.info("TastyTrade auth keeper started")
+            return
         if name == "tastytrade" and settings.tastytrade_stream_enabled:
             if self.tastytrade and self.tastytrade.is_running:
                 return
+            if (
+                not self.tastytrade_auth
+                and os.getenv("TASTYTRADE_AUTH_KEEPER_ENABLED", "false").lower()
+                == "true"
+            ):
+                self.start_service("tastytrade_auth")
             self.tastytrade = TastyTradeStreamer(
                 StreamerSettings(
                     client_id=settings.tastytrade_client_id or "",
@@ -353,6 +393,7 @@ class ServiceManager:
                 ),
                 on_trade=self._handle_trade_event,
                 on_depth=self._handle_depth_event,
+                auth_service=self.tastytrade_auth,
             )
             self.tastytrade.start()
             LOGGER.info("TastyTrade streamer started")
@@ -530,6 +571,14 @@ class ServiceManager:
             await self.tastytrade.stop()
             self.tastytrade = None
             LOGGER.info("TastyTrade streamer stopped")
+        elif name == "tastytrade_auth":
+            if self.automated_options_service:
+                await self.automated_options_service.stop_pending_auth_replay_worker()
+                self.automated_options_service = None
+            if self.tastytrade_auth:
+                await self.tastytrade_auth.stop()
+                self.tastytrade_auth = None
+                LOGGER.info("TastyTrade auth keeper stopped")
         elif name == "schwab":
             self.schwab_service.stop()
             LOGGER.info("Schwab streamer stopped")

@@ -88,7 +88,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import os
 import pickle
 import time
@@ -96,7 +95,7 @@ from collections import deque
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, Optional, Tuple
 
 import duckdb
 import redis.asyncio as aioredis

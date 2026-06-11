@@ -10,11 +10,12 @@ from tastytrade.order import (
     OrderAction,
     OrderTimeInForce,
     OrderType,
-    PriceEffect,
 )
 
 # Import via absolute paths so the module works when `src` is on sys.path
 from services.tastytrade_client import tastytrade_client, TastytradeAuthError
+from src.lib.retries import retry_with_backoff
+from config.settings import config
 
 # Trading-specific logger
 try:
@@ -29,8 +30,6 @@ except ImportError:
 
 class InsufficientBuyingPowerError(Exception):
     """Raised when estimated notional exceeds available buying power."""
-from src.lib.retries import retry_with_backoff, TransientError
-from config.settings import config
 
 
 class OptionsFillService:

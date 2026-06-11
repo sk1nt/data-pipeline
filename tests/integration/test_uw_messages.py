@@ -1,12 +1,9 @@
 """Integration tests for UW message handling."""
 
-import json
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from src.models.uw_message import (
-    MarketAggData,
-    MarketAggMessage,
     OptionTradeData,
     OptionTradeMessage,
     parse_uw_websocket_message,
@@ -245,7 +242,6 @@ def test_service_process_option_trade_stock(uw_service, mock_redis_client):
 
 def test_discord_channel_routing_spx(uw_service):
     """Test Discord channel routing for SPX trades."""
-    from src.models.uw_message import OptionTradeMessage, OptionTradeData
 
     message = OptionTradeMessage(
         message_type="option_trades_super_algo",
@@ -270,7 +266,6 @@ def test_discord_channel_routing_spx(uw_service):
 
 def test_discord_channel_routing_stock(uw_service):
     """Test Discord channel routing for stock option trades."""
-    from src.models.uw_message import OptionTradeMessage, OptionTradeData
 
     message = OptionTradeMessage(
         message_type="option_trades_super_algo",

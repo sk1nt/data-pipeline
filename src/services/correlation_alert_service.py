@@ -144,8 +144,6 @@ class CorrelationAlertService:
         else:
             header = "🟡 **CORRELATION ALERT**"
 
-        # Sanitize social text for Discord (strip markdown injection, limit length)
-        social_text = self._sanitize_text(social.get("text", ""))
         author = self._sanitize_text(social.get("author", "unknown"))
         source = social.get("source", "unknown")
 

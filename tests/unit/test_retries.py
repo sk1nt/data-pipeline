@@ -1,4 +1,3 @@
-import time
 import pytest
 
 from src.lib.retries import retry_with_backoff, TransientError

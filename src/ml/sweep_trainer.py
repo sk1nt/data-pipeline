@@ -46,8 +46,6 @@ def train() -> bool:
     try:
         from xgboost import XGBClassifier
         from sklearn.model_selection import StratifiedKFold, cross_val_score
-        from sklearn.metrics import roc_auc_score
-        import numpy as np
     except ImportError:
         LOGGER.error("xgboost / scikit-learn not installed — skipping training")
         return False

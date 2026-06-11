@@ -1,15 +1,14 @@
 """Tests for the correlation engine rules and event window."""
 
 from datetime import datetime, timezone, timedelta
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 import json
 
 import pytest
 
-from src.models.social_event import SocialEvent, SocialSource, Sentiment
+from src.models.social_event import SocialEvent, SocialSource
 from src.services.correlation_engine import (
     CORRELATION_ALERT_CHANNEL,
-    CorrelationAlert,
     CorrelationEngine,
     EventWindow,
     MarketSignalSnapshot,

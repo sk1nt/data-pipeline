@@ -1082,7 +1082,7 @@ class TradeBot(commands.Bot):
 
         _ALERT_PREFIXES = ("Alert", "Lotto", "Super Lotto", "BTO", "STC", "BUY", "SELL")
         if not is_reply and message.content.startswith(_ALERT_PREFIXES):
-            print(f"Alert detected! Processing...")
+            print("Alert detected! Processing...")
             await self._process_alert_message(message)
             return  # Don't process as command after handling alert
         
@@ -1318,7 +1318,6 @@ class TradeBot(commands.Bot):
         import sys
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
         from services.market_agg_alert_service import MarketAggAlertService
-        from decimal import Decimal
         
         alert_service = MarketAggAlertService(None)
         
@@ -1473,7 +1472,7 @@ class TradeBot(commands.Bot):
                 
                 # Check if it's a weekend or holiday
                 if is_weekend(now) or is_market_holiday(now):
-                    print(f"GEX feed: market closed (weekend/holiday), sleeping until next market open")
+                    print("GEX feed: market closed (weekend/holiday), sleeping until next market open")
                     next_open = get_next_market_open(now)
                     sleep_seconds = (next_open - now).total_seconds()
                     await self._sleep_with_stop(min(sleep_seconds, 3600))  # Check at least every hour
@@ -1486,7 +1485,7 @@ class TradeBot(commands.Bot):
                     if now.time() >= time(16, 0):  # After market close
                         next_open = get_next_market_open(now)
                         sleep_seconds = (next_open - now).total_seconds()
-                        print(f"GEX feed: after market close, sleeping until next open")
+                        print("GEX feed: after market close, sleeping until next open")
                         await self._sleep_with_stop(min(sleep_seconds, 3600))
                     else:  # Before market open
                         sleep_seconds = (start - now).total_seconds()
@@ -2958,7 +2957,7 @@ class TradeBot(commands.Bot):
                 
                 # Skip if weekend or holiday
                 if is_weekend(now_et) or is_market_holiday(now_et):
-                    print(f"Market agg: skipping update (weekend/holiday)")
+                    print("Market agg: skipping update (weekend/holiday)")
                     next_open = get_next_market_open(now_et)
                     sleep_seconds = (next_open - now_et).total_seconds()
                     await asyncio.sleep(min(sleep_seconds, 3600))  # Check at least every hour
@@ -4081,13 +4080,10 @@ class TradeBot(commands.Bot):
         # Sentiment indicator with color
         if is_bullish:
             sentiment = colorize(ansi["bright_green"], "▲ BULLISH")
-            sentiment_color = ansi["green"]
         elif is_bearish:
             sentiment = colorize(ansi["bright_red"], "▼ BEARISH")
-            sentiment_color = ansi["red"]
         else:
             sentiment = colorize(ansi["yellow"], "◆ NEUTRAL")
-            sentiment_color = ansi["yellow"]
         
         # Side indicator
         if is_ask_side:

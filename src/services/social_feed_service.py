@@ -6,8 +6,8 @@ import asyncio
 import json
 import logging
 import re
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Set, Tuple
+from datetime import datetime, timezone
+from typing import Any, List, Optional, Set, Tuple
 
 import feedparser
 import httpx

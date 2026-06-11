@@ -5,17 +5,14 @@ Tests the escalation rules without needing Redis or real positions.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from src.services.position_monitor_service import (
     PositionMonitorService,
-    PositionState,
-    label_outcome as _noop,  # just checking import
+    PositionState,  # just checking import
 )
 
 
@@ -139,7 +136,7 @@ class TestMonitorEscalation:
     @pytest.mark.asyncio
     async def test_escalates_to_level_2_on_high_conf_and_loss(self, monitor):
         # Long position, price dropping — losing 30 ticks (= 7.5 points)
-        alert = _make_directional_alert(confidence=0.80, direction="down",
+        alert = _make_directional_alert(confidence=0.90, direction="down",
                                         trigger_price=19992.5)
         pos = _make_long_position(entry_price=20000.0)  # 30 ticks down
         with patch("src.services.position_monitor_service.get_current_position",

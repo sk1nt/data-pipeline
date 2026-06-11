@@ -37,11 +37,6 @@ class AuthService:
         return discord_id in AuthService.FUTURES_USERS
 
     @staticmethod
-    def verify_user_for_alerts(discord_id: str) -> bool:
-        """Check if user can send options alerts."""
-        return discord_id in AuthService.ALERT_USERS
-
-    @staticmethod
     def verify_user_for_automated_trades(discord_id: str) -> bool:
         """Check if user can trigger automated trades from alerts."""
         try:
@@ -54,11 +49,6 @@ class AuthService:
         if cfg_users:
             return discord_id in cfg_users
         return discord_id in AuthService.AUTOMATED_TRADE_USERS
-
-    @staticmethod
-    def verify_channel_for_automated_trades(channel_id: str) -> bool:
-        """Check if channel is allowed for automated trades via alerts."""
-        return str(channel_id) in AuthService.ALERT_CHANNELS
 
     @staticmethod
     def verify_user_and_channel_for_automated_trades(discord_id: str, channel_id: str) -> bool:

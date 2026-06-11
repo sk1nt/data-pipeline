@@ -181,11 +181,15 @@ def _tod_session() -> str:
         et_hour = (now_utc.hour - offset_hours) % 24
         et_minutes = et_hour * 60 + now_utc.minute
 
-        if   570 <= et_minutes <  600: return "power_open"    # 09:30-10:00
-        elif 600 <= et_minutes <  720: return "morning"       # 10:00-12:00
-        elif 720 <= et_minutes <  840: return "midday"        # 12:00-14:00
-        elif 840 <= et_minutes <  960: return "power_close"   # 14:00-16:00
-        else:                          return "overnight"
+        if 570 <= et_minutes < 600:
+            return "power_open"  # 09:30-10:00
+        if 600 <= et_minutes < 720:
+            return "morning"  # 10:00-12:00
+        if 720 <= et_minutes < 840:
+            return "midday"  # 12:00-14:00
+        if 840 <= et_minutes < 960:
+            return "power_close"  # 14:00-16:00
+        return "overnight"
     except Exception:
         return "morning"
 

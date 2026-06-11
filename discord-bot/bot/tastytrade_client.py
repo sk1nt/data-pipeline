@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import threading
 
 import httpx
@@ -509,7 +508,6 @@ class TastyTradeClient:
                 self._last_connect_failure = time.monotonic()
                 raise ConnectionError(f"TastyTrade API unreachable: {exc}") from exc
         else:
-            # refresh if token expired
             try:
                 if (
                     self._session_expiration
@@ -552,7 +550,6 @@ class TastyTradeClient:
             raise ValueError("refresh_token must be provided")
         with self._lock:
             self._refresh_token = refresh_token
-            # recreate session using new refresh token
             try:
                 self._session = Session(
                     provider_secret=self._client_secret,
@@ -684,9 +681,7 @@ class TastyTradeClient:
                             refresh_token=self._refresh_token,
                             is_test=self._use_sandbox,
                         )
-                        self._session_expiration = self._derive_expiration(
-                            self._session
-                        )
+                        self._session_expiration = self._derive_expiration(self._session)
                         self._needs_reauth = False
                         # keep symbol cache fresh
                         self._symbol_cache.clear()
@@ -902,7 +897,11 @@ class TastyTradeClient:
                 break
             except TastytradeError as e:
                 if "empty_response" in str(e) and attempt < max_retries:
-                    logger.warning("TastyTrade empty_response on Account.get, retry %d/%d", attempt, max_retries)
+                    LOGGER.warning(
+                        "TastyTrade empty_response on Account.get, retry %d/%d",
+                        attempt,
+                        max_retries,
+                    )
                     time.sleep(1)
                 else:
                     raise

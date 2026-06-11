@@ -6,7 +6,7 @@ from decimal import Decimal
 sys.path.insert(0, os.path.join(os.getcwd(), "src"))
 
 from services.options_fill_service import OptionsFillService
-from tastytrade.order import OrderAction, PriceEffect, OrderType
+from tastytrade.order import OrderAction, PriceEffect
 
 
 class FakeOrder:

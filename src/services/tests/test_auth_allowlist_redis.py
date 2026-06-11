@@ -1,8 +1,5 @@
 import os
 import sys
-from types import SimpleNamespace
-import pytest
-import os
 
 sys.path.insert(0, os.path.join(os.getcwd()))
 sys.path.insert(0, os.path.join(os.getcwd(), "src"))

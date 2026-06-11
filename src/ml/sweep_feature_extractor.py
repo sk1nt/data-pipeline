@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import closing
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 

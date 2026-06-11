@@ -1,6 +1,5 @@
 import os
 import sys
-import pytest
 from decimal import Decimal
 
 sys.path.insert(0, os.path.join(os.getcwd(), "src"))
@@ -56,9 +55,6 @@ def test_place_limit_order_retries_and_succeeds(monkeypatch):
                 "quantity": quantity,
             }
 
-    # Call place_limit_order; it should retry and return id
-    order_id = pytest.raises is None
-    order_id = pytest.mark.asyncio and None
     # run as sync wrapper for our test environment
     res = None
     # We can call place_limit_order synchronously via asyncio.run in test

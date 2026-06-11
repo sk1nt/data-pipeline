@@ -793,7 +793,6 @@ class RedisFlushWorker:
     def _flush_uw_messages(self) -> Dict[str, int]:
         """Flush UW messages from Redis to DuckDB."""
         try:
-            from pathlib import Path
             uw_db_path = config_settings.data_path / "uw_messages.db"
             uw_db_path.parent.mkdir(parents=True, exist_ok=True)
             
