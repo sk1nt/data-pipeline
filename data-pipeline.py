@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import duckdb
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket
 from fastapi.websockets import WebSocketDisconnect
@@ -61,7 +62,7 @@ from src.services.redis_timeseries import RedisTimeSeriesClient  # noqa: E402
 from src.services.redis_flush_worker import FlushWorkerSettings, RedisFlushWorker  # noqa: E402
 from src.services.lookup_service import LookupService  # noqa: E402
 from src.services.schwab_streamer import SchwabStreamClient, build_streamer  # noqa: E402
-from src.services.social_feed_service import SocialFeedService, FeedConfig, KeywordScorer  # noqa: E402
+from src.services.social_feed_service import SocialFeedService, FeedConfig  # noqa: E402
 from src.services.social_feed_service import SOCIAL_ALL_EVENTS_CHANNEL, SOCIAL_HISTORY_KEY  # noqa: E402
 from src.services.correlation_engine import CorrelationEngine  # noqa: E402
 from src.services.economic_calendar_service import EconomicCalendarService, CALENDAR_REDIS_KEY  # noqa: E402
@@ -1490,6 +1491,134 @@ async def lookup_gex_snapshot(symbol: str) -> Dict[str, Any]:
     }
 
 
+def _loads_json_payload(raw: Any) -> Any:
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8")
+    return json.loads(raw)
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _market_agg_regime(ratio: Optional[float]) -> str:
+    if ratio is None:
+        return "unknown"
+    if ratio < 0.80:
+        return "long"
+    if ratio > 1.0:
+        return "short"
+    return "neutral"
+
+
+def _market_agg_snapshot_from_cache(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    ratio = _safe_float(data.get("put_call_ratio"))
+    return {
+        "type": "market_agg",
+        "put_call_ratio": ratio,
+        "regime": _market_agg_regime(ratio),
+        "call_premium": _safe_float(data.get("call_premium")),
+        "put_premium": _safe_float(data.get("put_premium")),
+        "call_volume": data.get("call_volume"),
+        "put_volume": data.get("put_volume"),
+        "net_call_premium": _safe_float(data.get("net_call_premium")),
+        "net_put_premium": _safe_float(data.get("net_put_premium")),
+        "net_volume": data.get("net_volume"),
+        "bar_bias": data.get("bar_bias"),
+        "overall_bias": data.get("overall_bias"),
+        "timestamp": data.get("timestamp"),
+        "date": data.get("date"),
+        "received_at": payload.get("received_at"),
+        "snapshot": payload,
+    }
+
+
+@app.get("/lookup/market_agg")
+async def lookup_market_agg() -> Dict[str, Any]:
+    """Return the latest cached market aggregation snapshot from Redis."""
+    redis_conn = _get_redis_client()
+    raw = redis_conn.get("uw:market_agg:latest")
+    if not raw:
+        raise HTTPException(
+            status_code=404, detail="Market aggregation snapshot not available"
+        )
+    try:
+        payload = _loads_json_payload(raw)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail="Market aggregation payload malformed"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=502, detail="Market aggregation payload malformed"
+        )
+    return _market_agg_snapshot_from_cache(payload)
+
+
+@app.get("/market-agg/history")
+async def market_agg_history(limit: int = 100) -> Dict[str, Any]:
+    """Return persisted market aggregation rows from DuckDB."""
+    capped = min(max(limit, 1), 1000)
+    db_path = settings.data_path / "uw_messages.db"
+    if not db_path.exists():
+        raise HTTPException(
+            status_code=404, detail="Market aggregation history database not available"
+        )
+    try:
+        with duckdb.connect(str(db_path), read_only=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    received_at,
+                    date,
+                    call_premium,
+                    put_premium,
+                    call_premium_otm_only,
+                    put_premium_otm_only,
+                    delta,
+                    gamma,
+                    theta,
+                    vega
+                FROM market_agg_state
+                ORDER BY received_at DESC
+                LIMIT ?
+                """,
+                [capped],
+            ).fetchall()
+    except duckdb.CatalogException as exc:
+        raise HTTPException(
+            status_code=404, detail="market_agg_state table not available"
+        ) from exc
+    except Exception as exc:
+        LOGGER.exception("Failed to read market_agg_state history")
+        raise HTTPException(
+            status_code=500, detail="Failed to read market aggregation history"
+        ) from exc
+
+    keys = [
+        "received_at",
+        "date",
+        "call_premium",
+        "put_premium",
+        "call_premium_otm_only",
+        "put_premium_otm_only",
+        "delta",
+        "gamma",
+        "theta",
+        "vega",
+    ]
+    return {
+        "limit": capped,
+        "rows": [dict(zip(keys, row)) for row in rows],
+    }
+
+
 @app.get("/sc")
 async def sierra_chart_bridge(symbol: str = "NQ_NDX") -> Dict[str, Any]:
     """Expose the latest sum_gex_vol for Sierra Chart polling."""
@@ -1861,22 +1990,8 @@ async def market_sentiment_websocket(websocket: WebSocket) -> None:
     try:
         raw = redis_conn.get("uw:market_agg:latest")
         if raw:
-            latest = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
-            data = latest.get("data", {})
-            ratio_val = data.get("put_call_ratio")
-            ratio = float(ratio_val) if ratio_val else None
-            regime = "long" if ratio and ratio < 0.80 else ("short" if ratio and ratio > 1.0 else "neutral")
-            await websocket.send_json({
-                "type": "market_agg",
-                "put_call_ratio": ratio,
-                "regime": regime,
-                "call_premium": data.get("call_premium"),
-                "put_premium": data.get("put_premium"),
-                "call_volume": data.get("call_volume"),
-                "put_volume": data.get("put_volume"),
-                "date": data.get("date"),
-                "received_at": latest.get("received_at"),
-            })
+            latest = _loads_json_payload(raw)
+            await websocket.send_json(_market_agg_snapshot_from_cache(latest))
     except Exception:
         LOGGER.debug("Failed to send initial market sentiment snapshot", exc_info=True)
 
@@ -1911,21 +2026,7 @@ async def market_sentiment_websocket(websocket: WebSocket) -> None:
                 channel = channel.decode("utf-8")
 
             if channel == "uw:market_agg:stream":
-                data = payload.get("data", {})
-                ratio_val = data.get("put_call_ratio")
-                ratio = float(ratio_val) if ratio_val else None
-                regime = "long" if ratio and ratio < 0.80 else ("short" if ratio and ratio > 1.0 else "neutral")
-                await websocket.send_json({
-                    "type": "market_agg",
-                    "put_call_ratio": ratio,
-                    "regime": regime,
-                    "call_premium": data.get("call_premium"),
-                    "put_premium": data.get("put_premium"),
-                    "call_volume": data.get("call_volume"),
-                    "put_volume": data.get("put_volume"),
-                    "date": data.get("date"),
-                    "received_at": payload.get("received_at"),
-                })
+                await websocket.send_json(_market_agg_snapshot_from_cache(payload))
             elif channel == "market_agg:alerts":
                 await websocket.send_json({
                     "type": "sentiment_alert",

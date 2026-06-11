@@ -98,3 +98,8 @@ async def test_enable_depth_true(monkeypatch):
     assert (
         len([s for s in subs if "Quote" in str(s[0]) or s[0].__name__ == "Quote"]) >= 1
     )
+
+
+def test_format_symbol_preserves_tastytrade_index_symbols():
+    assert TastyTradeStreamer._format_symbol("$TRINUSC") == "$TRINUSC"
+    assert TastyTradeStreamer._format_symbol("$TRIN.NQ") == "$TRIN.NQ"

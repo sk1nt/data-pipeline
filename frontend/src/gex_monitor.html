@@ -512,6 +512,7 @@ tr:hover { background: var(--bg3); }
   <div class="header-right">
     <div class="conn-pair">
       <span class="conn-item"><span class="dot warn" id="connDot"></span><span id="connLabel">GEX…</span></span>
+      <span class="conn-item"><span class="dot warn" id="marketAggDot"></span><span id="marketAggLabel">Agg…</span></span>
       <span class="conn-item"><span class="dot warn" id="socialDotHdr"></span><span id="socialLabelHdr" style="font-size:11px">News</span></span>
       <span class="conn-item"><span class="dot err" id="ttDot"></span><span id="ttLabel">TT</span></span>
     </div>
@@ -570,6 +571,28 @@ tr:hover { background: var(--bg3); }
   <div class="metric">
     <span class="lbl">GEX &Delta; <span style="font-size:0.75em;opacity:0.6">(15s avg)</span></span>
     <span class="val neutral" id="gexDelta">&mdash;</span>
+  </div>
+</div>
+
+<div class="section-title" style="padding:8px 12px 6px;margin:0;border-top:1px solid var(--border)">Market Agg</div>
+<div class="metrics" id="marketAggGrid">
+  <div class="metric">
+    <span class="lbl">Put/Call Ratio</span>
+    <span class="val neutral" id="marketAggRatio">&mdash;</span>
+    <span class="sub" id="marketAggRegime">&mdash;</span>
+  </div>
+  <div class="metric">
+    <span class="lbl">Premium Skew</span>
+    <span class="val neutral" id="marketAggSkew">&mdash;</span>
+    <span class="sub" id="marketAggPremiums">&mdash;</span>
+  </div>
+  <div class="metric">
+    <span class="lbl">Call Volume</span>
+    <span class="val neutral" id="marketAggCallVolume">&mdash;</span>
+  </div>
+  <div class="metric">
+    <span class="lbl">Put Volume</span>
+    <span class="val neutral" id="marketAggPutVolume">&mdash;</span>
   </div>
 </div>
 
@@ -776,7 +799,9 @@ function toggleCollapse(el, bodyId) {
   //  GEX MONITOR SECTION
   // =====================================================================
   let ws = null;
+  let marketAggWs = null;
   let reconnectDelay = 1000;
+  let marketAggReconnectDelay = 1000;
   let prevMaxchangeCurrent = null;
   let prevNetGex = null;
   const GEX_DELTA_WINDOW_MS = 15000;
@@ -798,12 +823,16 @@ function toggleCollapse(el, bodyId) {
   // --- DOM refs ---
   const $ = id => document.getElementById(id);
   const connDot = $('connDot'), connLabel = $('connLabel');
+  const marketAggDot = $('marketAggDot'), marketAggLabel = $('marketAggLabel');
   const crossGex = $('crossGex'), crossGexLabel = $('crossGexLabel'), zeroGamma = $('zeroGamma');
   const callWall = $('callWall'), putWall = $('putWall');
   const callWallNext = $('callWallNext'), putWallNext = $('putWallNext');
   const netGex = $('netGex'), netGexDelta = $('netGexDelta');
   const netGexOI = $('netGexOI');
   const gexDeltaEl = $('gexDelta');
+  const marketAggRatio = $('marketAggRatio'), marketAggRegime = $('marketAggRegime');
+  const marketAggSkew = $('marketAggSkew'), marketAggPremiums = $('marketAggPremiums');
+  const marketAggCallVolume = $('marketAggCallVolume'), marketAggPutVolume = $('marketAggPutVolume');
   const alertBar = $('alertBar');
   const lastUpdate = $('lastUpdate'), alertCount = $('alertCount');
 
@@ -910,6 +939,18 @@ function toggleCollapse(el, bodyId) {
   // --- Formatting ---
   function fmtPrice(v) { return typeof v === 'number' ? v.toFixed(2) : '\u2014'; }
   function fmtBn(v) { if (typeof v !== 'number') return '\u2014'; return (Math.abs(v) / 1000).toFixed(4) + 'Bn'; }
+  function fmtCompact(v) {
+    if (typeof v !== 'number') return '\u2014';
+    return Math.abs(v) >= 1000000
+      ? (v / 1000000).toFixed(2) + 'M'
+      : Math.abs(v) >= 1000
+        ? (v / 1000).toFixed(1) + 'K'
+        : v.toLocaleString('en-US');
+  }
+  function fmtSignedCompact(v) {
+    if (typeof v !== 'number') return '\u2014';
+    return (v >= 0 ? '+' : '-') + fmtCompact(Math.abs(v));
+  }
   function valClass(v) { if (typeof v !== 'number') return 'neutral'; return v > 0 ? 'pos' : v < 0 ? 'neg' : 'neutral'; }
 
   // --- Maxchange ---
@@ -1018,6 +1059,53 @@ function toggleCollapse(el, bodyId) {
     ws.onmessage = function(evt) { try { onSnapshot(JSON.parse(evt.data)); } catch(e) { console.warn('Bad WS msg', e); } };
   }
   function gexReconnect() { prevMaxchangeCurrent = null; prevNetGex = null; gexHistory = []; if (ws) { ws.onclose = null; ws.close(); } gexConnect(); }
+
+  // --- Market Agg display ---
+  function onMarketAgg(data) {
+    if (data.type === 'sentiment_alert') {
+      var currentRatio = typeof data.current_ratio === 'number' ? data.current_ratio.toFixed(2) : data.current_ratio;
+      toast('Market agg ' + (data.alert_type || 'alert') + ': P/C ' + (currentRatio || '\u2014'), 'info');
+      return;
+    }
+    var ratio = data.put_call_ratio;
+    var regime = data.regime || 'unknown';
+    marketAggRatio.textContent = typeof ratio === 'number' ? ratio.toFixed(2) : '\u2014';
+    marketAggRatio.className = 'val ' + (regime === 'long' ? 'pos' : regime === 'short' ? 'neg' : 'neutral');
+    marketAggRegime.textContent = regime.toUpperCase();
+
+    var callPremium = data.call_premium;
+    var putPremium = data.put_premium;
+    var skew = (typeof callPremium === 'number' && typeof putPremium === 'number') ? callPremium - putPremium : null;
+    marketAggSkew.textContent = fmtSignedCompact(skew);
+    marketAggSkew.className = 'val ' + valClass(skew);
+    marketAggPremiums.textContent = 'C ' + fmtCompact(callPremium) + ' / P ' + fmtCompact(putPremium);
+
+    marketAggCallVolume.textContent = fmtCompact(data.call_volume);
+    marketAggCallVolume.className = 'val pos';
+    marketAggPutVolume.textContent = fmtCompact(data.put_volume);
+    marketAggPutVolume.className = 'val neg';
+  }
+
+  function marketAggConnect() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var url = proto + '//' + location.host + '/ws/market-sentiment';
+    marketAggWs = new WebSocket(url);
+    marketAggWs.onopen = function() {
+      marketAggDot.className = 'dot ok';
+      marketAggLabel.textContent = 'Agg';
+      marketAggReconnectDelay = 1000;
+    };
+    marketAggWs.onclose = function() {
+      marketAggDot.className = 'dot err';
+      marketAggLabel.textContent = 'Agg \u2717';
+      setTimeout(marketAggConnect, marketAggReconnectDelay);
+      marketAggReconnectDelay = Math.min(marketAggReconnectDelay * 1.5, 10000);
+    };
+    marketAggWs.onerror = function() { marketAggWs.close(); };
+    marketAggWs.onmessage = function(evt) {
+      try { onMarketAgg(JSON.parse(evt.data)); } catch(e) { console.warn('Bad market agg msg', e); }
+    };
+  }
 
   // =====================================================================
   //  SOCIAL FEED SECTION
@@ -1758,6 +1846,7 @@ function toggleCollapse(el, bodyId) {
   })();
 
   gexConnect();
+  marketAggConnect();
   socialConnect();
   corrConnect();
   initTT();

@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     )
     tastytrade_symbols: str = env_field(
         "TASTYTRADE_STREAM_SYMBOLS",
-        default="MES,MNQ,NQ,SPY,QQQ,VIX",
+        default="MES,MNQ,NQ,SPY,QQQ,VIX,$TRINUSC,$TRIN.NQ",
     )
     tastytrade_depth_levels: int = env_field("TASTYTRADE_DEPTH_LEVELS", default=40)
     # Toggle for subscribing to level-2 quote/depth events on DXLink

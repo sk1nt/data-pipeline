@@ -25,6 +25,9 @@ Redis keys written:
   uw:alert:stream             pubsub channel (new alert payload)
   uw:market_tide:latest       latest market-tide snapshot (list of 5-min bars)
   uw:market_tide:stream       pubsub channel
+  uw:market_agg:latest        latest normalized API market-agg bar
+  uw:market_agg:history       list of latest normalized API market-agg bars
+  uw:market_agg:stream        pubsub channel (normalized API market-agg bar)
   uw:darkpool:latest          latest dark-pool batch
   uw:darkpool:stream          pubsub channel (new print payload)
   uw:sector_etf:latest        latest sector-ETF snapshot
@@ -37,9 +40,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-from dataclasses import dataclass, field
-from datetime import date, datetime, timezone, time
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
@@ -62,6 +64,10 @@ ALERT_STREAM_CHANNEL   = "uw:alert:stream"
 
 TIDE_LATEST_KEY        = "uw:market_tide:latest"
 TIDE_STREAM_CHANNEL    = "uw:market_tide:stream"
+
+MARKET_AGG_LATEST_KEY  = "uw:market_agg:latest"
+MARKET_AGG_HISTORY_KEY = "uw:market_agg:history"
+MARKET_AGG_STREAM_CHANNEL = "uw:market_agg:stream"
 
 DARKPOOL_LATEST_KEY    = "uw:darkpool:latest"
 DARKPOOL_STREAM_CHANNEL = "uw:darkpool:stream"
@@ -371,7 +377,26 @@ class UWRestPoller:
             except Exception as exc:
                 LOGGER.debug("Redis pipe execute failed: %s", exc)
         self._publish(TIDE_STREAM_CHANNEL, serialized)
+        self._publish_market_agg(enriched)
         LOGGER.debug("UW market-tide: %d bars, latest %s", len(bars), bars[-1].get("timestamp"))
+
+    def _publish_market_agg(self, enriched: Dict[str, Any]) -> None:
+        """Publish the latest API market-tide bar on the market-agg Redis surface."""
+        payload = self._market_agg_from_tide(enriched)
+        if not payload:
+            return
+
+        serialized = json.dumps(payload, default=str)
+        pipe = self._redis_pipe()
+        if pipe is not None:
+            pipe.setex(MARKET_AGG_LATEST_KEY, CACHE_TTL, serialized)
+            pipe.lpush(MARKET_AGG_HISTORY_KEY, serialized)
+            pipe.ltrim(MARKET_AGG_HISTORY_KEY, 0, HISTORY_LIMIT - 1)
+            try:
+                pipe.execute()
+            except Exception as exc:
+                LOGGER.debug("Redis pipe execute failed: %s", exc)
+        self._publish(MARKET_AGG_STREAM_CHANNEL, serialized)
 
     # ── Dark pool ─────────────────────────────────────────────────────────────
 
@@ -539,6 +564,52 @@ class UWRestPoller:
             "bar_count": len(enriched_bars),
             "_fetched_at": datetime.now(timezone.utc).isoformat(),
         }
+
+    @staticmethod
+    def _market_agg_from_tide(enriched: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Convert the latest market-tide API bar into a market-agg event."""
+        bars = enriched.get("bars") or []
+        if not bars:
+            return None
+
+        latest = dict(bars[-1])
+        net_call = UWRestPoller._to_float(latest.get("net_call_premium"))
+        net_put = UWRestPoller._to_float(latest.get("net_put_premium"))
+        put_call_ratio = None
+        if net_call not in (None, 0) and net_put is not None:
+            put_call_ratio = round(abs(net_put) / abs(net_call), 4)
+
+        fetched_at = enriched.get("_fetched_at") or datetime.now(timezone.utc).isoformat()
+        return {
+            "received_at": fetched_at,
+            "message_type": "market_agg_api",
+            "topic": "market-tide",
+            "source": "uw_rest:market/market-tide",
+            "data": {
+                "timestamp": latest.get("timestamp"),
+                "date": latest.get("date"),
+                "call_premium": net_call,
+                "put_premium": net_put,
+                "net_call_premium": net_call,
+                "net_put_premium": net_put,
+                "net_volume": latest.get("net_volume"),
+                "put_call_ratio": put_call_ratio,
+                "cum_net_call_premium": latest.get("cum_net_call_premium"),
+                "cum_net_put_premium": latest.get("cum_net_put_premium"),
+                "bar_bias": latest.get("bar_bias"),
+                "overall_bias": enriched.get("overall_bias"),
+                "bar_count": enriched.get("bar_count"),
+            },
+        }
+
+    @staticmethod
+    def _to_float(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _enrich_sector_etfs(items: List[Dict[str, Any]]) -> Dict[str, Any]:
