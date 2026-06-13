@@ -62,6 +62,10 @@ from src.services.tastytrade_auth_service import get_tastytrade_auth_service  # 
 from src.services.redis_timeseries import RedisTimeSeriesClient  # noqa: E402
 from src.services.redis_flush_worker import FlushWorkerSettings, RedisFlushWorker  # noqa: E402
 from src.services.lookup_service import LookupService  # noqa: E402
+from src.services.trin_history_recorder import (  # noqa: E402
+    TrinHistoryRecorder,
+    TrinHistoryRecorderSettings,
+)
 from src.services.schwab_streamer import SchwabStreamClient, build_streamer  # noqa: E402
 from src.services.social_feed_service import SocialFeedService, FeedConfig  # noqa: E402
 from src.services.social_feed_service import SOCIAL_ALL_EVENTS_CHANNEL, SOCIAL_HISTORY_KEY  # noqa: E402
@@ -214,6 +218,7 @@ class ServiceManager:
         self.tastytrade: Optional[TastyTradeStreamer] = None
         self.tastytrade_auth = None
         self.automated_options_service: Optional[Any] = None
+        self.trin_history: Optional[TrinHistoryRecorder] = None
         self.gex_poller: Optional[GEXBotPoller] = None
         self.gex_nq_poller: Optional[GEXBotPoller] = None
         self.redis_client: Optional[RedisClient] = None
@@ -317,6 +322,11 @@ class ServiceManager:
             "gex_nq_poller": getattr(self.gex_nq_poller, "status", lambda: {})(),
             "redis_flush_worker": getattr(self.flush_worker, "status", lambda: {})(),
             "uw_rest_poller": getattr(self.uw_rest_poller, "status", lambda: {})(),
+            "trin_history_recorder": {
+                "running": bool(self.trin_history and self.trin_history.is_running),
+                "db_path": settings.tastytrade_trin_history_db_path,
+                "parquet_dir": settings.tastytrade_trin_history_parquet_dir,
+            },
             "lookup_service": {
                 "ready": bool(self.lookup_service),
                 "recent_depth_diffs": list(self.last_depth_comparison.values())[:3],
@@ -384,6 +394,15 @@ class ServiceManager:
                 on_depth=self._handle_depth_event,
                 auth_service=self.tastytrade_auth,
             )
+            if not self.trin_history:
+                self.trin_history = TrinHistoryRecorder(
+                    TrinHistoryRecorderSettings(
+                        db_path=Path(settings.tastytrade_trin_history_db_path),
+                        parquet_dir=Path(settings.tastytrade_trin_history_parquet_dir),
+                        flush_interval_seconds=settings.tastytrade_trin_history_flush_seconds,
+                    )
+                )
+                self.trin_history.start()
             self.tastytrade.start()
             LOGGER.info("TastyTrade streamer started")
         elif name == "schwab":
@@ -559,6 +578,9 @@ class ServiceManager:
         if name == "tastytrade" and self.tastytrade:
             await self.tastytrade.stop()
             self.tastytrade = None
+            if self.trin_history:
+                await self.trin_history.stop()
+                self.trin_history = None
             LOGGER.info("TastyTrade streamer stopped")
         elif name == "tastytrade_auth":
             if self.automated_options_service:
@@ -613,6 +635,10 @@ class ServiceManager:
         self, payload: Dict[str, Any], source: str = "tastytrade"
     ) -> None:
         """Persist trade ticks to RedisTimeSeries in a thread so I/O stays async friendly."""
+        symbol = str(payload.get("symbol", "")).upper()
+        if source.lower() == "tastytrade" and symbol.startswith("$TRIN"):
+            if self.trin_history:
+                self.trin_history.record_trade({**payload, "source": source})
         if not self.rts:
             return
         await asyncio.to_thread(self._write_trade_timeseries, payload, source)
@@ -1478,6 +1504,30 @@ async def lookup_trades(
     return {
         "symbol": symbol.upper(),
         "source": normalized_source,
+        "count": len(history),
+        "history": history,
+    }
+
+
+@app.get("/lookup/trin_history")
+async def lookup_trin_history(
+    symbol: str,
+    limit: int = 100,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return persisted TRIN history from DuckDB/Parquet-backed storage."""
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol is required")
+    lookup = service_manager.lookup_service
+    if not lookup:
+        raise HTTPException(status_code=503, detail="Lookup service unavailable")
+    capped_limit = max(1, min(limit, 1000))
+    history = lookup.trin_history(
+        symbol.upper(), limit=capped_limit, start_time=start_time, end_time=end_time
+    )
+    return {
+        "symbol": symbol.upper(),
         "count": len(history),
         "history": history,
     }

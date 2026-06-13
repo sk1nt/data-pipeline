@@ -160,6 +160,10 @@ The orchestrator normalizes the payload, writes the history list under `trade:ml
 
 Every TastyTrade tick now emits a pub/sub payload on `market_data:tastytrade:trades` in addition to the RedisTimeSeries keys. Subscribe to that channel to receive JSON messages containing `symbol`, `price`, `size`, `timestamp`, `ts_ms`, and any strategy metadata fields (if present). Downstream services can react in real time without polling `/lookup/trades`.
 
+TRIN market indicators use dxFeed `TimeAndSale` events rather than session
+`Summary` close values. See `docs/TASTYTRADE_TRIN_STREAMING.md` for the
+configured NYSE/SPX/NDX/NASDAQ TRIN symbols and operational notes.
+
 ## Development
 
 ### Testing

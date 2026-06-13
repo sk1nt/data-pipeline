@@ -1,7 +1,6 @@
 # ruff: noqa: E402
 import asyncio
 import sys
-from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -79,8 +78,14 @@ async def test_enable_depth_false(monkeypatch):
         len([s for s in subs if "Quote" in str(s[0]) or s[0].__name__ == "Quote"]) == 0
     )
     assert (
-        len([s for s in subs if "Summary" in str(s[0]) or s[0].__name__ == "Summary"])
-        == 1
+        len(
+            [
+                s
+                for s in subs
+                if "TimeAndSale" in str(s[0]) or s[0].__name__ == "TimeAndSale"
+            ]
+        )
+        == 0
     )
 
 
@@ -116,12 +121,42 @@ async def test_enable_depth_true(monkeypatch):
 
 
 def test_format_symbol_preserves_tastytrade_index_symbols():
-    assert TastyTradeStreamer._format_symbol("$TRINUSC") == "$TRINUSC"
-    assert TastyTradeStreamer._format_symbol("$TRIN.NQ") == "$TRIN.NQ"
+    assert TastyTradeStreamer._format_symbol("$TRIN") == "$TRIN"
+    assert TastyTradeStreamer._format_symbol("$TRINSP") == "$TRINSP"
+    assert TastyTradeStreamer._format_symbol("$TRINND") == "$TRINND"
+    assert TastyTradeStreamer._format_symbol("$TRIN/Q") == "$TRIN/Q"
 
 
 @pytest.mark.asyncio
-async def test_handle_summary_emits_price_update_for_index_symbol():
+async def test_time_and_sale_subscribes_for_trin_symbols(monkeypatch):
+    import importlib
+
+    mod = importlib.import_module("src.services.tastytrade_streamer")
+    monkeypatch.setattr(mod, "DXLinkStreamer", FakeDXLinkStreamer)
+    monkeypatch.setattr(mod.asyncio, "to_thread", fake_to_thread)
+
+    settings = StreamerSettings(
+        client_id="id",
+        client_secret="secret",
+        refresh_token="tok",
+        symbols=["$TRIN", "$TRINSP", "$TRINND", "$TRIN/Q"],
+    )
+    FakeDXLinkStreamer.instances.clear()
+    streamer = TastyTradeStreamer(settings, auth_service=FakeAuthService())
+    streamer.start()
+    await asyncio.sleep(0.1)
+    await streamer.stop()
+
+    subs = FakeDXLinkStreamer.instances[0].subscribed
+    time_and_sale_subs = [
+        s for s in subs if "TimeAndSale" in str(s[0]) or s[0].__name__ == "TimeAndSale"
+    ]
+    assert len(time_and_sale_subs) == 1
+    assert time_and_sale_subs[0][1] == ["$TRIN", "$TRINSP", "$TRINND", "$TRIN/Q"]
+
+
+@pytest.mark.asyncio
+async def test_handle_time_and_sale_emits_price_update_for_trin_symbol():
     received = []
 
     async def on_trade(payload):
@@ -131,7 +166,7 @@ async def test_handle_summary_emits_price_update_for_index_symbol():
         client_id="id",
         client_secret="secret",
         refresh_token="tok",
-        symbols=["$TRINUSC"],
+        symbols=["$TRINND"],
     )
     streamer = TastyTradeStreamer(
         settings,
@@ -139,20 +174,20 @@ async def test_handle_summary_emits_price_update_for_index_symbol():
         auth_service=FakeAuthService(),
     )
 
-    await streamer._handle_summary(
+    await streamer._handle_time_and_sale(
         SimpleNamespace(
-            event_symbol="$TRINUSC",
-            event_time=1_764_000_000_000,
-            day_close_price=Decimal("0.87"),
-            prev_day_close_price=Decimal("0.91"),
+            event_symbol="$TRINND",
+            time=1_764_000_000_000,
+            price=0.87,
+            size=1,
         )
     )
 
     assert received == [
         {
-            "symbol": "$TRINUSC",
+            "symbol": "$TRINND",
             "price": 0.87,
-            "size": 0,
+            "size": 1,
             "timestamp": "2025-11-24T16:00:00+00:00",
         }
     ]

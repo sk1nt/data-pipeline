@@ -10,9 +10,9 @@ from typing import Awaitable, Callable, Dict, List, Optional, Sequence
 
 try:  # pragma: no cover - optional dependency in some environments
     from tastytrade import DXLinkStreamer
-    from tastytrade.dxfeed import Quote, Summary, Trade
+    from tastytrade.dxfeed import Quote, TimeAndSale, Trade
 except ImportError:  # pragma: no cover
-    DXLinkStreamer = Quote = Summary = Trade = None  # type: ignore
+    DXLinkStreamer = Quote = TimeAndSale = Trade = None  # type: ignore
 
 try:
     from src.services.tastytrade_auth_service import get_tastytrade_auth_service
@@ -92,18 +92,27 @@ class TastyTradeStreamer:
                 formatted_symbols = [
                     self._format_symbol(sym) for sym in self.settings.symbols
                 ]
+                time_and_sale_symbols = [
+                    sym for sym in formatted_symbols if self._uses_time_and_sale(sym)
+                ]
                 await streamer.subscribe(Trade, formatted_symbols)
-                await streamer.subscribe(Summary, formatted_symbols)
+                if time_and_sale_symbols:
+                    await streamer.subscribe(TimeAndSale, time_and_sale_symbols)
                 if getattr(self.settings, "enable_depth", False):
                     await streamer.subscribe(Quote, formatted_symbols)
                     LOGGER.info(
-                        "Subscribed to DXLink trades + summaries + quotes for %s",
+                        "Subscribed to DXLink trades + quotes for %s",
                         formatted_symbols,
                     )
                 else:
                     LOGGER.info(
-                        "Subscribed to DXLink trades + summaries for %s (quotes disabled)",
+                        "Subscribed to DXLink trades for %s (quotes disabled)",
                         formatted_symbols,
+                    )
+                if time_and_sale_symbols:
+                    LOGGER.info(
+                        "Subscribed to DXLink time-and-sale indicators for %s",
+                        time_and_sale_symbols,
                     )
 
                 while not self._stop_event.is_set():
@@ -117,15 +126,16 @@ class TastyTradeStreamer:
                     except Exception:  # pragma: no cover - defensive logging
                         LOGGER.exception("Error processing trade event")
 
-                    try:
-                        summary = await asyncio.wait_for(
-                            streamer.get_event(Summary), timeout=0.1
-                        )
-                        await self._handle_summary(summary)
-                    except asyncio.TimeoutError:
-                        pass
-                    except Exception:  # pragma: no cover - defensive logging
-                        LOGGER.exception("Error processing summary event")
+                    if time_and_sale_symbols:
+                        try:
+                            time_and_sale = await asyncio.wait_for(
+                                streamer.get_event(TimeAndSale), timeout=0.1
+                            )
+                            await self._handle_time_and_sale(time_and_sale)
+                        except asyncio.TimeoutError:
+                            pass
+                        except Exception:  # pragma: no cover - defensive logging
+                            LOGGER.exception("Error processing time-and-sale event")
 
                     if getattr(self.settings, "enable_depth", False):
                         try:
@@ -157,24 +167,25 @@ class TastyTradeStreamer:
         else:
             LOGGER.debug("Trade: %s", payload)
 
-    async def _handle_summary(self, summary) -> None:
-        if not summary:
+    async def _handle_time_and_sale(self, time_and_sale) -> None:
+        if not time_and_sale:
             return
-        price = getattr(summary, "day_close_price", None)
-        if price is None:
-            price = getattr(summary, "prev_day_close_price", None)
+        price = getattr(time_and_sale, "price", None)
         if price is None:
             return
         payload = {
-            "symbol": self._normalize_symbol(summary.event_symbol),
+            "symbol": self._normalize_symbol(time_and_sale.event_symbol),
             "price": float(price),
-            "size": 0,
-            "timestamp": self._ts_from_ms(getattr(summary, "event_time", 0)),
+            "size": int(getattr(time_and_sale, "size", 0) or 0),
+            "timestamp": self._ts_from_ms(
+                getattr(time_and_sale, "time", 0)
+                or getattr(time_and_sale, "event_time", 0)
+            ),
         }
         if self._on_trade:
             await self._on_trade(payload)
         else:
-            LOGGER.debug("Summary price: %s", payload)
+            LOGGER.debug("Time-and-sale: %s", payload)
 
     async def _handle_quote(self, quote) -> None:
         if not quote:
@@ -220,6 +231,11 @@ class TastyTradeStreamer:
         if symbol in futures:
             return f"/{symbol}:XCME"
         return symbol
+
+    @staticmethod
+    def _uses_time_and_sale(symbol: str) -> bool:
+        """TRIN market indicators publish live price-like updates via TimeAndSale."""
+        return symbol.upper().startswith("$TRIN")
 
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:

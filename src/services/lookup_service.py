@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import duckdb
@@ -95,6 +96,58 @@ class LookupService:
             )
         return history
 
+    def trin_history(
+        self,
+        symbol: str,
+        limit: int = 100,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Query persisted TRIN trade history from DuckDB."""
+        db_path = Path(settings.tastytrade_trin_history_db_path)
+        if not db_path.exists():
+            return []
+
+        params: List[Any] = [symbol]
+        filters = ["symbol = ?"]
+        if start_time:
+            filters.append("timestamp_ms >= ?")
+            params.append(self._timestamp_ms_from_iso(start_time))
+        if end_time:
+            filters.append("timestamp_ms <= ?")
+            params.append(self._timestamp_ms_from_iso(end_time))
+        query = (
+            "SELECT symbol, timestamp_utc, timestamp_ms, price, size, source "
+            f"FROM {self._trin_table_name()} WHERE "
+            + " AND ".join(filters)
+        )
+        query += " ORDER BY timestamp_ms DESC LIMIT ?"
+        params.append(limit)
+
+        try:
+            conn = duckdb.connect(str(db_path))
+            rows = conn.execute(query, params).fetchall()
+        except duckdb.Error:
+            return []
+        finally:
+            if "conn" in locals():
+                conn.close()
+
+        history = []
+        for symbol_val, timestamp_val, timestamp_ms, price_val, size_val, source_val in rows:
+            history.append(
+                {
+                    "symbol": symbol_val,
+                    "timestamp": self._format_timestamp_from_value(timestamp_val)
+                    or self._format_timestamp(timestamp_ms),
+                    "timestamp_ms": int(timestamp_ms) if timestamp_ms is not None else None,
+                    "price": float(price_val) if price_val is not None else None,
+                    "size": float(size_val) if size_val is not None else None,
+                    "source": source_val,
+                }
+            )
+        return history
+
     def store_depth_comparison(self, symbol: str, payload: Dict[str, Any]) -> None:
         """Persist latest depth comparison summary for quick lookup."""
         key = self._depth_comparison_key(symbol)
@@ -120,6 +173,10 @@ class LookupService:
         return f"depth:comparison:{symbol}"
 
     @staticmethod
+    def _trin_table_name() -> str:
+        return "trin_trade_history"
+
+    @staticmethod
     def _format_timestamp(value: int) -> str:
         return datetime.utcfromtimestamp(value / 1000).isoformat() + "Z"
 
@@ -131,6 +188,14 @@ class LookupService:
             return str(value)
         except Exception:
             return ""
+
+    @staticmethod
+    def _timestamp_ms_from_iso(value: str) -> int:
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return int(dt.timestamp() * 1000)
+        except ValueError:
+            return 0
 
     @staticmethod
     def _normalize_iso(value: str) -> str:

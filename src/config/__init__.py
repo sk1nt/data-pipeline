@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     )
     tastytrade_symbols: str = env_field(
         "TASTYTRADE_STREAM_SYMBOLS",
-        default="MES,MNQ,NQ,SPY,QQQ,VIX,$TRINUSC,$TRIN.NQ",
+        default="MES,MNQ,NQ,SPY,QQQ,VIX,$TRIN,$TRINSP,$TRINND,$TRIN/Q",
     )
     tastytrade_depth_levels: int = env_field("TASTYTRADE_DEPTH_LEVELS", default=40)
     # Toggle for subscribing to level-2 quote/depth events on DXLink
@@ -91,6 +91,18 @@ class Settings(BaseSettings):
     tastytrade_client_id: Optional[str] = env_field("TASTYTRADE_CLIENT_ID")
     tastytrade_client_secret: Optional[str] = env_field("TASTYTRADE_CLIENT_SECRET")
     tastytrade_refresh_token: Optional[str] = env_field("TASTYTRADE_REFRESH_TOKEN")
+    tastytrade_trin_history_db_path: str = env_field(
+        "TASTYTRADE_TRIN_HISTORY_DB_PATH",
+        default="data/trin_history.db",
+    )
+    tastytrade_trin_history_parquet_dir: str = env_field(
+        "TASTYTRADE_TRIN_HISTORY_PARQUET_DIR",
+        default="data/parquet/trin",
+    )
+    tastytrade_trin_history_flush_seconds: int = env_field(
+        "TASTYTRADE_TRIN_HISTORY_FLUSH_SECONDS",
+        default=60,
+    )
 
     # GEXBot poller
     gex_polling_enabled: bool = Field(
@@ -358,6 +370,7 @@ class Settings(BaseSettings):
             Path(self.timeseries_parquet_dir),
             Path(self.tick_parquet_dir),
             Path(self.depth_parquet_dir),
+            Path(self.tastytrade_trin_history_parquet_dir),
         ]
 
         for directory in directories:
