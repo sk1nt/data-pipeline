@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -31,10 +31,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-from tastytrade import Session  # noqa: E402
 from tastytrade.dxfeed.candle import Candle  # noqa: E402
 from tastytrade.streamer import DXLinkStreamer  # noqa: E402
 from tastytrade.instruments import Future  # noqa: E402
+from services.tastytrade_auth_service import get_tastytrade_auth_service  # noqa: E402
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -58,7 +58,7 @@ def _trading_days_back(n: int) -> datetime:
     return day
 
 
-def _resolve_front_month(session: Session, product_code: str) -> str:
+def _resolve_front_month(session: Any, product_code: str) -> str:
     """Return the nearest tradeable front-month streamer symbol."""
     try:
         futures = Future.get(session, symbols=None, product_codes=[product_code])
@@ -96,7 +96,7 @@ def _resolve_front_month(session: Session, product_code: str) -> str:
 # ── Main async fetch ──────────────────────────────────────────────────────────
 
 async def fetch_candles(
-    session: Session,
+    session: Any,
     streamer_symbols: dict[str, str],   # product_code -> streamer_symbol
     start_time: datetime,
     interval: str = "1m",
@@ -207,23 +207,11 @@ async def main() -> None:
     args = parse_args()
     out_dir = Path(args.out)
 
-    client_secret = os.getenv("TASTYTRADE_CLIENT_SECRET", "")
-    refresh_token = os.getenv("TASTYTRADE_REFRESH_TOKEN", "")
-    use_sandbox = os.getenv("TASTYTRADE_USE_SANDBOX", "true").lower() == "true"
-
-    if not client_secret or not refresh_token:
-        print("ERROR: TASTYTRADE_CLIENT_SECRET and TASTYTRADE_REFRESH_TOKEN must be set in .env")
-        sys.exit(1)
-
     start_time = _trading_days_back(args.days)
     print(f"Fetching {args.interval} candles from {start_time.date()} for: {args.symbols}")
 
-    print("Creating TastyTrade session...")
-    session = Session(
-        provider_secret=client_secret,
-        refresh_token=refresh_token,
-        is_test=use_sandbox,
-    )
+    print("Using shared TastyTrade auth session...")
+    session = get_tastytrade_auth_service().get_session()
 
     print("Resolving front-month symbols...")
     streamer_symbols = {}

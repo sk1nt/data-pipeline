@@ -37,14 +37,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def _import_stream_dependencies():
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
+    src_path = PROJECT_ROOT / "src"
+    if str(src_path) not in sys.path:
+        sys.path.insert(0, str(src_path))
     from tastytrade import DXLinkStreamer
-    from tastytrade.session import Session
     from tastytrade.dxfeed import Quote
+    from services.tastytrade_auth_service import get_tastytrade_auth_service
 
-    return Session, DXLinkStreamer, Quote
+    return DXLinkStreamer, Quote, get_tastytrade_auth_service
 
 
-Session, DXLinkStreamer, Quote = _import_stream_dependencies()
+DXLinkStreamer, Quote, get_tastytrade_auth_service = _import_stream_dependencies()
 
 # Load environment variables from .env file
 load_dotenv(PROJECT_ROOT / ".env")
@@ -198,25 +201,10 @@ class TastyTradeStreamService:
         logger.info(f"Save interval: {self.save_interval}s")
 
         try:
-            # Get OAuth2 credentials
-            use_sandbox = os.getenv("TASTYTRADE_USE_SANDBOX", "false").lower() == "true"
-            client_secret = os.getenv("TASTYTRADE_CLIENT_SECRET")
-            refresh_token = os.getenv("TASTYTRADE_REFRESH_TOKEN")
+            logger.info("Using shared TastyTrade auth session...")
+            session = get_tastytrade_auth_service().get_session()
 
-            if not client_secret or not refresh_token:
-                raise RuntimeError(
-                    "Missing TASTYTRADE_CLIENT_SECRET or TASTYTRADE_REFRESH_TOKEN in environment"
-                )
-
-            logger.info("Creating OAuth2 session...")
-            # Create OAuth2 session - it will automatically manage access tokens
-            session = Session(
-                provider_secret=client_secret,
-                refresh_token=refresh_token,
-                is_test=use_sandbox,
-            )
-
-            logger.info("✅ Authenticated with TastyTrade OAuth2")
+            logger.info("✅ Authenticated with shared TastyTrade auth service")
 
             # Format symbols - futures get /symbol:XCME, equities stay as-is
             futures_symbols = ["NQ", "MNQ", "ES", "MES", "YM", "RTY"]  # Common futures

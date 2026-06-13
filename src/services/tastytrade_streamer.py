@@ -10,10 +10,14 @@ from typing import Awaitable, Callable, Dict, List, Optional, Sequence
 
 try:  # pragma: no cover - optional dependency in some environments
     from tastytrade import DXLinkStreamer
-    from tastytrade.session import Session
-    from tastytrade.dxfeed import Quote, Trade
+    from tastytrade.dxfeed import Quote, Summary, Trade
 except ImportError:  # pragma: no cover
-    DXLinkStreamer = Session = Quote = Trade = None  # type: ignore
+    DXLinkStreamer = Quote = Summary = Trade = None  # type: ignore
+
+try:
+    from src.services.tastytrade_auth_service import get_tastytrade_auth_service
+except Exception:  # pragma: no cover
+    from services.tastytrade_auth_service import get_tastytrade_auth_service  # type: ignore
 
 
 LOGGER = logging.getLogger(__name__)
@@ -81,27 +85,24 @@ class TastyTradeStreamer:
             self.settings.symbols,
             self.settings.depth_levels,
         )
-        if self._auth_service is not None:
-            session = await asyncio.to_thread(self._auth_service.get_session)
-        else:
-            session = Session(
-                provider_secret=self.settings.client_secret,
-                refresh_token=self.settings.refresh_token,
-            )
+        auth_service = self._auth_service or get_tastytrade_auth_service()
+        session = await asyncio.to_thread(auth_service.get_session)
         try:
             async with DXLinkStreamer(session) as streamer:
                 formatted_symbols = [
                     self._format_symbol(sym) for sym in self.settings.symbols
                 ]
                 await streamer.subscribe(Trade, formatted_symbols)
+                await streamer.subscribe(Summary, formatted_symbols)
                 if getattr(self.settings, "enable_depth", False):
                     await streamer.subscribe(Quote, formatted_symbols)
                     LOGGER.info(
-                        "Subscribed to DXLink trades + quotes for %s", formatted_symbols
+                        "Subscribed to DXLink trades + summaries + quotes for %s",
+                        formatted_symbols,
                     )
                 else:
                     LOGGER.info(
-                        "Subscribed to DXLink trades for %s (quotes disabled)",
+                        "Subscribed to DXLink trades + summaries for %s (quotes disabled)",
                         formatted_symbols,
                     )
 
@@ -115,6 +116,16 @@ class TastyTradeStreamer:
                         pass
                     except Exception:  # pragma: no cover - defensive logging
                         LOGGER.exception("Error processing trade event")
+
+                    try:
+                        summary = await asyncio.wait_for(
+                            streamer.get_event(Summary), timeout=0.1
+                        )
+                        await self._handle_summary(summary)
+                    except asyncio.TimeoutError:
+                        pass
+                    except Exception:  # pragma: no cover - defensive logging
+                        LOGGER.exception("Error processing summary event")
 
                     if getattr(self.settings, "enable_depth", False):
                         try:
@@ -145,6 +156,25 @@ class TastyTradeStreamer:
             await self._on_trade(payload)
         else:
             LOGGER.debug("Trade: %s", payload)
+
+    async def _handle_summary(self, summary) -> None:
+        if not summary:
+            return
+        price = getattr(summary, "day_close_price", None)
+        if price is None:
+            price = getattr(summary, "prev_day_close_price", None)
+        if price is None:
+            return
+        payload = {
+            "symbol": self._normalize_symbol(summary.event_symbol),
+            "price": float(price),
+            "size": 0,
+            "timestamp": self._ts_from_ms(getattr(summary, "event_time", 0)),
+        }
+        if self._on_trade:
+            await self._on_trade(payload)
+        else:
+            LOGGER.debug("Summary price: %s", payload)
 
     async def _handle_quote(self, quote) -> None:
         if not quote:

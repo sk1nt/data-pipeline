@@ -21,22 +21,22 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Dict, Optional, Set
 
 import httpx
 from dotenv import load_dotenv
 
-# Add discord-bot for TastyTradeClient
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "discord-bot"))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "discord-bot"))
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from bot.tastytrade_client import TastyTradeClient
+from bot.tastytrade_client import TastyTradeClient  # noqa: E402
 
-# TastyTrade SDK imports
-from tastytrade.session import Session
-from tastytrade import DXLinkStreamer
-from tastytrade.dxfeed import Trade
+from tastytrade import DXLinkStreamer  # noqa: E402
+from tastytrade.dxfeed import Trade  # noqa: E402
 
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+load_dotenv(PROJECT_ROOT / ".env")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,7 +89,7 @@ class PositionMonitor:
         self.position_states: Dict[str, PositionState] = {}  # key: f"{account}:{symbol}"
         self._running = False
         self._live_prices: Dict[str, float] = {}  # symbol -> last price
-        self._session: Optional[Session] = None
+        self._session = None
         
         # Initialize clients for each account
         for account in config.accounts:
@@ -300,12 +300,10 @@ class PositionMonitor:
         self._running = True
         logger.info("Starting position monitor...")
         
-        # Create streaming session
-        self._session = Session(
-            provider_secret=os.getenv("TASTYTRADE_CLIENT_SECRET"),
-            refresh_token=os.getenv("TASTYTRADE_REFRESH_TOKEN"),
-            is_test=False,
-        )
+        # Reuse the shared warm session managed by TastyTradeClient/auth service.
+        if not self.clients:
+            raise RuntimeError("No TastyTrade accounts configured for position monitor")
+        self._session = next(iter(self.clients.values())).get_session()
         
         # Initial position refresh
         streamer_symbols = self.refresh_positions()

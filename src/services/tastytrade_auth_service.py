@@ -154,6 +154,14 @@ class TastytradeAuthService:
             self._last_error = None
             self._create_session()
 
+    def set_use_sandbox(self, use_sandbox: bool) -> None:
+        with self._lock:
+            self.settings.use_sandbox = bool(use_sandbox)
+            self._session = None
+            self._session_expiration = None
+            self._needs_reauth = False
+            self._last_error = None
+
     def start(self) -> None:
         if self._task and not self._task.done():
             return

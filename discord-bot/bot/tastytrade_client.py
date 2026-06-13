@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
+import sys
 
 import httpx
 import re
@@ -33,6 +35,24 @@ except ImportError as exc:  # pragma: no cover - optional dependency
     Session = None  # type: ignore
     Account = None  # type: ignore
     AccountBalance = None  # type: ignore
+
+try:
+    from services.tastytrade_auth_service import (
+        TastytradeAuthError as SharedTastytradeAuthError,
+        TastytradeAuthService,
+        TastytradeAuthSettings,
+        TastytradeTransientAuthError,
+    )
+except ImportError:  # pragma: no cover - backend imports may not have src/ on path yet
+    src_path = Path(__file__).resolve().parents[2] / "src"
+    if str(src_path) not in sys.path:
+        sys.path.insert(0, str(src_path))
+    from services.tastytrade_auth_service import (
+        TastytradeAuthError as SharedTastytradeAuthError,
+        TastytradeAuthService,
+        TastytradeAuthSettings,
+        TastytradeTransientAuthError,
+    )
 
 
 @dataclass
@@ -107,13 +127,13 @@ class TastyTradeClient:
         self._reauth_thread: Optional[threading.Thread] = None
         self._last_connect_failure: float = 0.0
         self._connect_cooldown_seconds: float = 15.0
-        # Start reauth worker thread (best-effort; don't raise on failure)
-        try:
-            self._start_reauth_worker()
-        except Exception:
-            LOGGER.warning(
-                "_start_reauth_worker failed during init; continuing without background reauth worker"
+        self._auth_service = TastytradeAuthService(
+            TastytradeAuthSettings(
+                client_secret=client_secret,
+                refresh_token=refresh_token,
+                use_sandbox=use_sandbox,
             )
+        )
 
     @property
     def active_account(self) -> Optional[str]:
@@ -488,37 +508,23 @@ class TastyTradeClient:
 
     def _ensure_session(self) -> Session:
         assert Session is not None  # for type checkers
-        # Fast-fail if we recently failed to connect (avoid repeated TCP timeouts)
-        if self._session is None and self._last_connect_failure:
-            elapsed = time.monotonic() - self._last_connect_failure
-            if elapsed < self._connect_cooldown_seconds:
-                raise ConnectionError(
-                    f"TastyTrade API unreachable (retry in {self._connect_cooldown_seconds - elapsed:.0f}s)"
-                )
-        if self._session is None:
-            try:
-                self._session = Session(
-                    provider_secret=self._client_secret,
-                    refresh_token=self._refresh_token,
-                    is_test=self._use_sandbox,
-                )
-                self._session_expiration = self._derive_expiration(self._session)
-                self._last_connect_failure = 0.0
-            except (httpx.TransportError, ConnectionError, TimeoutError, OSError) as exc:
-                self._last_connect_failure = time.monotonic()
-                raise ConnectionError(f"TastyTrade API unreachable: {exc}") from exc
-        else:
-            try:
-                if (
-                    self._session_expiration
-                    and datetime.now(timezone.utc) >= self._session_expiration
-                ):
-                    self._session.refresh()
-                    self._session_expiration = self._derive_expiration(self._session)
-            except Exception as exc:  # pragma: no cover - handle invalid grant
-                self._raise_on_auth_error(exc)
-                raise
-        return self._session
+        try:
+            session = self._auth_service.get_session()
+            self._session = session
+            self._session_expiration = self._auth_service.session_expiration
+            self._needs_reauth = False
+            self._last_connect_failure = 0.0
+            return session
+        except SharedTastytradeAuthError as exc:
+            self._mark_needs_reauth()
+            raise TastytradeAuthError(str(exc)) from exc
+        except TastytradeTransientAuthError as exc:
+            raise ConnectionError(
+                f"TastyTrade authorization temporarily unavailable: {exc}"
+            ) from exc
+        except (httpx.TransportError, ConnectionError, TimeoutError, OSError) as exc:
+            self._last_connect_failure = time.monotonic()
+            raise ConnectionError(f"TastyTrade API unreachable: {exc}") from exc
 
     def ensure_authorized(self) -> bool:
         """Ensure that the session is authorized/valid. Returns True if valid.
@@ -527,20 +533,10 @@ class TastyTradeClient:
         refresh token is invalid or revoked, raises TastytradeAuthError.
         """
         with self._lock:
-            # fast-path: if we have a session and it hasn't expired
             try:
-                if self._session and not self._needs_reauth:
-                    exp = self._session_expiration
-                    if exp and datetime.now(timezone.utc) < exp:
-                        return True
-                # fall-back to creating or refreshing session via _ensure_session
                 self._ensure_session()
                 return True
             except TastytradeAuthError:
-                # propagate so callers can handle it specifically
-                raise
-            except Exception:
-                # For other errors, wrap or propagate
                 raise
 
     def set_refresh_token(self, refresh_token: str) -> None:
@@ -551,13 +547,15 @@ class TastyTradeClient:
         with self._lock:
             self._refresh_token = refresh_token
             try:
-                self._session = Session(
-                    provider_secret=self._client_secret,
-                    refresh_token=self._refresh_token,
-                    is_test=self._use_sandbox,
-                )
-                self._session_expiration = self._derive_expiration(self._session)
+                self._auth_service.set_refresh_token(refresh_token)
+                self._session = self._auth_service.get_session()
+                self._session_expiration = self._auth_service.session_expiration
                 self._needs_reauth = False
+            except SharedTastytradeAuthError as exc:
+                self._session = None
+                self._session_expiration = None
+                self._needs_reauth = True
+                raise TastytradeAuthError(str(exc)) from exc
             except Exception:
                 # If immediate creation fails, mark for reauth attempts
                 self._session = None
@@ -587,13 +585,10 @@ class TastyTradeClient:
         with self._lock:
             self._session = None
             self._session_expiration = None
+            self._auth_service.set_use_sandbox(self._use_sandbox)
             try:
-                self._session = Session(
-                    provider_secret=self._client_secret,
-                    refresh_token=self._refresh_token,
-                    is_test=self._use_sandbox,
-                )
-                self._session_expiration = self._derive_expiration(self._session)
+                self._session = self._auth_service.get_session()
+                self._session_expiration = self._auth_service.session_expiration
                 self._needs_reauth = False
             except Exception:
                 self._session = None
@@ -646,51 +641,10 @@ class TastyTradeClient:
         return h[:12]
 
     def _start_reauth_worker(self) -> None:
-        # Defensive reauth worker start: avoid raising if threading is missing or failed
-        if (
-            self._reauth_thread
-            and getattr(self._reauth_thread, "is_alive", lambda: False)()
-        ):
-            return
-        try:
-            # If 'threading.Thread' exists, use it; otherwise try to import threading dynamically
-            thread_cls = getattr(threading, "Thread", None)
-            if thread_cls is None:
-                import importlib as _importlib
-
-                threading_mod = _importlib.import_module("threading")
-                thread_cls = getattr(threading_mod, "Thread", None)
-            if thread_cls is None:
-                LOGGER.warning(
-                    "threading.Thread is not available; reauth worker will not be started"
-                )
-                return
-            self._reauth_thread = thread_cls(target=self._reauth_worker, daemon=True)
-            self._reauth_thread.start()
-        except Exception as exc:
-            LOGGER.warning("Failed to start reauth worker thread: %s", exc)
+        LOGGER.debug("TastyTrade reauth worker disabled; shared auth service owns refresh")
 
     def _reauth_worker(self) -> None:
-        # Background thread that tries to reinitialize session when needed
-        while True:
-            try:
-                if self._needs_reauth:
-                    try:
-                        self._session = Session(
-                            provider_secret=self._client_secret,
-                            refresh_token=self._refresh_token,
-                            is_test=self._use_sandbox,
-                        )
-                        self._session_expiration = self._derive_expiration(self._session)
-                        self._needs_reauth = False
-                        # keep symbol cache fresh
-                        self._symbol_cache.clear()
-                        LOGGER.info("TastyTrade session reinitialized by reauth worker")
-                    except Exception:
-                        LOGGER.debug("TastyTrade reauth attempt failed; will retry")
-                time.sleep(self._reauth_backoff_seconds)
-            except Exception:
-                time.sleep(self._reauth_backoff_seconds)
+        return
 
     # Number of days before expiration to roll to the next quarterly contract.
     ROLL_BUFFER_DAYS = 7

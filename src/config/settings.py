@@ -66,11 +66,9 @@ class TastyTradeConfig(BaseSettings):
 
     @property
     def effective_tastytrade_client_secret(self) -> str:
-        return (
-            self.tastytrade_prod_client_secret
-            if not self.tastytrade_use_sandbox
-            else self.tastytrade_client_secret
-        )
+        if not self.tastytrade_use_sandbox:
+            return self.tastytrade_prod_client_secret or self.tastytrade_client_secret
+        return self.tastytrade_client_secret
 
     @property
     def allowed_user_list(self) -> list[str]:
@@ -98,11 +96,9 @@ class TastyTradeConfig(BaseSettings):
 
     @property
     def effective_tastytrade_refresh_token(self) -> str:
-        return (
-            self.tastytrade_prod_refresh_token
-            if not self.tastytrade_use_sandbox
-            else self.tastytrade_refresh_token
-        )
+        if not self.tastytrade_use_sandbox:
+            return self.tastytrade_prod_refresh_token or self.tastytrade_refresh_token
+        return self.tastytrade_refresh_token
 
 
 # Global config instance

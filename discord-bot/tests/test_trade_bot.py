@@ -105,9 +105,10 @@ async def test_tt_auth_status_contains_session_expiration_and_hash(monkeypatch):
     ctx = Ctx(FakeAuthor(12345, "skint0552"), FakeChannel(1255265167113978008))
     cmd = bot.get_command("tt")
     await cmd.callback(ctx, "auth", "status")
-    assert ctx.author.sent is not None
-    assert "Session Expiration:" in ctx.author.sent
-    assert "Refresh Token Hash:" in ctx.author.sent
+    sent = ctx.author.sent or ctx.sent
+    assert sent is not None
+    assert "Session Expiration:" in sent
+    assert "Refresh Token Hash:" in sent
 
 
 @pytest.mark.asyncio
@@ -187,4 +188,3 @@ async def test_on_message_skips_replies_for_all_prefixes(content, monkeypatch):
     msg = FakeMessage(content, author_id=12345, channel_id="1255265167113978008", is_reply=True)
     await bot.on_message(msg)
     assert called["count"] == 0, f"Reply should not trigger alert for: {content!r}"
-

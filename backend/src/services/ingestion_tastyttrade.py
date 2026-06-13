@@ -1,14 +1,23 @@
 import asyncio
 import os
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
-from tastytrade import DXLinkStreamer, OAuthSession
+from tastytrade import DXLinkStreamer
 from tastytrade.dxfeed import Trade
 
 from backend.src.services.duckdb_service import store_tick_data
 from backend.src.services.redis_service import redis_manager
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+src_path = PROJECT_ROOT / "src"
+if str(src_path) not in sys.path:
+    sys.path.insert(0, str(src_path))
+
+from services.tastytrade_auth_service import get_tastytrade_auth_service  # noqa: E402
 
 # Keep writer aligned with reader: single template, default GEX snapshot cache
 REDIS_TICK_KEY_TEMPLATE = os.getenv("REDIS_TICK_KEY_TEMPLATE", "gex:snapshot:{symbol}")
@@ -20,11 +29,6 @@ DEFAULT_SYMBOL_MAP = {
 
 # Load environment variables
 load_dotenv()
-
-TASTYTRADE_CLIENT_ID = os.getenv("TASTYTRADE_CLIENT_ID")
-TASTYTRADE_CLIENT_SECRET = os.getenv("TASTYTRADE_CLIENT_SECRET")
-TASTYTRADE_REFRESH_TOKEN = os.getenv("TASTYTRADE_REFRESH_TOKEN")
-
 
 class TastyTradeIngestion:
     def __init__(self):
@@ -80,13 +84,9 @@ class TastyTradeIngestion:
     async def run(self):
         """Main ingestion loop"""
         try:
-            # Create OAuth2 session - it will automatically manage access tokens
-            session = OAuthSession(
-                provider_secret=TASTYTRADE_CLIENT_SECRET,
-                refresh_token=TASTYTRADE_REFRESH_TOKEN,
-            )
+            session = get_tastytrade_auth_service().get_session()
 
-            print("✅ Authenticated with TastyTrade OAuth2")
+            print("✅ Authenticated with shared TastyTrade auth service")
 
             # Format symbols - futures get /symbol:XCME, equities stay as-is
             futures_symbols = ["MES", "MNQ", "NQ"]  # Common futures
