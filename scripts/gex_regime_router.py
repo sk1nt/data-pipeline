@@ -18,46 +18,61 @@ import argparse
 from pathlib import Path
 import joblib
 import numpy as np
-import pandas as pd
+import polars as pl
 
 
-def load_parquet(path: Path) -> pd.DataFrame:
-    df = pd.read_parquet(path)
+def load_parquet(path: Path) -> pl.DataFrame:
+    df = pl.read_parquet(path)
     # Normalize casing
     if "net_gex" not in df.columns and "netGex" in df.columns:
-        df = df.rename(columns={"netGex": "net_gex"})
+        df = df.rename({"netGex": "net_gex"})
     return df
 
 
-def make_features(df: pd.DataFrame) -> pd.DataFrame:
-    feats = pd.DataFrame(index=df.index)
-    feats["net_gex"] = df.get("net_gex", 0.0)
-    feats["gex_zero"] = df.get("gex_zero", 0.0)
-    feats["sum_gex_vol"] = df.get("sum_gex_vol", 0.0)
-    feats["major_pos_vol"] = df.get("major_pos_vol", 0.0)
-    feats["major_neg_vol"] = df.get("major_neg_vol", 0.0)
-    # Distances to flip/walls if price columns exist
-    price = df.get("Close") if "Close" in df.columns else df.get("close")
-    if price is not None and not price.isna().all():
-        feats["dist_to_zero"] = price - feats["gex_zero"]
+def make_features(df: pl.DataFrame) -> pl.DataFrame:
+    def get_col(name, default=0.0):
+        if name in df.columns:
+            return pl.col(name)
+        return pl.lit(default).alias(name)
+
+    exprs = [
+        get_col("net_gex").alias("net_gex"),
+        get_col("gex_zero").alias("gex_zero"),
+        get_col("sum_gex_vol").alias("sum_gex_vol"),
+        get_col("major_pos_vol").alias("major_pos_vol"),
+        get_col("major_neg_vol").alias("major_neg_vol"),
+    ]
+
+    price_col = None
+    if "Close" in df.columns:
+        price_col = "Close"
+    elif "close" in df.columns:
+        price_col = "close"
+
+    if price_col is not None and not df[price_col].is_null().all():
+        gex_zero_expr = get_col("gex_zero")
+        exprs.append((pl.col(price_col) - gex_zero_expr).alias("dist_to_zero"))
     else:
-        feats["dist_to_zero"] = 0.0
-    feats = feats.fillna(0.0)
+        exprs.append(pl.lit(0.0).alias("dist_to_zero"))
+
+    feats = df.select(exprs).fill_null(0.0)
     return feats
 
 
 def make_labels(
-    df: pd.DataFrame, pos_thresh: float = 0.0, neg_thresh: float = 0.0
+    df: pl.DataFrame, pos_thresh: float = 0.0, neg_thresh: float = 0.0
 ) -> np.ndarray:
     """Label +1 for strong positive GEX, 0 for negative/neutral."""
-    net = df.get("net_gex", pd.Series(0, index=df.index)).fillna(0.0)
+    if "net_gex" in df.columns:
+        net = df["net_gex"].fill_null(0.0).to_numpy()
+    else:
+        net = np.zeros(df.height)
     labels = (net > pos_thresh).astype(int)
-    # Optionally mask low-magnitude regimes by setting to 0
-    labels[(net < neg_thresh)] = 0
-    return labels.values
+    labels[net < neg_thresh] = 0
+    return labels
 
 
-def train_regime_classifier(X: pd.DataFrame, y: np.ndarray):
+def train_regime_classifier(X: pl.DataFrame, y: np.ndarray):
     try:
         import lightgbm as lgb
 
@@ -73,7 +88,7 @@ def train_regime_classifier(X: pd.DataFrame, y: np.ndarray):
         from sklearn.linear_model import LogisticRegression
 
         model = LogisticRegression(max_iter=200)
-    model.fit(X, y)
+    model.fit(X.to_numpy(), y)
     return model
 
 
@@ -108,7 +123,7 @@ def main():
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(
-        {"model": model, "features": list(X.columns), "threshold": args.threshold},
+        {"model": model, "features": X.columns, "threshold": args.threshold},
         out_path,
     )
     print(f"Saved regime classifier to {out_path} (features={len(X.columns)})")

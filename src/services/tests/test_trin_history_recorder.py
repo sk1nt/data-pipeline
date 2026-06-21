@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import duckdb
-import pandas as pd
+import polars as pl
 import pytest
 
 from src.services.trin_history_recorder import (
@@ -49,7 +49,7 @@ async def test_trin_history_recorder_persists_deduped_daily_files(tmp_path: Path
     parquet_file = settings.parquet_dir / "$TRIN" / "20260612.parquet"
     assert parquet_file.exists()
 
-    df = pd.read_parquet(parquet_file)
-    assert len(df) == 1
-    assert df.iloc[0]["symbol"] == "$TRIN"
-    assert df.iloc[0]["price"] == pytest.approx(0.91)
+    df = pl.read_parquet(parquet_file)
+    assert df.height == 1
+    assert df.row(0, named=True)["symbol"] == "$TRIN"
+    assert df.row(0, named=True)["price"] == pytest.approx(0.91)
