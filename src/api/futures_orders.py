@@ -26,13 +26,11 @@ class FuturesOrderResponse(BaseModel):
 async def place_futures_order(request: FuturesOrderRequest):
     """Place a futures order."""
 
-    # Verify user permissions
     if not AuthService.verify_user_for_futures(request.user_id):
         raise HTTPException(
             status_code=403, detail="User not authorized for futures orders"
         )
 
-    # Parse parameters
     parser = FuturesOrderParser()
     try:
         params = parser.parse(
@@ -45,12 +43,12 @@ async def place_futures_order(request: FuturesOrderRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Place order
     service = FuturesOrderService()
     try:
         result = await service.place_order(params, request.user_id)
         return FuturesOrderResponse(
-            message=result, order_id=None
-        )  # TODO: extract order_id
+            message=result["message"],
+            order_id=result.get("order_id"),
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Order placement failed: {e}")

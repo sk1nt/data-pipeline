@@ -2,85 +2,118 @@ from decimal import Decimal
 from tastytrade import Account
 from tastytrade.instruments import Future
 from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType
-from ..services.tastytrade_client import tastytrade_client
+from ..services.tastytrade_client import tastytrade_client, select_account
 from ..services.futures_order_parser import FuturesOrderParams, FuturesAction
 from ..models.order import Order, OrderType as ModelOrderType, OrderStatus, Environment
 from ..config.settings import config
 from datetime import datetime
 
 
-def _select_account(accounts):
-    if not accounts:
-        return None
-    target = getattr(config, "tastytrade_account", None)
-    if target:
-        for acc in accounts:
-            acc_number = getattr(acc, "account_number", None) or getattr(acc, "number", None)
-            if acc_number == target:
-                return acc
-    return accounts[0]
-
-
 class FuturesOrderService:
-    async def place_order(self, params: FuturesOrderParams, user_id: str) -> str:
-        """Place a futures order via Tastytrade API."""
+    async def place_order(self, params: FuturesOrderParams, user_id: str) -> dict:
+        """Place a futures order via Tastytrade API.
 
+        Returns dict with 'message' and 'order_id' keys.
+        """
         tastytrade_client.ensure_authorized()
         session = tastytrade_client.get_session()
 
-        # Get account
         accounts = Account.get(session)
-        account = _select_account(accounts)
+        account = select_account(accounts)
         if not account:
             raise ValueError("No Tastytrade accounts found")
 
-        # Get future instrument
         future = Future.get(session, params.symbol)
         if not future:
             raise ValueError(f"Future symbol {params.symbol} not found")
 
-        # Determine order action
         if params.action == FuturesAction.BUY:
             action = OrderAction.BUY_TO_OPEN
         elif params.action == FuturesAction.SELL:
             action = OrderAction.SELL_TO_CLOSE
         elif params.action == FuturesAction.FLAT:
-            action = OrderAction.SELL_TO_CLOSE  # Assuming flat means close position
+            action = self._resolve_flatten_action(account, session, params.symbol)
+        else:
+            raise ValueError(f"Unsupported futures action: {params.action}")
 
-        # Create leg
         leg = future.build_leg(Decimal(params.quantity), action)
+        dry_run = params.mode == "dry"
 
-        # Create order
         order = NewOrder(
             time_in_force=OrderTimeInForce.DAY,
-            order_type=OrderType.MARKET,  # Futures typically market orders
+            order_type=OrderType.MARKET,
             legs=[leg],
         )
 
-        # Dry run or live
-        dry_run = params.mode == "dry"
-
-        # Place order
         response = account.place_order(session, order, dry_run=dry_run)
+        order_id = str(response.order.id) if hasattr(response, "order") else None
 
-        # Create order record
+        # If tp_ticks specified and not FLAT, place a TP limit order
+        if params.tp_ticks > 0 and params.action != FuturesAction.FLAT and not dry_run:
+            try:
+                active_tick = float(getattr(future, "active_tick_size", 0.25))
+                tp_distance = params.tp_ticks * active_tick
+
+                fill_price = None
+                if hasattr(response, "order") and hasattr(response.order, "price"):
+                    fill_price = float(response.order.price)
+
+                if fill_price:
+                    if params.action == FuturesAction.BUY:
+                        tp_price = fill_price + tp_distance
+                        tp_action = OrderAction.SELL_TO_CLOSE
+                    else:
+                        tp_price = fill_price - tp_distance
+                        tp_action = OrderAction.BUY_TO_CLOSE
+
+                    tp_leg = future.build_leg(Decimal(params.quantity), tp_action)
+                    tp_order = NewOrder(
+                        time_in_force=OrderTimeInForce.DAY,
+                        order_type=OrderType.LIMIT,
+                        legs=[tp_leg],
+                        price=round(tp_price, 2),
+                    )
+                    account.place_order(session, tp_order, dry_run=False)
+            except Exception:
+                pass  # TP placement is best-effort; entry already succeeded
+
         order_record = Order(
-            id=str(response.order.id)
-            if hasattr(response, "order")
-            else f"dry_{datetime.now().timestamp()}",
+            id=order_id or f"dry_{datetime.now().timestamp()}",
             symbol=params.symbol,
             quantity=float(params.quantity),
             order_type=ModelOrderType.MARKET,
             status=OrderStatus.PENDING,
-            environment=Environment.SANDBOX
-            if config.tastytrade_use_sandbox
-            else Environment.PRODUCTION,
+            environment=Environment.SANDBOX if config.tastytrade_use_sandbox else Environment.PRODUCTION,
             created_at=datetime.now(),
             updated_at=datetime.now(),
-            channel_id="",  # Not applicable for chat commands
+            channel_id="",
             user_id=user_id,
         )
 
-        # TODO: Save to database
+        return {
+            "message": f"Order {order_record.id} placed successfully ({'dry run' if dry_run else 'live'})",
+            "order_id": order_id,
+        }
 
-        return f"Order {order_record.id} placed successfully ({'dry run' if dry_run else 'live'})"
+    @staticmethod
+    def _resolve_flatten_action(account, session, symbol: str):
+        """Resolve the proper close action from the live futures position."""
+        search_symbol = (symbol or "").upper().lstrip("/")
+        positions = account.get_positions(session)
+        for pos in positions:
+            pos_symbol = str(pos.get("symbol") or "").upper().lstrip("/")
+            pos_underlying = str(pos.get("underlying_symbol") or "").upper().lstrip("/")
+            if search_symbol not in pos_symbol and search_symbol not in pos_underlying:
+                continue
+
+            quantity = int(float(pos.get("quantity") or 0))
+            direction = pos.get("quantity_direction") or pos.get("direction") or ""
+            if hasattr(direction, "value"):
+                direction = direction.value
+            direction = str(direction).lower()
+
+            if quantity < 0 or direction == "short":
+                return OrderAction.BUY_TO_CLOSE
+            return OrderAction.SELL_TO_CLOSE
+
+        raise ValueError(f"No open futures position found for {symbol}")

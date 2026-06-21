@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     )
     tastytrade_symbols: str = env_field(
         "TASTYTRADE_STREAM_SYMBOLS",
-        default="MES,MNQ,NQ,SPY,QQQ,VIX,$TRIN,$TRINSP,$TRINND,$TRIN/Q",
+        default="MES,MNQ,NQ,SPY,QQQ,$VIX,/VX:XCME,$TRIN,$TRINSP,$TRINND,$TRIN/Q",
     )
     tastytrade_depth_levels: int = env_field("TASTYTRADE_DEPTH_LEVELS", default=40)
     # Toggle for subscribing to level-2 quote/depth events on DXLink
@@ -177,7 +177,7 @@ class Settings(BaseSettings):
 
     # Schwab streaming
     schwab_enabled: bool = env_field("SCHWAB_ENABLED", default=False)
-    schwab_stream_paused: bool = env_field("SCHWAB_STREAM_PAUSED", default=True)
+    schwab_stream_paused: bool = env_field("SCHWAB_STREAM_PAUSED", default=False)
     schwab_client_id: Optional[str] = Field(
         default=None,
         validation_alias=AliasChoices("SCHWAB_CLIENT_ID", "SCHWAB_APPKEY"),
