@@ -66,6 +66,7 @@ from src.services.trin_history_recorder import (  # noqa: E402
     TrinHistoryRecorder,
     TrinHistoryRecorderSettings,
 )
+from src.services.ivr_service import IVRService, IVRServiceSettings  # noqa: E402
 from src.services.schwab_streamer import SchwabStreamClient, build_streamer  # noqa: E402
 from src.services.social_feed_service import SocialFeedService, FeedConfig  # noqa: E402
 from src.services.social_feed_service import SOCIAL_ALL_EVENTS_CHANNEL, SOCIAL_HISTORY_KEY  # noqa: E402
@@ -231,6 +232,8 @@ class ServiceManager:
         self.tastytrade_auth = None
         self.automated_options_service: Optional[Any] = None
         self.trin_history: Optional[TrinHistoryRecorder] = None
+        self.ivr_service: Optional[IVRService] = None
+        self._ivr_task: Optional[asyncio.Task[None]] = None
         self.gex_poller: Optional[GEXBotPoller] = None
         self.gex_nq_poller: Optional[GEXBotPoller] = None
         self.redis_client: Optional[RedisClient] = None
@@ -286,12 +289,14 @@ class ServiceManager:
             "correlation",
             "calendar",
             "uw_rest",
+            "ivr",
         ):
             self.start_service(service)
 
     async def stop(self) -> None:
         """Stop all managed services in a best-effort fashion."""
         for service in (
+            "ivr",
             "correlation",
             "calendar",
             "uw_rest",
@@ -339,6 +344,9 @@ class ServiceManager:
                 "running": bool(self.trin_history and self.trin_history.is_running),
                 "db_path": settings.tastytrade_trin_history_db_path,
                 "parquet_dir": settings.tastytrade_trin_history_parquet_dir,
+            },
+            "ivr_service": {
+                "running": bool(self._ivr_task and not self._ivr_task.done()),
             },
             "lookup_service": {
                 "ready": bool(self.lookup_service),
@@ -402,9 +410,12 @@ class ServiceManager:
                     symbols=settings.tastytrade_symbol_list,
                     depth_levels=settings.tastytrade_depth_cap,
                     enable_depth=getattr(settings, "tastytrade_enable_depth", False),
+                    greeks_symbols=settings.tastytrade_greeks_symbol_list,
+                    enable_greeks=settings.tastytrade_enable_greeks,
                 ),
                 on_trade=self._handle_trade_event,
                 on_depth=self._handle_depth_event,
+                on_greeks=self._handle_greeks_event,
                 auth_service=self.tastytrade_auth,
             )
             if not self.trin_history:
@@ -584,6 +595,33 @@ class ServiceManager:
             )
             self.uw_rest_poller.start()
             LOGGER.info("UW REST poller started")
+        elif name == "ivr":
+            if self._ivr_task and not self._ivr_task.done():
+                return
+            self._ensure_redis_clients()
+            self.ivr_service = IVRService(
+                config=IVRServiceSettings(
+                    option_trades_db=settings.data_path / "uw_messages.db",
+                ),
+                redis_client=self.redis_client,
+            )
+            self._ivr_task = asyncio.create_task(
+                self._run_ivr_loop(), name="ivr-service"
+            )
+            LOGGER.info("IVR service started")
+
+    async def _run_ivr_loop(self) -> None:
+        """Periodically aggregate IV history and compute IVR per symbol."""
+        while True:
+            try:
+                if self.ivr_service:
+                    rows = self.ivr_service.aggregate_daily_iv()
+                    if rows:
+                        results = self.ivr_service.compute_ivr_batch()
+                        LOGGER.info("IVR computed for %d symbols", len(results))
+            except Exception:
+                LOGGER.exception("Error in IVR computation loop")
+            await asyncio.sleep(900)  # 15 minutes
 
     async def stop_service(self, name: str) -> None:
         """Stop a running service and clean up the local reference."""
@@ -634,6 +672,15 @@ class ServiceManager:
             await self.uw_rest_poller.stop()
             self.uw_rest_poller = None
             LOGGER.info("UW REST poller stopped")
+        elif name == "ivr" and self._ivr_task:
+            self._ivr_task.cancel()
+            try:
+                await self._ivr_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._ivr_task = None
+            self.ivr_service = None
+            LOGGER.info("IVR service stopped")
 
     async def restart_service(self, name: str) -> None:
         """Convenience helper for the ``/control`` endpoint."""
@@ -663,6 +710,35 @@ class ServiceManager:
         if not self.rts:
             return
         await asyncio.to_thread(self._write_depth_timeseries, payload, source)
+
+    async def _handle_greeks_event(
+        self, payload: Dict[str, float]
+    ) -> None:
+        """Persist real-time Greeks to Redis timeseries."""
+        if not self.rts:
+            return
+        await asyncio.to_thread(self._write_greeks_timeseries, payload)
+
+    def _write_greeks_timeseries(self, payload: Dict[str, Any]) -> None:
+        """Write greeks samples to Redis timeseries per field."""
+        symbol = payload.get("symbol", "").upper() or "UNKNOWN"
+        timestamp_ms = _timestamp_ms(payload.get("timestamp"))
+        samples = []
+        for field in (
+            "delta", "gamma", "theta", "vega", "rho",
+            "implied_volatility", "underlying_price", "option_price",
+        ):
+            value = payload.get(field)
+            if value is None:
+                continue
+            samples.append((
+                f"ts:greeks:{field}:{symbol}",
+                timestamp_ms,
+                float(value),
+                {"symbol": symbol, "type": "greeks", "field": field},
+            ))
+        if self.rts and samples:
+            self.rts.multi_add(samples)
 
     def _write_trade_timeseries(self, payload: Dict[str, Any], source: str) -> None:
         """Write trade price/size samples and keep per-source counters."""

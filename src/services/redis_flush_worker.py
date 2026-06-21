@@ -919,6 +919,24 @@ class RedisFlushWorker:
                         )
                         """
                     )
+                    # Migrate tables created before IV/greeks columns existed.
+                    # CREATE TABLE IF NOT EXISTS is a no-op when the table exists,
+                    # so old schemas never pick up new columns without this.
+                    for _col, _typ in [
+                        ("implied_volatility", "DOUBLE"),
+                        ("delta", "DOUBLE"),
+                        ("gamma", "DOUBLE"),
+                        ("theta", "DOUBLE"),
+                        ("vega", "DOUBLE"),
+                        ("rho", "DOUBLE"),
+                        ("premium", "DOUBLE"),
+                        ("size", "BIGINT"),
+                        ("open_interest", "BIGINT"),
+                        ("underlying_price", "DOUBLE"),
+                    ]:
+                        conn.execute(
+                            f"ALTER TABLE option_trades ADD COLUMN IF NOT EXISTS {_col} {_typ}"
+                        )
                     conn.register("option_trade_flush", df)
                     conn.execute("INSERT INTO option_trades SELECT * FROM option_trade_flush")
                     conn.close()

@@ -103,6 +103,13 @@ class Settings(BaseSettings):
         "TASTYTRADE_TRIN_HISTORY_FLUSH_SECONDS",
         default=60,
     )
+    # TastyTrade Greeks streaming (real-time delta/gamma/theta/vega/rho/IV)
+    tastytrade_enable_greeks: bool = env_field(
+        "TASTYTRADE_ENABLE_GREEKS", default=False
+    )
+    tastytrade_greeks_symbols: str = env_field(
+        "TASTYTRADE_GREEKS_SYMBOLS", default=""
+    )
 
     # GEXBot poller
     gex_polling_enabled: bool = Field(
@@ -327,6 +334,15 @@ class Settings(BaseSettings):
     def tastytrade_depth_cap(self) -> int:
         """Return the enforced depth level limit; temporarily capped at 5."""
         return max(1, min(self.tastytrade_depth_levels, 5))
+
+    @property
+    def tastytrade_greeks_symbol_list(self) -> list[str]:
+        """Return Greeks subscription symbols (DXLink option symbols)."""
+        return [
+            symbol.strip()
+            for symbol in self.tastytrade_greeks_symbols.split(",")
+            if symbol.strip()
+        ]
 
     @property
     def gex_symbol_list(self) -> list[str]:
