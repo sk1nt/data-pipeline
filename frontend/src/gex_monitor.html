@@ -57,7 +57,7 @@ body.flash-red   { animation: flash-red   350ms ease-in-out; }
 
 /* Metrics grid */
 .metrics {
-  display: grid; grid-template-columns: 1fr 1fr;
+  display: grid; grid-template-columns: 1fr 1fr 1fr;
   gap: 1px; background: var(--border);
 }
 .metric {
@@ -67,7 +67,7 @@ body.flash-red   { animation: flash-red   350ms ease-in-out; }
 .metric.full-width { grid-column: 1 / -1; }
 .metric .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text2); }
 .metric .val {
-  font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums;
+  font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums;
   transition: color .15s;
 }
 .metric .val.pos { color: var(--green); }
@@ -99,6 +99,24 @@ body.flash-red   { animation: flash-red   350ms ease-in-out; }
 .alert-bar { height: 3px; background: transparent; transition: background .1s; }
 .alert-bar.green { background: var(--green); }
 .alert-bar.red { background: var(--red); }
+
+/* Directional risk warning banner */
+.dir-risk-banner {
+  display: none; padding: 6px 12px; font-size: 12px; font-weight: 600;
+  text-align: center; border-bottom: 1px solid rgba(255,255,255,.08);
+  transition: background .3s, opacity .3s;
+}
+.dir-risk-banner.show { display: block; }
+.dir-risk-banner.high {
+  background: rgba(248,81,73,.22); color: #ff6b6b;
+  animation: dirPulse 2s ease-in-out infinite;
+}
+.dir-risk-banner.moderate {
+  background: rgba(255,176,0,.15); color: #ffb000;
+}
+@keyframes dirPulse {
+  0%,100% { opacity: 1; } 50% { opacity: 0.7; }
+}
 
 /* Header buttons */
 .hdr-btn {
@@ -522,6 +540,11 @@ tr:hover { background: var(--bg3); }
 </div>
 
 <div class="alert-bar" id="alertBar"></div>
+
+<!-- Directional risk warning — suppress fade signals on heavy directional days -->
+<div class="dir-risk-banner" id="dirRiskBanner"></div>
+<!-- Day Direction Indicator -->
+<div class="day-direction" id="dayDirection" style="display:none;padding:4px 12px;font-size:11px;font-weight:600;text-align:center;border-bottom:1px solid var(--border)"></div>
 
 <!-- ===== MARKET MOVER BANNER ===== -->
 <div class="mover-banner" id="moverBanner">
@@ -1046,6 +1069,58 @@ function toggleCollapse(el, bodyId) {
     if (typeof ts === 'number') ts = new Date(ts * 1000).toLocaleTimeString('en-US', { timeZone: 'America/New_York' });
     else if (typeof ts === 'string') { try { ts = new Date(ts).toLocaleTimeString('en-US', { timeZone: 'America/New_York' }); } catch(e) {} }
     lastUpdate.textContent = 'Updated: ' + (ts || 'now');
+
+    // --- Directional risk assessment ---
+    // Heavy directional days: negative gamma (net_gex < 0) + large |net_gex| + DRR aligned
+    // On these days, fading is dangerous — moves tend to continue, not revert.
+    updateDirRiskBanner(data);
+  }
+
+  function updateDirRiskBanner(data) {
+    var banner = $('dirRiskBanner');
+    var netGex = data.net_gex;
+    var drr = data.delta_risk_reversal;
+    var spot = data.spot;
+    var zeroGamma = data.zero_gamma;
+
+    if (typeof netGex !== 'number') {
+      banner.className = 'dir-risk-banner';
+      return;
+    }
+
+    // Directional risk score:
+    // - Negative gamma (net_gex < 0) = dealers short gamma = moves amplify = directional
+    // - |net_gex| > 1B = large positioning = stronger effect
+    // - DRR aligned with gamma sign = confirms directional bias
+    // - Spot far from zero_gamma = trend already established
+    var absGex = Math.abs(netGex);
+    var isNegativeGamma = netGex < 0;
+    var gexMagnitude = Math.min(absGex / 2e9, 2.0);  // 0-2 scale, 2B = max
+    var distFromZero = 0;
+    if (typeof spot === 'number' && typeof zeroGamma === 'number' && zeroGamma > 0) {
+      distFromZero = Math.abs(spot - zeroGamma) / zeroGamma * 100;  // % from zero gamma
+    }
+    var drrAligned = (typeof drr === 'number') && (
+      (isNegativeGamma && drr < -0.5) || (!isNegativeGamma && drr > 0.5)
+    );
+
+    var riskScore = 0;
+    if (isNegativeGamma) riskScore += 40;
+    riskScore += gexMagnitude * 25;  // 0-50
+    if (distFromZero > 0.5) riskScore += 15;  // trend established
+    if (drrAligned) riskScore += 20;  // skew confirms
+
+    if (riskScore >= 70) {
+      banner.className = 'dir-risk-banner show high';
+      banner.innerHTML = '&#9888; HEAVY DIRECTIONAL DAY — gamma=' + (isNegativeGamma ? 'NEG' : 'POS') +
+        ' |GEX|=' + fmtBn(absGex) + ' | FADING is dangerous — moves likely to CONTINUE';
+    } else if (riskScore >= 45) {
+      banner.className = 'dir-risk-banner show moderate';
+      banner.innerHTML = '&#9888; Moderate directional risk — gamma=' + (isNegativeGamma ? 'NEG' : 'POS') +
+        ' |GEX|=' + fmtBn(absGex) + ' | Exercise caution on fade signals';
+    } else {
+      banner.className = 'dir-risk-banner';
+    }
   }
 
   // --- GEX WebSocket ---
@@ -1851,6 +1926,29 @@ function toggleCollapse(el, bodyId) {
   corrConnect();
   initTT();
 })();
+
+// Day direction update via WebSocket
+function updateDayDirection(msg) {
+  var el = document.getElementById("dayDirection");
+  if (!el || !msg.direction) return;
+  var colors = {up: "var(--green)", down: "var(--red)", neutral: "var(--yellow)"};
+  var labels = {up: "\u25B2 UP DAY", down: "\u25BC DOWN DAY", neutral: "\u25C6 NEUTRAL DAY"};
+  el.style.display = "block";
+  el.style.background = "var(--bg2)";
+  el.style.color = colors[msg.direction] || "var(--text)";
+  var txt = labels[msg.direction] || msg.direction.toUpperCase();
+  if (msg.gex_regime) txt += " | GEX: " + msg.gex_regime;
+  if (msg.pc_ratio) txt += " | P/C: " + msg.pc_ratio.toFixed(2);
+  if (msg.price_change_pct != null) txt += " | " + (msg.price_change_pct >= 0 ? "+" : "") + msg.price_change_pct + "%";
+  el.textContent = txt;
+  if (msg.direction === "up" || msg.direction === "down") {
+    var banner = document.getElementById("dirRiskBanner");
+    if (banner) {
+      banner.textContent = "Directional day -- fade signals suppressed";
+      banner.style.display = "block";
+    }
+  }
+}
 </script>
 </body>
 </html>

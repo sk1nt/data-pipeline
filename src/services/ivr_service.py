@@ -23,10 +23,17 @@ IVR_HIGH_THRESHOLD = 80.0
 IVR_LOW_THRESHOLD = 20.0
 
 
+try:
+    from ..config import settings as _settings
+    _default_db = Path(_settings.data_path) / "gex_data.db"
+except Exception:
+    _default_db = Path("data/gex_data.db")
+
+
 @dataclass
 class IVRServiceSettings:
-    db_path: Path = Path(settings.data_path / "gex_data.db")
-    option_trades_db: Path = Path(settings.data_path / "gex_data.db")
+    db_path: Path = _default_db
+    option_trades_db: Path = _default_db
     iv_history_table: str = "iv_history"
     redis_prefix: str = "ivr:"
     lookback_days: int = IVR_LOOKBACK_DAYS
