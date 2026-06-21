@@ -82,10 +82,17 @@ async def test_snapshot_timestamps_increment():
     pairs = [(rec[0], rec[1]) for rec in ts.samples if rec[0].startswith("ts:gex:")]
     # Filter to 'net_gex' metric as a sample per symbol
     net_gex_pairs = [p for p in pairs if ":net_gex:" in p[0]]
-    # There should be multiple entries and timestamps should strictly increase
     assert len(net_gex_pairs) >= 2
-    timestamps = [p[1] for p in net_gex_pairs]
-    assert all(timestamps[i] < timestamps[i + 1] for i in range(len(timestamps) - 1))
+    # Each symbol's timestamps must be strictly increasing (the per-symbol guarantee).
+    # Global ordering across symbols is not guaranteed because symbols are fetched concurrently.
+    by_symbol: dict = {}
+    for key, ts_ms in net_gex_pairs:
+        sym = key.split(":")[3]  # "ts:gex:net_gex:SPX" → "SPX"
+        by_symbol.setdefault(sym, []).append(ts_ms)
+    for sym, tss in by_symbol.items():
+        assert all(tss[i] < tss[i + 1] for i in range(len(tss) - 1)), (
+            f"timestamps not strictly increasing for {sym}: {tss}"
+        )
 
 
 @pytest.mark.asyncio

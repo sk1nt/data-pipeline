@@ -744,8 +744,8 @@ class ServiceManager:
         """Write trade price/size samples and keep per-source counters."""
         symbol = payload.get("symbol", "").upper() or "UNKNOWN"
         timestamp_ms = _timestamp_ms(payload.get("timestamp"))
-        price = float(payload.get("price", 0.0))
-        size = float(payload.get("size", 0.0))
+        price = float(payload.get("price") or payload.get("last") or 0.0)
+        size = float(payload.get("size") or payload.get("volume") or 0.0)
         normalized_source = source.lower()
         samples = [
             (

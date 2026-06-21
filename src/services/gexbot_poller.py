@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import date, datetime, timezone, timedelta
@@ -124,11 +125,11 @@ class GEXBotPoller:
                 # Only poll configured symbols; intersect with supported list when available.
                 effective_symbols = self._effective_symbols()
                 # For NQ poller (base symbols include NQ_NDX), prefer a very fast RTH poll of the
-                # key symbols to reduce load: only ['SPX','NQ_NDX','ES_SPX'] during RTH; otherwise poll all.
+                # key symbols to reduce load: only SPX and NQ_NDX (in priority order) during RTH.
                 if "NQ_NDX" in self._base_symbols:
-                    fast_set = {"SPX", "NQ_NDX", "ES_SPX"}
+                    fast_list = ["SPX", "NQ_NDX"]  # SPX first for priority ordering
                     symbols = (
-                        sorted(fast_set & set(effective_symbols))
+                        [s for s in fast_list if s in set(effective_symbols)]
                         if self._is_rth_now()
                         else effective_symbols
                     )
@@ -402,12 +403,17 @@ class GEXBotPoller:
         timestamp = snapshot.get("timestamp") or datetime.utcnow().isoformat()
         timestamp_ms = _timestamp_ms(timestamp)
         symbol = snapshot.get("symbol", "UNKNOWN").upper()
-        # Ensure timestamps are strictly increasing for the symbol to avoid TS.ADD overwrites
-        with self._snapshot_lock:
-            last_ms = self._last_snapshot_ms_by_symbol.get(symbol)
-            if last_ms is not None and timestamp_ms <= last_ms:
-                timestamp_ms = last_ms + 1
-            self._last_snapshot_ms_by_symbol[symbol] = timestamp_ms
+        # Reject live data that is stale: within 1-hour recency window but older than 5 min.
+        # Historical snapshots (> 1 hour old) bypass this check so backfills still work.
+        now_ms = int(time.time() * 1000)
+        age_ms = now_ms - timestamp_ms
+        _LIVE_WINDOW_MS = 60 * 60 * 1000   # 1 hour
+        _FRESHNESS_CUTOFF_MS = 5 * 60 * 1000  # 5 minutes
+        if 0 < age_ms < _LIVE_WINDOW_MS and age_ms > _FRESHNESS_CUTOFF_MS:
+            LOGGER.debug(
+                "Skipping stale live snapshot for %s (age=%.1fmin)", symbol, age_ms / 60_000
+            )
+            return
         metrics = {
             "spot": snapshot.get("spot"),
             "zero_gamma": snapshot.get("zero_gamma"),
@@ -421,57 +427,71 @@ class GEXBotPoller:
             "major_neg_oi": snapshot.get("major_neg_oi"),
             "delta_risk_reversal": snapshot.get("delta_risk_reversal"),
         }
-        samples = []
-        for metric_name, value in metrics.items():
-            if value is None:
-                continue
-            try:
-                numeric = float(value)
-            except (TypeError, ValueError):
-                continue
-            samples.append(
-                (
-                    f"ts:gex:{metric_name}:{symbol}",
-                    timestamp_ms,
-                    numeric,
-                    {"symbol": symbol, "type": "gex", "field": metric_name},
-                )
-            )
-
         maxchange = snapshot.get("maxchange") or {}
-        if isinstance(maxchange, dict):
-            for window, data in maxchange.items():
-                if isinstance(data, (list, tuple)) and len(data) == 2:
-                    strike, delta = data
-                    try:
-                        samples.append(
-                            (
-                                f"ts:gex:maxchange:{symbol}:{window}:delta",
-                                timestamp_ms,
-                                float(delta or 0.0),
-                                {
-                                    "symbol": symbol,
-                                    "type": "gex",
-                                    "field": f"maxchange_{window}_delta",
-                                },
+        # Hold the snapshot lock while assigning the timestamp AND writing to ts_client so
+        # that insertion order into ts_client.samples always matches the timestamp order.
+        # This prevents a race where the higher-timestamp thread writes before the lower one.
+        with self._snapshot_lock:
+            last_ms = self._last_snapshot_ms_by_symbol.get(symbol)
+            if last_ms is not None:
+                if timestamp_ms < last_ms:
+                    LOGGER.debug(
+                        "Skipping out-of-order snapshot for %s (ts=%d < last=%d)",
+                        symbol, timestamp_ms, last_ms,
+                    )
+                    return
+                if timestamp_ms == last_ms:
+                    timestamp_ms = last_ms + 1
+            self._last_snapshot_ms_by_symbol[symbol] = timestamp_ms
+            samples = []
+            for metric_name, value in metrics.items():
+                if value is None:
+                    continue
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                samples.append(
+                    (
+                        f"ts:gex:{metric_name}:{symbol}",
+                        timestamp_ms,
+                        numeric,
+                        {"symbol": symbol, "type": "gex", "field": metric_name},
+                    )
+                )
+            if isinstance(maxchange, dict):
+                for window, data in maxchange.items():
+                    if isinstance(data, (list, tuple)) and len(data) == 2:
+                        strike, delta = data
+                        try:
+                            samples.append(
+                                (
+                                    f"ts:gex:maxchange:{symbol}:{window}:delta",
+                                    timestamp_ms,
+                                    float(delta or 0.0),
+                                    {
+                                        "symbol": symbol,
+                                        "type": "gex",
+                                        "field": f"maxchange_{window}_delta",
+                                    },
+                                )
                             )
-                        )
-                        samples.append(
-                            (
-                                f"ts:gex:maxchange:{symbol}:{window}:strike",
-                                timestamp_ms,
-                                float(strike or 0.0),
-                                {
-                                    "symbol": symbol,
-                                    "type": "gex",
-                                    "field": f"maxchange_{window}_strike",
-                                },
+                            samples.append(
+                                (
+                                    f"ts:gex:maxchange:{symbol}:{window}:strike",
+                                    timestamp_ms,
+                                    float(strike or 0.0),
+                                    {
+                                        "symbol": symbol,
+                                        "type": "gex",
+                                        "field": f"maxchange_{window}_strike",
+                                    },
+                                )
                             )
-                        )
-                    except (TypeError, ValueError):
-                        continue
-        if samples:
-            ts_client.multi_add(samples)
+                        except (TypeError, ValueError):
+                            continue
+            if samples:
+                ts_client.multi_add(samples)
         self._store_snapshot_blob(snapshot)
         self.snapshot_count += 1
         self.last_snapshot_ts = (
