@@ -871,6 +871,16 @@ class RedisFlushWorker:
                             "volume": data.get("data", {}).get("volume"),
                             "price": data.get("data", {}).get("price"),
                             "tags": json.dumps(data.get("data", {}).get("tags", [])),
+                            "implied_volatility": data.get("data", {}).get("implied_volatility"),
+                            "delta": data.get("data", {}).get("delta"),
+                            "gamma": data.get("data", {}).get("gamma"),
+                            "theta": data.get("data", {}).get("theta"),
+                            "vega": data.get("data", {}).get("vega"),
+                            "rho": data.get("data", {}).get("rho"),
+                            "premium": data.get("data", {}).get("premium"),
+                            "size": data.get("data", {}).get("size"),
+                            "open_interest": data.get("data", {}).get("open_interest"),
+                            "underlying_price": data.get("data", {}).get("underlying_price"),
                         }
                         option_trade_records.append(record)
                     except Exception as e:
@@ -895,7 +905,17 @@ class RedisFlushWorker:
                             cost_basis DOUBLE,
                             volume BIGINT,
                             price DOUBLE,
-                            tags VARCHAR
+                            tags VARCHAR,
+                            implied_volatility DOUBLE,
+                            delta DOUBLE,
+                            gamma DOUBLE,
+                            theta DOUBLE,
+                            vega DOUBLE,
+                            rho DOUBLE,
+                            premium DOUBLE,
+                            size BIGINT,
+                            open_interest BIGINT,
+                            underlying_price DOUBLE
                         )
                         """
                     )

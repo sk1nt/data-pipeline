@@ -292,3 +292,115 @@ class MarketAggAlertService:
             )
         else:
             return f"Unknown alert type: {alert_type}"
+
+
+class DayDirectionDetector:
+    """Detect up/down/neutral market day from GEX regime + put/call ratio + price action.
+
+    Combines three signals:
+    1. GEX regime: positive gamma = pinning/mean-reversion (neutral day),
+       negative gamma = directional/expansion (trending day)
+    2. Put/call ratio: < 0.8 = bullish bias, > 1.0 = bearish bias,
+       0.8-1.0 = neutral
+    3. Price delta: session open vs current price (if available)
+
+    Classification:
+    - UP DAY: negative GEX + P/C < 0.8 + price rising
+    - DOWN DAY: negative GEX + P/C > 1.0 + price falling
+    - NEUTRAL DAY: positive GEX OR (0.8 <= P/C <= 1.0)
+    """
+
+    def __init__(self, redis_client=None):
+        self.redis = redis_client
+        self._session_open: Optional[float] = None
+        self._current_price: Optional[float] = None
+        self._gex_regime: Optional[str] = None
+        self._pc_ratio: Optional[float] = None
+        self._day_classification: Optional[str] = None
+
+    def update_gex_regime(self, net_gex: float, gamma_flip: float, spot: float) -> None:
+        """Update GEX regime from latest snapshot."""
+        self._current_price = spot
+        if net_gex > 0:
+            self._gex_regime = "positive"
+        else:
+            self._gex_regime = "negative"
+        if self._session_open is None:
+            self._session_open = spot
+        self._reclassify()
+
+    def update_pc_ratio(self, ratio: float) -> None:
+        """Update put/call ratio from market agg data."""
+        self._pc_ratio = ratio
+        self._reclassify()
+
+    def _reclassify(self) -> None:
+        """Recompute day classification from available signals."""
+        if self._gex_regime is None or self._pc_ratio is None:
+            return
+
+        price_direction = None
+        if self._session_open and self._current_price:
+            change_pct = (self._current_price - self._session_open) / self._session_open
+            if change_pct > 0.003:  # > 0.3% up
+                price_direction = "up"
+            elif change_pct < -0.003:  # > 0.3% down
+                price_direction = "down"
+
+        # Positive GEX = dealers long gamma = pinning = neutral day
+        if self._gex_regime == "positive":
+            self._day_classification = "neutral"
+        # Negative GEX = directional day
+        elif self._gex_regime == "negative":
+            if self._pc_ratio < 0.8 and (price_direction in (None, "up")):
+                self._day_classification = "up"
+            elif self._pc_ratio > 1.0 and (price_direction in (None, "down")):
+                self._day_classification = "down"
+            elif price_direction == "up":
+                self._day_classification = "up"
+            elif price_direction == "down":
+                self._day_classification = "down"
+            else:
+                self._day_classification = "neutral"
+        else:
+            self._day_classification = "neutral"
+
+        # Cache to Redis
+        if self.redis:
+            import json
+            self.redis.client.setex(
+                "market:day_direction",
+                300,  # 5 min TTL
+                json.dumps({
+                    "direction": self._day_classification,
+                    "gex_regime": self._gex_regime,
+                    "pc_ratio": self._pc_ratio,
+                    "price_change_pct": (
+                        round((self._current_price - self._session_open) / self._session_open * 100, 2)
+                        if self._session_open and self._current_price else None
+                    ),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }),
+            )
+
+    @property
+    def direction(self) -> Optional[str]:
+        return self._day_classification
+
+    @property
+    def is_directional(self) -> bool:
+        """True if up or down day (negative gamma, trending)."""
+        return self._day_classification in ("up", "down")
+
+    @property
+    def is_neutral(self) -> bool:
+        """True if neutral day (positive gamma, pinning)."""
+        return self._day_classification == "neutral"
+
+    def should_suppress_fade(self) -> bool:
+        """On directional days, fade signals should be suppressed.
+
+        ALPHA_7/8 (EMA bounce fade models) underperform on heavy
+        directional days where moves continue rather than revert.
+        """
+        return self.is_directional

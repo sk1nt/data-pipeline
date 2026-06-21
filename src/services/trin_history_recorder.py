@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import duckdb
-import pandas as pd
+import polars as pl
 
 from ..config import settings
 
@@ -173,13 +173,15 @@ class TrinHistoryRecorder:
                 insert_rows,
             )
 
-            df = pd.DataFrame(records)
-            if df.empty:
+            df = pl.DataFrame(records)
+            if df.is_empty():
                 return 0
 
-            df["day"] = pd.to_datetime(df["day"])
-            df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"])
-            for (symbol, day), group in df.groupby(["symbol", "day"], sort=True):
+            df = df.with_columns([
+                pl.col("day").cast(pl.Date),
+                pl.col("timestamp_utc").cast(pl.Datetime("us")),
+            ])
+            for (symbol, day), group in df.group_by(["symbol", "day"], maintain_order=True):
                 safe_symbol = str(symbol).replace("/", "_")
                 out_dir = self.settings.parquet_dir / safe_symbol
                 out_dir.mkdir(parents=True, exist_ok=True)
@@ -189,7 +191,7 @@ class TrinHistoryRecorder:
         finally:
             conn.close()
 
-    def _write_day_parquet(self, out_path: Path, group: pd.DataFrame) -> None:
+    def _write_day_parquet(self, out_path: Path, group: pl.DataFrame) -> None:
         columns = [
             "event_id",
             "timestamp_ms",
@@ -201,15 +203,15 @@ class TrinHistoryRecorder:
             "source",
             "payload_json",
         ]
-        group = group[columns].sort_values(["timestamp_ms", "event_id"])
+        group = group.select(columns).sort(["timestamp_ms", "event_id"])
         if out_path.exists():
-            existing = pd.read_parquet(out_path)
-            combined = pd.concat([existing, group], ignore_index=True)
-            combined = combined.drop_duplicates(subset=["event_id"], keep="last")
-            combined = combined.sort_values(["timestamp_ms", "event_id"])
+            existing = pl.read_parquet(out_path)
+            combined = pl.concat([existing, group], how="vertical_relaxed")
+            combined = combined.unique(subset=["event_id"], keep="last")
+            combined = combined.sort(["timestamp_ms", "event_id"])
         else:
             combined = group
-        combined.to_parquet(out_path, index=False, compression="zstd")
+        combined.write_parquet(out_path, compression="zstd")
 
     @staticmethod
     def _timestamp_ms(value: Any) -> int:

@@ -2,12 +2,23 @@ from __future__ import annotations
 
 from typing import Any
 
-from config.settings import config
-from services.tastytrade_auth_service import (
-    TastytradeAuthError,
-    TastytradeTransientAuthError,
-    get_tastytrade_auth_service,
-)
+try:
+    from config.settings import config
+except ImportError:
+    from src.config.settings import config
+
+try:
+    from services.tastytrade_auth_service import (
+        TastytradeAuthError,
+        TastytradeTransientAuthError,
+        get_tastytrade_auth_service,
+    )
+except ImportError:
+    from src.services.tastytrade_auth_service import (
+        TastytradeAuthError,
+        TastytradeTransientAuthError,
+        get_tastytrade_auth_service,
+    )
 
 
 class TastyTradeClient:
@@ -95,3 +106,19 @@ def get_with_retry(
 
 
 tastytrade_client = TastyTradeClient()
+
+
+def select_account(accounts, target_account=None):
+    """Select the active Tastytrade account from a list.
+
+    Shared by FuturesOrderService and order_cancellation.
+    """
+    if not accounts:
+        return None
+    target = target_account or getattr(config, "tastytrade_account", None)
+    if target:
+        for acc in accounts:
+            acc_number = getattr(acc, "account_number", None) or getattr(acc, "number", None)
+            if acc_number == target:
+                return acc
+    return accounts[0]

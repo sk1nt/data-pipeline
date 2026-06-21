@@ -8,7 +8,6 @@ import sys
 
 import httpx
 import re
-from decimal import Decimal
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
@@ -17,7 +16,6 @@ import hashlib
 import time
 from tastytrade.order import (
     NewOrder,
-    NewComplexOrder,
     Leg,
     OrderType,
     OrderTimeInForce,
@@ -54,6 +52,15 @@ except ImportError:  # pragma: no cover - backend imports may not have src/ on p
         TastytradeTransientAuthError,
     )
 
+
+# Shared pure helper for atomic OTOCO/OTO bracket complex orders (no heavy deps).
+try:
+    from services.complex_order_builder import build_bracket_complex_order
+except ImportError:  # pragma: no cover - src/ on path is ensured by the auth import above
+    src_path = Path(__file__).resolve().parents[2] / "src"
+    if str(src_path) not in sys.path:
+        sys.path.insert(0, str(src_path))
+    from services.complex_order_builder import build_bracket_complex_order
 
 @dataclass
 class AccountSummary:
@@ -1015,83 +1022,6 @@ class TastyTradeClient:
             return exp
         return datetime.now(timezone.utc) + timedelta(minutes=20)
 
-    def _extract_futures_product(self, symbol: str) -> str:
-        """Extract product code from futures symbol (e.g., 'NQH6' -> 'NQ', 'MNQH6' -> 'MNQ')."""
-        # Known futures product codes (order matters - check longer ones first)
-        FUTURES_PRODUCTS = ['MNQ', 'MES', 'MYM', 'M2K', 'NQ', 'ES', 'YM', 'RTY']
-        symbol = symbol.lstrip('/').upper()
-        for prod in FUTURES_PRODUCTS:
-            if symbol.startswith(prod):
-                return prod
-        # Fallback: try regex (letters before month code, but be careful with MNQ/NQ ambiguity)
-        import re
-        # Month codes that are NOT commonly part of product names
-        match = re.match(r'^([A-Z]{2,3})([FGHJKMNUVXZ])(\d{1,2})$', symbol)
-        if match:
-            return match.group(1)
-        return symbol[:2] if len(symbol) >= 2 else symbol
-
-    def _get_conflicting_exit_orders(self, session, account, symbol: str, entry_action) -> list:
-        """Find existing exit orders on the same symbol that would conflict with a new entry.
-        
-        TastyTrade does not allow simultaneous buy and sell orders on the same symbol.
-        This method identifies orders that need to be cancelled before placing a new entry,
-        then restored afterward.
-        """
-        conflicting = []
-        try:
-            live_orders = account.get_live_orders(session)
-            LOGGER.debug("Checking %d live orders for conflicts with %s (entry=%s)", 
-                        len(live_orders), symbol, entry_action)
-            
-            # Extract the product code from our symbol
-            our_product = self._extract_futures_product(symbol)
-            
-            for order in live_orders:
-                # Check if this order is on the same underlying symbol
-                underlying = getattr(order, 'underlying_symbol', '')
-                if not underlying:
-                    # Try to get from legs
-                    legs = getattr(order, 'legs', [])
-                    if legs:
-                        underlying = getattr(legs[0], 'symbol', '')
-                
-                # Normalize for comparison (strip leading /)
-                order_symbol = underlying.lstrip('/') if underlying else ''
-                
-                # Extract product code from order symbol
-                order_product = self._extract_futures_product(order_symbol)
-                
-                LOGGER.debug("  Order %s: symbol=%s, product=%s, our_product=%s", 
-                            getattr(order, 'id', '?'), order_symbol, order_product, our_product)
-                
-                # Match if same product (NQ == NQ, MNQ == MNQ)
-                if order_product == our_product:
-                    # Check if this is an exit order (opposite side of our entry)
-                    order_status = getattr(order, 'status', None)
-                    status_val = str(order_status.value).lower() if order_status else ''
-                    LOGGER.debug("    Status: %s", status_val)
-                    
-                    if status_val not in ('filled', 'cancelled', 'rejected', 'expired'):
-                        legs = getattr(order, 'legs', [])
-                        if legs:
-                            leg_action = getattr(legs[0], 'action', None)
-                            LOGGER.debug("    Leg action: %s (entry_action=%s)", leg_action, entry_action)
-                            
-                            # If we're opening with BUY_TO_OPEN, conflicts are SELL/SELL_TO_CLOSE
-                            # If we're opening with SELL_TO_OPEN, conflicts are BUY/BUY_TO_CLOSE
-                            if entry_action in (OrderAction.BUY_TO_OPEN, OrderAction.BUY):
-                                if leg_action in (OrderAction.SELL, OrderAction.SELL_TO_CLOSE, OrderAction.SELL_TO_OPEN):
-                                    LOGGER.debug("    -> CONFLICT (BUY entry vs SELL order)")
-                                    conflicting.append(order)
-                            elif entry_action in (OrderAction.SELL_TO_OPEN, OrderAction.SELL):
-                                if leg_action in (OrderAction.BUY, OrderAction.BUY_TO_CLOSE, OrderAction.BUY_TO_OPEN):
-                                    LOGGER.debug("    -> CONFLICT (SELL entry vs BUY order)")
-                                    conflicting.append(order)
-        except Exception as e:
-            LOGGER.warning("Error getting conflicting orders: %s", e)
-        return conflicting
-
     def place_market_order_with_tp(
         self,
         symbol: str,
@@ -1104,17 +1034,15 @@ class TastyTradeClient:
         market_price: Optional[float] = None,
     ) -> str:
         """Place market entry order with TP exit (and optional SL via OTOCO bracket).
-        
-        If sl_ticks > 0, uses OTOCO bracket order (entry + TP limit + SL stop).
-        If sl_ticks == 0, places entry + separate TP limit order.
-        
-        TastyTrade does not allow simultaneous buy and sell orders on the same symbol.
-        If there are existing exit orders (e.g., from a previous entry), they are
-        temporarily cancelled, the new entry + TP are placed, then the old exits
-        are restored. This allows scaling into a position while preserving all TP levels.
+
+        Submits an atomic complex order so the entry and exit(s) cannot desync:
+        - sl_ticks > 0 -> OTOCO bracket (entry + TP limit + SL stop)
+        - sl_ticks = 0 -> OTO bracket   (entry + TP limit only)
+
+        The TP level is derived from the pre-trade reference price; the atomic
+        bracket avoids the former cancel/poll/restore dance (no 5s fill poll,
+        no restore failure, no buy/sell race) used for the TP-only case.
         """
-        import time
-        
         with self._lock:
             session = self._ensure_session()
             account = self._ensure_active_account(session)
@@ -1290,270 +1218,71 @@ class TastyTradeClient:
                 quantity=quantity,
             )
 
-            # If SL is specified, use OTOCO bracket order
-            if sl_ticks > 0 and sl_price is not None and tp_price is not None:
-                LOGGER.info("Using OTOCO bracket order with TP=%s, SL=%s", tp_price, sl_price)
-                
-                # Entry order (trigger)
-                trigger_order = NewOrder(
+            # Atomic bracket order via the shared helper:
+            #   sl_ticks > 0 -> OTOCO (entry triggers TP-limit OR SL-stop)
+            #   sl_ticks = 0 -> OTO    (entry triggers TP-limit only)
+            # Replaces the former cancel/restore dance for the TP-only case
+            # (no 5s fill poll, no restore failure, no buy/sell race condition).
+            if tp_price is None:
+                # No reference price to compute a TP - plain market entry, no exit leg.
+                entry_order = NewOrder(
                     time_in_force=OrderTimeInForce.DAY,
                     order_type=OrderType.MARKET,
                     legs=[entry_leg],
                 )
-                
-                # TP order (limit) - price sign determines credit/debit
-                if tp_action == OrderAction.BUY_TO_CLOSE:
-                    tp_order_price = Decimal(str(-abs(tp_price)))  # Debit for buying
-                else:
-                    tp_order_price = Decimal(str(abs(tp_price)))   # Credit for selling
-                
-                tp_order = NewOrder(
-                    time_in_force=OrderTimeInForce.GTC,
-                    order_type=OrderType.LIMIT,
-                    price=tp_order_price,
-                    legs=[closing_leg],
-                )
-                
-                # SL order (stop)
-                sl_order = NewOrder(
-                    time_in_force=OrderTimeInForce.GTC,
-                    order_type=OrderType.STOP,
-                    stop_trigger=Decimal(str(sl_price)),
-                    legs=[closing_leg],
-                )
-                
-                # Create OTOCO complex order
-                otoco = NewComplexOrder(
-                    trigger_order=trigger_order,
-                    orders=[tp_order, sl_order],
-                )
-                
-                LOGGER.info("Sending OTOCO bracket (dry-run=%s): trigger=%s, TP=%s, SL=%s", 
-                           eff_dry, trigger_order, tp_price, sl_price)
-                
+                LOGGER.info("Sending market entry, no TP price (dry-run=%s)", eff_dry)
                 try:
-                    resp = account.place_complex_order(session, otoco, dry_run=eff_dry)
-                    order_id = getattr(resp.complex_order, 'id', None) if resp.complex_order else None
-                    LOGGER.info("OTOCO bracket placed, complex_order_id=%s", order_id)
+                    resp = account.place_order(session, entry_order, dry_run=eff_dry)
+                    order_id = self._extract_order_id(resp)
+                    return (
+                        f"{'[DRY-RUN] ' if eff_dry else ''}Placed {action.lower()} entry "
+                        f"{quantity} {symbol} @ market (ID: {order_id or 'n/a'}) - TP skipped (no price data)"
+                    )
+                except Exception as exc:
+                    msg = str(exc)
+                    LOGGER.warning("Market entry failed: %s", msg)
+                    self._raise_on_auth_error(exc)
+                    return f"Market entry order failed: {msg}"
+
+            sl_price_arg = sl_price if (sl_ticks > 0 and sl_price is not None) else None
+            bracket = build_bracket_complex_order(
+                entry_leg=entry_leg,
+                closing_leg=closing_leg,
+                tp_price=tp_price,
+                tp_action=tp_action,
+                sl_price=sl_price_arg,
+            )
+            order_kind = "OTOCO" if sl_price_arg is not None else "OTO"
+            LOGGER.info(
+                "Sending %s bracket (dry-run=%s): trigger=market %s, TP=%s%s",
+                order_kind,
+                eff_dry,
+                action,
+                tp_price,
+                f", SL={sl_price}" if sl_price_arg is not None else "",
+            )
+            try:
+                resp = account.place_complex_order(session, bracket, dry_run=eff_dry)
+                order_id = (
+                    getattr(resp.complex_order, "id", None) if resp.complex_order else None
+                )
+                LOGGER.info("%s bracket placed, complex_order_id=%s", order_kind, order_id)
+                if sl_price_arg is not None:
                     return (
                         f"{'[DRY-RUN] ' if eff_dry else ''}OTOCO bracket placed: "
                         f"Market {action} {quantity} {symbol} + TP @ {tp_price:.2f} + SL @ {sl_price:.2f} "
                         f"(ID: {order_id or 'n/a'})"
                     )
-                except Exception as exc:
-                    msg = str(exc)
-                    LOGGER.warning("OTOCO bracket failed: %s", msg)
-                    self._raise_on_auth_error(exc)
-                    return f"OTOCO bracket order failed: {msg}"
-
-            # No SL - use original cancel/restore pattern for TP only
-            entry_order = NewOrder(
-                time_in_force=OrderTimeInForce.DAY,
-                order_type=OrderType.MARKET,
-                legs=[entry_leg],
-            )
-
-            # Step 1: Cancel any conflicting exit orders (TastyTrade doesn't allow buy+sell on same symbol)
-            cancelled_orders_info = []
-            conflicting = self._get_conflicting_exit_orders(session, account, symbol, entry_action)
-            if conflicting:
-                LOGGER.info("Found %d conflicting exit orders to cancel temporarily", len(conflicting))
-                for order in conflicting:
-                    order_id = getattr(order, 'id', None)
-                    if not order_id:
-                        continue
-                    try:
-                        # Save order info for restoration
-                        legs = getattr(order, 'legs', [])
-                        order_info = {
-                            'id': order_id,
-                            'price': getattr(order, 'price', None),
-                            'order_type': getattr(order, 'order_type', OrderType.LIMIT),
-                            'time_in_force': getattr(order, 'time_in_force', OrderTimeInForce.GTC),
-                            'legs': legs,
-                        }
-                        cancelled_orders_info.append(order_info)
-                        
-                        if not eff_dry:
-                            account.delete_order(session, int(order_id))
-                            LOGGER.info("Cancelled conflicting order %s (price=%s)", order_id, order_info['price'])
-                    except Exception as e:
-                        LOGGER.warning("Failed to cancel order %s: %s", order_id, e)
-
-            # Step 2: Place the entry order (with retry for conflicting-order race)
-            LOGGER.info("Sending market entry (dry-run=%s): %s", eff_dry, entry_order)
-            market_order_id = None
-            max_entry_retries = 3
-            for entry_attempt in range(1, max_entry_retries + 1):
-                try:
-                    placed_entry = account.place_order(session, entry_order, dry_run=eff_dry)
-                    market_order_id = self._extract_order_id(placed_entry)
-                    if market_order_id is None:
-                        LOGGER.warning(
-                            "Market entry returned no ID (dry_run=%s): %s",
-                            eff_dry,
-                            repr(placed_entry),
-                        )
-                        # Restore cancelled orders before returning
-                        self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
-                        return "Market entry submitted but no ID returned (check logs)."
-                    break  # success — exit retry loop
-                except Exception as exc:
-                    msg = str(exc)
-                    if "illegal_buy_and_sell_on_same_symbol" in msg and entry_attempt < max_entry_retries:
-                        LOGGER.warning(
-                            "Market entry attempt %d/%d hit buy/sell conflict, retrying in 1s: %s",
-                            entry_attempt, max_entry_retries, msg,
-                        )
-                        time.sleep(1)
-                        continue
-                    LOGGER.warning("Market entry failed: %s", msg)
-                    # Restore cancelled orders before raising
-                    self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
-                    self._raise_on_auth_error(exc)
-                    raise
-
-            # Step 3: Wait for market order to fill and get actual fill price
-            actual_fill_price = None
-            if not eff_dry:
-                max_wait_seconds = 5
-                poll_interval = 0.3
-                filled = False
-                for _ in range(int(max_wait_seconds / poll_interval)):
-                    try:
-                        # Use SDK's get_order to get a properly typed PlacedOrder object
-                        placed_order = account.get_order(session, int(market_order_id))
-                        status = getattr(placed_order, 'status', None)
-                        status_str = status.value if hasattr(status, 'value') else str(status) if status else ""
-                        
-                        if status_str.lower() == "filled":
-                            filled = True
-                            # Extract fill price from legs using typed SDK objects
-                            legs = getattr(placed_order, 'legs', []) or []
-                            for leg in legs:
-                                fills = getattr(leg, 'fills', None) or []
-                                for fill in fills:
-                                    fp = getattr(fill, 'fill_price', None)
-                                    if fp is not None:
-                                        actual_fill_price = float(fp)
-                                        LOGGER.debug("Found fill_price from SDK FillInfo: %s", actual_fill_price)
-                                        break
-                                if actual_fill_price:
-                                    break
-                            
-                            LOGGER.info("Market entry order %s filled at %s", market_order_id, actual_fill_price)
-                            break
-                        elif status_str.lower() in ("rejected", "cancelled", "expired"):
-                            LOGGER.warning("Market entry order %s status: %s", market_order_id, status_str)
-                            # Restore cancelled orders
-                            self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
-                            return f"Market entry order {status_str} - exit orders restored"
-                    except Exception as e:
-                        LOGGER.debug("Error polling order status: %s", e)
-                    time.sleep(poll_interval)
-                
-                if not filled:
-                    LOGGER.warning("Market order %s not confirmed filled after %ss, proceeding anyway", 
-                                  market_order_id, max_wait_seconds)
-
-            # Step 4: Recalculate TP price based on actual fill price (if available)
-            if actual_fill_price:
-                # Recalculate TP based on actual fill, not quote price
-                if action.upper() == "BUY":  # Long: TP above fill
-                    tp_price = actual_fill_price + (tp_ticks * tick_size)
-                else:  # Short: TP below fill
-                    tp_price = actual_fill_price - (tp_ticks * tick_size)
-                
-                # Round to tick
-                def _round_to_tick_local(price: float, tick: float, direction: str) -> float:
-                    return round_to_tick(price, tick, direction)
-                
-                round_dir = "up" if action.upper() == "BUY" else "down"
-                tp_price = _round_to_tick_local(tp_price, tick_size, round_dir)
-                LOGGER.info("Recalculated TP based on fill price %s: new TP = %s", actual_fill_price, tp_price)
-
-            # Step 5: Place the new TP order (if we have a TP price)
-            if tp_price is None:
-                # No quote and no fill price — can't compute TP, just return entry result
-                LOGGER.warning("No TP price available (no quote or fill price), skipping TP order")
-                restored_count = self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
                 return (
-                    f"[{'DRY-RUN' if eff_dry else 'LIVE'}] Placed {action.lower()} entry {quantity} {symbol} @ market "
-                    f"(ID: {market_order_id}) — TP skipped (no price data)"
-                    + (f". Restored {restored_count} exit orders." if restored_count > 0 else "")
+                    f"{'[DRY-RUN] ' if eff_dry else ''}OTO placed: "
+                    f"Market {action} {quantity} {symbol} + TP @ {tp_price:.2f} "
+                    f"(ID: {order_id or 'n/a'})"
                 )
-
-            # TastyTrade price sign determines price_effect:
-            # - Negative price = Debit (paying money, used for BUY orders)
-            # - Positive price = Credit (receiving money, used for SELL orders)
-            tp_leg = Leg(
-                instrument_type=inst_type,
-                symbol=leg_symbol,
-                action=tp_action,
-                quantity=quantity,
-            )
-            # For BUY_TO_CLOSE, we pay money (debit) -> negative price
-            # For SELL_TO_CLOSE, we receive money (credit) -> positive price
-            if tp_action == OrderAction.BUY_TO_CLOSE:
-                order_price = Decimal(str(-abs(tp_price)))  # Negative for debit
-            else:
-                order_price = Decimal(str(abs(tp_price)))   # Positive for credit
-            
-            tp_order = NewOrder(
-                time_in_force=OrderTimeInForce.GTC,
-                order_type=OrderType.LIMIT,
-                price=order_price,
-                legs=[tp_leg],
-            )
-
-            LOGGER.info("Sending TP limit (dry-run=%s): %s @ %s (order_price=%s)", eff_dry, tp_order, tp_price, order_price)
-            tp_order_id = None
-            try:
-                placed_tp = account.place_order(session, tp_order, dry_run=eff_dry)
-                tp_order_id = self._extract_order_id(placed_tp)
             except Exception as exc:
                 msg = str(exc)
-                LOGGER.warning("TP order failed (entry_id=%s): %s", market_order_id, msg)
-                # Still restore cancelled orders
-                self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
-                return (
-                    f"[{'DRY-RUN' if eff_dry else 'LIVE'}] Placed {action.lower()} entry {quantity} {symbol} @ market "
-                    f"(ID: {market_order_id}) but TP failed: {msg}. Restored {len(cancelled_orders_info)} exit orders."
-                )
-
-            # Step 6: Restore previously cancelled exit orders at their original levels
-            restored_count = self._restore_cancelled_orders(session, account, cancelled_orders_info, eff_dry)
-
-            return (
-                f"[{'DRY-RUN' if eff_dry else 'LIVE'}] Placed {action.lower()} entry {quantity} {symbol} @ market "
-                f"(ID: {market_order_id}) + TP @ {tp_price:.2f} (ID: {tp_order_id or 'n/a'})"
-                + (f". Restored {restored_count} exit orders." if restored_count > 0 else "")
-            )
-
-    def _restore_cancelled_orders(self, session, account, cancelled_orders_info: list, dry_run: bool) -> int:
-        """Restore previously cancelled orders at their original levels."""
-        restored = 0
-        for order_info in cancelled_orders_info:
-            if dry_run:
-                restored += 1
-                continue
-            try:
-                legs = order_info.get('legs', [])
-                if not legs:
-                    continue
-                # Recreate the order with original price and settings
-                new_order = NewOrder(
-                    time_in_force=order_info.get('time_in_force', OrderTimeInForce.GTC),
-                    order_type=order_info.get('order_type', OrderType.LIMIT),
-                    price=order_info.get('price'),
-                    legs=legs,
-                )
-                account.place_order(session, new_order, dry_run=False)
-                restored += 1
-                LOGGER.info("Restored exit order at price %s", order_info.get('price'))
-            except Exception as e:
-                LOGGER.warning("Failed to restore order: %s", e)
-        return restored
+                LOGGER.warning("%s bracket failed: %s", order_kind, msg)
+                self._raise_on_auth_error(exc)
+                return f"{order_kind} order failed: {msg}"
 
     def _normalize_symbol(self, symbol: str) -> str:
         symbol = symbol.upper().strip()

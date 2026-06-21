@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Dict, List, Optional, Sequence
 
 try:  # pragma: no cover - optional dependency in some environments
     from tastytrade import DXLinkStreamer
-    from tastytrade.dxfeed import Quote, TimeAndSale, Trade
+    from tastytrade.dxfeed import Greeks, Quote, TimeAndSale, Trade
 except ImportError:  # pragma: no cover
-    DXLinkStreamer = Quote = TimeAndSale = Trade = None  # type: ignore
+    DXLinkStreamer = Quote = TimeAndSale = Trade = Greeks = None  # type: ignore
 
 try:
     from src.services.tastytrade_auth_service import get_tastytrade_auth_service
@@ -25,6 +26,7 @@ LOGGER = logging.getLogger(__name__)
 
 TradeHandler = Callable[[Dict[str, float]], Awaitable[None]]
 DepthHandler = Callable[[Dict[str, object]], Awaitable[None]]
+GreeksHandler = Callable[[Dict[str, float]], Awaitable[None]]
 
 
 @dataclass
@@ -35,6 +37,9 @@ class StreamerSettings:
     symbols: List[str]
     depth_levels: int = 40
     enable_depth: bool = False
+    # Option OCC symbols for Greeks streaming (e.g. [".SPY251219C600"])
+    greeks_symbols: List[str] = field(default_factory=list)
+    enable_greeks: bool = False
 
 
 class TastyTradeStreamer:
@@ -46,6 +51,7 @@ class TastyTradeStreamer:
         *,
         on_trade: Optional[TradeHandler] = None,
         on_depth: Optional[DepthHandler] = None,
+        on_greeks: Optional[GreeksHandler] = None,
         auth_service=None,
     ) -> None:
         if DXLinkStreamer is None:
@@ -54,6 +60,7 @@ class TastyTradeStreamer:
         self.settings = settings
         self._on_trade = on_trade
         self._on_depth = on_depth
+        self._on_greeks = on_greeks
         self._auth_service = auth_service
         self._task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
@@ -81,9 +88,10 @@ class TastyTradeStreamer:
 
     async def _run(self) -> None:
         LOGGER.info(
-            "Starting TastyTrade DXLink streamer (symbols=%s, depth_levels=%s)",
+            "Starting TastyTrade DXLink streamer (symbols=%s, depth_levels=%s, greeks=%s)",
             self.settings.symbols,
             self.settings.depth_levels,
+            self.settings.enable_greeks,
         )
         auth_service = self._auth_service or get_tastytrade_auth_service()
         session = await asyncio.to_thread(auth_service.get_session)
@@ -95,24 +103,37 @@ class TastyTradeStreamer:
                 time_and_sale_symbols = [
                     sym for sym in formatted_symbols if self._uses_time_and_sale(sym)
                 ]
-                await streamer.subscribe(Trade, formatted_symbols)
+                trade_symbols = [
+                    sym for sym in formatted_symbols if not self._uses_time_and_sale(sym)
+                ]
+                await streamer.subscribe(Trade, trade_symbols)
                 if time_and_sale_symbols:
                     await streamer.subscribe(TimeAndSale, time_and_sale_symbols)
                 if getattr(self.settings, "enable_depth", False):
                     await streamer.subscribe(Quote, formatted_symbols)
                     LOGGER.info(
                         "Subscribed to DXLink trades + quotes for %s",
-                        formatted_symbols,
+                        trade_symbols,
                     )
                 else:
                     LOGGER.info(
                         "Subscribed to DXLink trades for %s (quotes disabled)",
-                        formatted_symbols,
+                        trade_symbols,
                     )
                 if time_and_sale_symbols:
                     LOGGER.info(
                         "Subscribed to DXLink time-and-sale indicators for %s",
                         time_and_sale_symbols,
+                    )
+
+                # Greeks subscription for option symbols
+                greeks_symbols = []
+                if getattr(self.settings, "enable_greeks", False) and self.settings.greeks_symbols:
+                    greeks_symbols = list(self.settings.greeks_symbols)
+                    await streamer.subscribe(Greeks, greeks_symbols)
+                    LOGGER.info(
+                        "Subscribed to DXLink greeks for %d option symbols",
+                        len(greeks_symbols),
                     )
 
                 while not self._stop_event.is_set():
@@ -127,15 +148,17 @@ class TastyTradeStreamer:
                         LOGGER.exception("Error processing trade event")
 
                     if time_and_sale_symbols:
-                        try:
-                            time_and_sale = await asyncio.wait_for(
-                                streamer.get_event(TimeAndSale), timeout=0.1
-                            )
-                            await self._handle_time_and_sale(time_and_sale)
-                        except asyncio.TimeoutError:
-                            pass
-                        except Exception:  # pragma: no cover - defensive logging
-                            LOGGER.exception("Error processing time-and-sale event")
+                        while True:
+                            try:
+                                time_and_sale = await asyncio.wait_for(
+                                    streamer.get_event(TimeAndSale), timeout=0.1
+                                )
+                                await self._handle_time_and_sale(time_and_sale)
+                            except asyncio.TimeoutError:
+                                break
+                            except Exception:  # pragma: no cover
+                                LOGGER.exception("Error processing time-and-sale event")
+                                break
 
                     if getattr(self.settings, "enable_depth", False):
                         try:
@@ -144,11 +167,24 @@ class TastyTradeStreamer:
                             )
                             await self._handle_quote(quote)
                         except asyncio.TimeoutError:
-                            continue
+                            pass
                         except Exception:
                             LOGGER.exception("Error processing quote event")
-                    else:
-                        # If depth disabled, yield briefly to avoid spinning tight loop
+
+                    if greeks_symbols:
+                        while True:
+                            try:
+                                greeks_event = await asyncio.wait_for(
+                                    streamer.get_event(Greeks), timeout=0.1
+                                )
+                                await self._handle_greeks(greeks_event)
+                            except asyncio.TimeoutError:
+                                break
+                            except Exception:  # pragma: no cover
+                                LOGGER.exception("Error processing greeks event")
+                                break
+
+                    if not getattr(self.settings, "enable_depth", False) and not greeks_symbols:
                         await asyncio.sleep(0.05)
         finally:
             LOGGER.info("TastyTrade DXLink streamer stopped")
@@ -171,7 +207,7 @@ class TastyTradeStreamer:
         if not time_and_sale:
             return
         price = getattr(time_and_sale, "price", None)
-        if price is None:
+        if price is None or (isinstance(price, float) and math.isnan(price)):
             return
         payload = {
             "symbol": self._normalize_symbol(time_and_sale.event_symbol),
@@ -207,6 +243,31 @@ class TastyTradeStreamer:
         if self._on_depth:
             await self._on_depth(depth_payload)
 
+    async def _handle_greeks(self, greeks_event) -> None:
+        """Handle real-time Greeks events from DXLink.
+
+        Provides delta, gamma, theta, vega, rho, implied_volatility,
+        underlying_price, and option price per subscribed option symbol.
+        """
+        if not greeks_event:
+            return
+        payload = {
+            "symbol": getattr(greeks_event, "event_symbol", ""),
+            "delta": float(getattr(greeks_event, "delta", 0.0) or 0.0),
+            "gamma": float(getattr(greeks_event, "gamma", 0.0) or 0.0),
+            "theta": float(getattr(greeks_event, "theta", 0.0) or 0.0),
+            "vega": float(getattr(greeks_event, "vega", 0.0) or 0.0),
+            "rho": float(getattr(greeks_event, "rho", 0.0) or 0.0),
+            "implied_volatility": float(getattr(greeks_event, "implied_volatility", 0.0) or 0.0),
+            "underlying_price": float(getattr(greeks_event, "underlying_price", 0.0) or 0.0),
+            "option_price": float(getattr(greeks_event, "price", 0.0) or 0.0),
+            "timestamp": self._ts_from_ms(getattr(greeks_event, "time", 0)),
+        }
+        if self._on_greeks:
+            await self._on_greeks(payload)
+        else:
+            LOGGER.debug("Greeks: %s", payload)
+
     def _extract_levels(
         self,
         prices: Sequence[float],
@@ -219,7 +280,6 @@ class TastyTradeStreamer:
             normalized.append({"price": float(price), "size": float(size or 0.0)})
             if len(normalized) >= self.settings.depth_levels:
                 break
-        # pad to requested depth
         while len(normalized) < self.settings.depth_levels:
             normalized.append({"price": 0.0, "size": 0.0})
         return normalized
@@ -227,7 +287,7 @@ class TastyTradeStreamer:
     @staticmethod
     def _format_symbol(symbol: str) -> str:
         symbol = symbol.upper().strip()
-        futures = {"MNQ", "MES", "NQ", "ES"}
+        futures = {"MNQ", "MES", "NQ", "ES", "VX"}
         if symbol in futures:
             return f"/{symbol}:XCME"
         return symbol
