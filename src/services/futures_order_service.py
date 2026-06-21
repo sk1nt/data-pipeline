@@ -6,7 +6,7 @@ from tastytrade import Account
 from tastytrade.instruments import Future
 from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType
 
-from ..config.settings import config
+from ..config.tastytrade_config import config
 from ..models.order import Order, OrderType as ModelOrderType, OrderStatus, Environment
 from ..services.complex_order_builder import build_bracket_complex_order
 from ..services.futures_order_parser import FuturesAction, FuturesOrderParams

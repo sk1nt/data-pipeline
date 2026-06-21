@@ -11,7 +11,7 @@ from services.alert_parser import AlertParser
 from services.options_fill_service import OptionsFillService, InsufficientBuyingPowerError
 from services.tastytrade_client import tastytrade_client, TastytradeAuthError
 from services.tastytrade_auth_service import is_hard_auth_error
-from config.settings import config
+from config.tastytrade_config import config
 from services.notifications import notify_operator
 
 # Setup logger

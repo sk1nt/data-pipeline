@@ -1,6 +1,6 @@
 import uvicorn
 from fastapi import FastAPI
-from .config.settings import config
+from .config.tastytrade_config import config
 from .discord_bot.commands import bot
 from .api.futures_orders import router as futures_router
 from .api.options_orders import router as options_router

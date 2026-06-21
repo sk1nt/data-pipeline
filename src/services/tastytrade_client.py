@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 try:
-    from config.settings import config
+    from config.tastytrade_config import config
 except ImportError:
-    from src.config.settings import config
+    from src.config.tastytrade_config import config
 
 try:
     from services.tastytrade_auth_service import (

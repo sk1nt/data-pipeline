@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
+import polars as pl
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -180,15 +180,18 @@ def write_parquets(
             print(f"  {product}: all candles filtered (before start_date)")
             continue
 
-        df = pd.DataFrame(rows)
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        df["day"] = df["timestamp"].dt.strftime("%Y%m%d")
+        df = pl.DataFrame(rows).with_columns(
+            pl.col("timestamp").cast(pl.Datetime("ms", "UTC"))
+        ).with_columns(
+            pl.col("timestamp").dt.strftime("%Y%m%d").alias("day")
+        )
 
-        for day, group in df.groupby("day"):
+        for group in df.partition_by(["day"]):
+            day = group["day"][0]
             day_dir = out_dir / product
             day_dir.mkdir(parents=True, exist_ok=True)
             path = day_dir / f"{day}.parquet"
-            group.drop(columns=["day"]).to_parquet(path, index=False)
+            group.drop(["day"]).write_parquet(path)
             print(f"  {product}/{day}.parquet  ({len(group)} bars)")
 
 

@@ -1,7 +1,7 @@
 from typing import List, Optional
 
 from lib.redis_client import get_redis_client
-from src.config.settings import config
+from src.config.tastytrade_config import config
 
 # Import via absolute path so it works when `services` is used as a top-level package
 from models.trader import Trader

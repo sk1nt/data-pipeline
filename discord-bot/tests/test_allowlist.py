@@ -4,7 +4,7 @@ import sys
 sys.path.insert(0, os.path.join(os.getcwd(), "src"))
 
 from services.auth_service import AuthService
-from src.config.settings import config
+from src.config.tastytrade_config import config
 
 
 def test_verify_user_and_channel_config(monkeypatch):

@@ -15,7 +15,7 @@ from tastytrade.order import (
 # Import via absolute paths so the module works when `src` is on sys.path
 from services.tastytrade_client import tastytrade_client, TastytradeAuthError
 from src.lib.retries import retry_with_backoff
-from config.settings import config
+from config.tastytrade_config import config
 
 # Trading-specific logger
 try:

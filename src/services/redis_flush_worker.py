@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import duckdb
-import pandas as pd
+import polars as pl
 import redis
 
 from ..config import settings as config_settings
@@ -206,9 +206,16 @@ class RedisFlushWorker:
             summary.update(uw_summary)
             self._last_summary = summary
             return
-        df = pd.DataFrame(new_records, columns=["key", "ts", "value"])
-        df["key"] = df["key"].apply(self._normalize_key)
-        df["day"] = pd.to_datetime(df["ts"], unit="ms").dt.date
+        df = pl.DataFrame(
+            {
+                "key": [self._normalize_key(r[0]) for r in new_records],
+                "ts": [r[1] for r in new_records],
+                "value": [float(r[2]) for r in new_records],
+            }
+        )
+        df = df.with_columns(
+            pl.col("ts").cast(pl.Datetime("ms")).dt.date().alias("day")
+        )
         self._write_to_duckdb(df)
         self._write_tick_outputs(df)
         self._write_depth_outputs(df)
@@ -251,7 +258,7 @@ class RedisFlushWorker:
             today_target += timedelta(days=1)
         return max(0.0, (today_target - now).total_seconds())
 
-    def _write_to_duckdb(self, df: pd.DataFrame) -> None:
+    def _write_to_duckdb(self, df: pl.DataFrame) -> None:
         self.settings.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = duckdb.connect(str(self.settings.db_path))
         conn.execute(
@@ -270,153 +277,156 @@ class RedisFlushWorker:
         )
         conn.close()
 
-    def _write_parquet(self, df: pd.DataFrame) -> None:
+    def _write_parquet(self, df: pl.DataFrame) -> None:
         base_dir = self.settings.parquet_dir
         base_dir.mkdir(parents=True, exist_ok=True)
         flush_ts = int(datetime.utcnow().timestamp())
-        for day, group in df.groupby("day"):
+        for group in df.partition_by(["day"]):
+            day = group["day"][0]
             day_dir = base_dir / str(day)
             day_dir.mkdir(parents=True, exist_ok=True)
             filename = day_dir / f"flush_{flush_ts}.parquet"
-            group.to_parquet(filename, index=False)
+            group.write_parquet(filename)
 
-    def _write_tick_outputs(self, df: pd.DataFrame) -> None:
-        if df.empty or "key" not in df:
+    def _write_tick_outputs(self, df: pl.DataFrame) -> None:
+        if df.is_empty() or "key" not in df.columns:
             return
-        tick_df = df[df["key"].str.startswith("ts:trade:")].copy()
-        if tick_df.empty:
+        tick_df = df.filter(pl.col("key").str.starts_with("ts:trade:"))
+        if tick_df.is_empty():
             return
-        parts = tick_df["key"].str.split(":", expand=True)
-        if parts.shape[1] < 5:
-            return
-        tick_df["metric"] = parts[2]
-        tick_df["symbol"] = parts[3].str.upper()
-        tick_df["source"] = parts[4].str.upper()
-        pivot = tick_df.pivot_table(
+        tick_df = tick_df.with_columns(
+            pl.col("key").str.split(":").alias("_parts")
+        ).filter(
+            pl.col("_parts").list.len() >= 5
+        ).with_columns(
+            pl.col("_parts").list.get(2).alias("metric"),
+            pl.col("_parts").list.get(3).str.to_uppercase().alias("symbol"),
+            pl.col("_parts").list.get(4).str.to_uppercase().alias("source"),
+        ).drop("_parts")
+        pivot = tick_df.pivot(
+            on="metric",
             index=["symbol", "source", "ts"],
-            columns="metric",
             values="value",
-            aggfunc="last",
-        ).reset_index()
-        if pivot.empty:
+            aggregate_function="last",
+        )
+        if pivot.is_empty():
             return
-        pivot.columns = [
-            col if isinstance(col, str) else col[0] for col in pivot.columns
-        ]
         if "price" not in pivot.columns:
             return
         before_drop = len(pivot)
-        pivot = pivot.dropna(subset=["price"])
-        if pivot.empty:
+        pivot = pivot.drop_nulls(subset=["price"])
+        if pivot.is_empty():
             LOGGER.debug(
                 "Skip tick flush slice due to missing price column values (before=%s)",
                 before_drop,
             )
             return
-        pivot["size"] = pivot.get("size", 0.0).fillna(0.0)
-        pivot["timestamp"] = pd.to_datetime(pivot["ts"], unit="ms", utc=True)
-        pivot["day"] = pivot["timestamp"].dt.strftime("%Y%m%d")
-        parquet_df = pivot[
+        if "size" not in pivot.columns:
+            pivot = pivot.with_columns(pl.lit(0.0).alias("size"))
+        else:
+            pivot = pivot.with_columns(pl.col("size").fill_null(0.0))
+        pivot = pivot.with_columns(
+            pl.col("ts").cast(pl.Datetime("ms", "UTC")).alias("timestamp"),
+        ).with_columns(
+            pl.col("timestamp").dt.strftime("%Y%m%d").alias("day"),
+        )
+        parquet_df = pivot.select(
             ["symbol", "source", "timestamp", "ts", "price", "size", "day"]
-        ].rename(columns={"ts": "timestamp_ms"})
+        ).rename({"ts": "timestamp_ms"})
         self._append_tick_parquet(parquet_df)
         self._insert_tick_rows(parquet_df)
 
-    def _write_depth_outputs(self, df: pd.DataFrame) -> None:
-        if df.empty or "key" not in df:
+    def _write_depth_outputs(self, df: pl.DataFrame) -> None:
+        if df.is_empty() or "key" not in df.columns:
             return
-        depth_df = df[df["key"].str.startswith("ts:depth:")].copy()
-        if depth_df.empty:
+        depth_df = df.filter(pl.col("key").str.starts_with("ts:depth:"))
+        if depth_df.is_empty():
             return
-        parts = depth_df["key"].str.split(":", expand=True)
-        if parts.shape[1] < 7:
+        depth_df = depth_df.with_columns(
+            pl.col("key").str.split(":").alias("_parts")
+        ).filter(
+            pl.col("_parts").list.len() >= 7
+        ).with_columns(
+            pl.col("_parts").list.get(2).str.to_uppercase().alias("symbol"),
+            pl.col("_parts").list.get(3).str.to_uppercase().alias("source"),
+            pl.col("_parts").list.get(4).alias("side"),
+            pl.col("_parts").list.get(5).cast(pl.Int64, strict=False).alias("level"),
+            pl.col("_parts").list.get(6).alias("field"),
+        ).drop("_parts").drop_nulls(subset=["level"])
+        if depth_df.is_empty():
             return
-        depth_df["symbol"] = parts[2].str.upper()
-        depth_df["source"] = parts[3].str.upper()
-        depth_df["side"] = parts[4]
-        depth_df["level"] = pd.to_numeric(parts[5], errors="coerce").astype("Int64")
-        depth_df["field"] = parts[6]
-        depth_df = depth_df.dropna(subset=["level"])
-        if depth_df.empty:
-            return
-        pivot = depth_df.pivot_table(
+        pivot = depth_df.pivot(
+            on="field",
             index=["symbol", "source", "ts", "side", "level"],
-            columns="field",
             values="value",
-            aggfunc="last",
-        ).reset_index()
-        if pivot.empty:
+            aggregate_function="last",
+        )
+        if pivot.is_empty():
             return
-        pivot.columns = [
-            col if isinstance(col, str) else col[0] for col in pivot.columns
-        ]
-        pivot["price"] = pivot.get("price", pd.NA)
-        pivot["size"] = pivot.get("size", pd.NA)
-        pivot["timestamp"] = pd.to_datetime(pivot["ts"], unit="ms", utc=True)
-        pivot["day"] = pivot["timestamp"].dt.strftime("%Y%m%d")
-        parquet_df = pivot[
-            [
-                "symbol",
-                "source",
-                "side",
-                "level",
-                "timestamp",
-                "ts",
-                "price",
-                "size",
-                "day",
-            ]
-        ].rename(columns={"ts": "timestamp_ms"})
+        if "price" not in pivot.columns:
+            pivot = pivot.with_columns(pl.lit(None).cast(pl.Float64).alias("price"))
+        if "size" not in pivot.columns:
+            pivot = pivot.with_columns(pl.lit(None).cast(pl.Float64).alias("size"))
+        pivot = pivot.with_columns(
+            pl.col("ts").cast(pl.Datetime("ms", "UTC")).alias("timestamp"),
+        ).with_columns(
+            pl.col("timestamp").dt.strftime("%Y%m%d").alias("day"),
+        )
+        parquet_df = pivot.select(
+            ["symbol", "source", "side", "level", "timestamp", "ts", "price", "size", "day"]
+        ).rename({"ts": "timestamp_ms"})
         self._append_depth_parquet(parquet_df)
 
-    def _append_tick_parquet(self, parquet_df: pd.DataFrame) -> None:
-        if parquet_df.empty:
+    def _append_tick_parquet(self, parquet_df: pl.DataFrame) -> None:
+        if parquet_df.is_empty():
             return
         manifests: List[Tuple[str, str, str, str, int, datetime, datetime]] = []
         parquet_dir = self.settings.tick_parquet_dir
         parquet_dir.mkdir(parents=True, exist_ok=True)
-        for (symbol, day), group in parquet_df.groupby(["symbol", "day"]):
+        for group in parquet_df.partition_by(["symbol", "day"]):
+            symbol = group["symbol"][0]
+            day = group["day"][0]
             safe_symbol = self._sanitize_symbol_dir(symbol)
             dest = parquet_dir / safe_symbol / f"{day}.parquet"
             dest.parent.mkdir(parents=True, exist_ok=True)
-            subset = group.drop(columns=["day"]).sort_values("timestamp")
-            subset.to_parquet(dest, index=False)
+            subset = group.drop(["day"]).sort("timestamp")
+            subset.write_parquet(dest)
             manifests.append(
                 (
                     symbol,
-                    ",".join(sorted(set(subset["source"]))),
+                    ",".join(sorted(subset["source"].unique().to_list())),
                     day,
                     dest.as_posix(),
                     len(subset),
-                    subset["timestamp"].iloc[0].to_pydatetime(),
-                    subset["timestamp"].iloc[-1].to_pydatetime(),
+                    subset["timestamp"][0],
+                    subset["timestamp"][-1],
                 )
             )
         self._update_tick_manifest(manifests)
 
-    def _append_depth_parquet(self, parquet_df: pd.DataFrame) -> None:
-        if parquet_df.empty:
+    def _append_depth_parquet(self, parquet_df: pl.DataFrame) -> None:
+        if parquet_df.is_empty():
             return
         manifests: List[Tuple[str, str, str, str, int, datetime, datetime]] = []
         parquet_dir = self.settings.depth_parquet_dir
         parquet_dir.mkdir(parents=True, exist_ok=True)
-        for (symbol, day), group in parquet_df.groupby(["symbol", "day"]):
+        for group in parquet_df.partition_by(["symbol", "day"]):
+            symbol = group["symbol"][0]
+            day = group["day"][0]
             safe_symbol = self._sanitize_symbol_dir(symbol)
             dest = parquet_dir / safe_symbol / f"{day}.parquet"
             dest.parent.mkdir(parents=True, exist_ok=True)
-            subset = group.drop(columns=["day"]).sort_values(
-                ["timestamp", "side", "level"]
-            )
-            subset.to_parquet(dest, index=False)
+            subset = group.drop(["day"]).sort(["timestamp", "side", "level"])
+            subset.write_parquet(dest)
             manifests.append(
                 (
                     symbol,
-                    ",".join(sorted(set(subset["source"]))),
+                    ",".join(sorted(subset["source"].unique().to_list())),
                     day,
                     dest.as_posix(),
                     len(subset),
-                    subset["timestamp"].iloc[0].to_pydatetime(),
-                    subset["timestamp"].iloc[-1].to_pydatetime(),
+                    subset["timestamp"][0],
+                    subset["timestamp"][-1],
                 )
             )
         self._update_depth_manifest(manifests)
@@ -429,12 +439,13 @@ class RedisFlushWorker:
             return "UNKNOWN"
         return cleaned
 
-    def _insert_tick_rows(self, parquet_df: pd.DataFrame) -> None:
-        if parquet_df.empty:
+    def _insert_tick_rows(self, parquet_df: pl.DataFrame) -> None:
+        if parquet_df.is_empty():
             return
-        rows = parquet_df.copy()
-        rows["volume"] = rows["size"].fillna(0).round().astype(int)
-        rows["tick_type"] = "trade"
+        rows = parquet_df.with_columns(
+            pl.col("size").fill_null(0.0).round(0).cast(pl.Int64).alias("volume"),
+            pl.lit("trade").alias("tick_type"),
+        )
         conn = duckdb.connect(str(self.settings.tick_db_path))
         try:
             conn.execute("DESCRIBE tick_data")
@@ -447,7 +458,7 @@ class RedisFlushWorker:
             return
         conn.register(
             "tick_flush_df",
-            rows[["symbol", "timestamp", "price", "volume", "tick_type", "source"]],
+            rows.select(["symbol", "timestamp", "price", "volume", "tick_type", "source"]),
         )
         next_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM tick_data").fetchone()[
             0
@@ -725,8 +736,8 @@ class RedisFlushWorker:
     def _write_gex_tables(
         self, snapshots: List[Dict[str, Any]], strikes: List[Dict[str, Any]]
     ) -> None:
-        df_snapshots = pd.DataFrame(snapshots)
-        df_strikes = pd.DataFrame(strikes) if strikes else None
+        df_snapshots = pl.from_dicts(snapshots)
+        df_strikes = pl.from_dicts(strikes) if strikes else None
         conn = duckdb.connect(str(self.settings.gex_snapshot_db))
         conn.register("gex_snapshots_flush", df_snapshots)
         conn.execute(
@@ -760,7 +771,7 @@ class RedisFlushWorker:
             FROM gex_snapshots_flush
             """
         )
-        if df_strikes is not None and not df_strikes.empty:
+        if df_strikes is not None and not df_strikes.is_empty():
             conn.register("gex_strikes_flush", df_strikes)
             conn.execute(
                 """
@@ -822,7 +833,7 @@ class RedisFlushWorker:
                         LOGGER.warning(f"Failed to parse market_agg record: {e}")
                 
                 if market_agg_records:
-                    df = pd.DataFrame(market_agg_records)
+                    df = pl.from_dicts(market_agg_records)
                     conn = duckdb.connect(str(uw_db_path))
                     conn.execute(
                         """
@@ -887,7 +898,7 @@ class RedisFlushWorker:
                         LOGGER.warning(f"Failed to parse option_trade record: {e}")
                 
                 if option_trade_records:
-                    df = pd.DataFrame(option_trade_records)
+                    df = pl.from_dicts(option_trade_records)
                     conn = duckdb.connect(str(uw_db_path))
                     conn.execute(
                         """

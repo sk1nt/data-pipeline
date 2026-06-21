@@ -43,7 +43,7 @@ def import_to_duckdb_and_parquet(
     LOG = logging.getLogger("import_gex_history")
 
     import ijson
-    import pandas as pd
+    import polars as pl
     import json
     from decimal import Decimal
 
@@ -149,7 +149,9 @@ def import_to_duckdb_and_parquet(
                 )
 
                 # Convert to DataFrame
-                batch_df = pd.DataFrame(batch_data, columns=column_order)
+                batch_df = pl.DataFrame(
+                    {col: [r[col] for r in batch_data] for col in column_order}
+                )
                 con.register("batch_df", batch_df)
 
                 # Insert batch with explicit column order
@@ -168,7 +170,9 @@ def import_to_duckdb_and_parquet(
             f"Processing final batch {batch_count} ({len(batch_data)} records, total: {total_processed + len(batch_data)})"
         )
 
-        batch_df = pd.DataFrame(batch_data, columns=column_order)
+        batch_df = pl.DataFrame(
+            {col: [r[col] for r in batch_data] for col in column_order}
+        )
         con.register("batch_df", batch_df)
         selected_cols = ", ".join(column_order)
         con.execute(

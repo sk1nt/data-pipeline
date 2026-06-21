@@ -409,7 +409,7 @@ _default_lock = threading.Lock()
 
 
 def build_auth_settings_from_config() -> TastytradeAuthSettings:
-    from config.settings import config
+    from config.tastytrade_config import config
 
     return TastytradeAuthSettings(
         client_secret=config.effective_tastytrade_client_secret,
