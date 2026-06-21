@@ -13,8 +13,6 @@ from typing import Any, Dict, List, Optional
 
 import duckdb
 
-from ..config import settings
-
 LOGGER = logging.getLogger(__name__)
 
 IVR_LOOKBACK_DAYS = 252
@@ -44,10 +42,10 @@ class IVRService:
 
     def __init__(
         self,
-        settings: Optional[IVRServiceSettings] = None,
+        config: Optional[IVRServiceSettings] = None,
         redis_client=None,
     ) -> None:
-        self.settings = settings or IVRServiceSettings()
+        self.settings = config or IVRServiceSettings()
         self._redis = redis_client
         self._ensure_table()
 

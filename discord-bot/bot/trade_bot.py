@@ -95,6 +95,9 @@ class TradeBot(commands.Bot):
         self._gex_feed_stop = asyncio.Event()
         self._correlation_alert_task: Optional[asyncio.Task] = None
         self._correlation_alert_stop = asyncio.Event()
+        self.error_alert_channel = os.getenv("ERROR_ALERT_CHANNEL", "errors:critical:stream")
+        self._error_listener_task: Optional[asyncio.Task] = None
+        self._error_listener_stop = asyncio.Event()
         self.correlation_alert_channel_ids = [
             int(x) for x in os.getenv(
                 "CORRELATION_ALERT_CHANNEL_IDS",
@@ -411,7 +414,7 @@ class TradeBot(commands.Bot):
                         "• `!tt cancel <order_id>` - Cancel an order by ID\n"
                         "• `!tt replace <order_id> <price>` - Replace existing order price (limit)\n"
                         "• `!tt order <order_id>` - Show order details\n"
-                        "• `!tt close <symbol> [quantity]` - Close existing position with market order\n\n"
+                        "• `!tt close <symbol>` - Flatten an existing futures position\n\n"
                         "**Notes:**\n"
                         "• All commands require privileged access\n"
                         "• Trading commands place both market and limit TP orders\n"
@@ -585,55 +588,42 @@ class TradeBot(commands.Bot):
                     if not await self._ensure_privileged(ctx):
                         return
                     symbol = args[1]
-                    qty = 1
-                    if len(args) >= 3:
-                        try:
-                            qty = int(args[2])
-                        except Exception:
-                            await self._send_dm_or_warn(ctx, "Invalid quantity")
-                            return
-                    # Build an order opposite to current pos to close
-                    # For simplicity, submit a market order in reverse direction
                     try:
-                        # Determine direction based on current positions
-                        positions = await asyncio.to_thread(
-                            self.tastytrade_client.get_positions
+                        raw_sym = symbol.upper()
+                        sym = raw_sym.lstrip("/")
+                        is_future_symbol = bool(
+                            raw_sym.startswith("/")
+                            or sym in {"NQ", "MNQ", "ES", "MES", "RTY", "YM"}
+                            or re.match(
+                                r"^(NQ|MNQ|ES|MES|RTY|YM)[A-Z]\d{1,2}(?::\w+)?$",
+                                sym,
+                            )
                         )
-                        pos_map = {p.get("symbol"): p for p in positions}
-                        sym = symbol.upper()
-                        pos = pos_map.get(sym) or pos_map.get(sym.lstrip("/"))
-                        if not pos:
-                            await self._send_dm_or_warn(
-                                ctx, f"No position found for {symbol}"
-                            )
-                            return
-                        current_qty = int(pos.get("quantity") or 0)
-                        if current_qty == 0:
-                            await self._send_dm_or_warn(
-                                ctx, f"No position to close for {symbol}"
-                            )
-                            return
-                        # Determine action to close: if position is positive (long), sell to close
-                        action = "SELL" if current_qty > 0 else "BUY"
-                        try:
-                            result = await asyncio.to_thread(
-                                self.tastytrade_client.place_market_order_with_tp,
-                                symbol,
-                                action,
-                                qty,
-                                0,
-                                dry_run=dry_run,
-                            )
-                            await self._send_dm_or_warn(ctx, result)
-                        except TastytradeAuthError as exc:
+                        if not is_future_symbol:
                             await self._send_dm_or_warn(
                                 ctx,
-                                f"TastyTrade auth invalid: {exc}. Update the refresh token or run `!tt auth refresh <token>`.",
+                                "The close command currently supports futures symbols only; use the dedicated exit workflow for other positions.",
                             )
-                        except Exception as exc:
-                            await self._send_dm_or_warn(
-                                ctx, f"Failed to close position: {exc}"
-                            )
+                            return
+                        result = await asyncio.to_thread(
+                            self.tastytrade_client.flatten_position,
+                            symbol,
+                            dry_run=dry_run,
+                        )
+                        status = result.get("status", "unknown")
+                        if status == "success":
+                            msg = result.get("message", "Flattened position.")
+                            cancelled = result.get("cancelled_orders", 0)
+                            if cancelled > 0:
+                                msg += f" Cancelled {cancelled} order(s)."
+                        else:
+                            msg = result.get("message", f"No {symbol} position to flatten.")
+                        await self._send_dm_or_warn(ctx, msg)
+                    except TastytradeAuthError as exc:
+                        await self._send_dm_or_warn(
+                            ctx,
+                            f"TastyTrade auth invalid: {exc}. Update the refresh token or run `!tt auth refresh <token>`.",
+                        )
                     except Exception as exc:
                         await self._send_dm_or_warn(
                             ctx, f"Failed to close position: {exc}"
@@ -1052,6 +1042,10 @@ class TradeBot(commands.Bot):
             self._gex_feed_stop.clear()
             self._gex_feed_task = asyncio.create_task(self._run_gex_feed_loop())
             print("GEX feed loop started")
+        if not self._error_listener_task:
+            self._error_listener_stop.clear()
+            self._error_listener_task = asyncio.create_task(self._listen_error_stream())
+            print("Error alert listener started")
 
     async def on_message(self, message):
         if message.author == self.user:
@@ -1304,6 +1298,13 @@ class TradeBot(commands.Bot):
             except Exception:
                 pass
             self._gex_feed_task = None
+        if self._error_listener_task:
+            self._error_listener_stop.set()
+            try:
+                await self._error_listener_task
+            except Exception:
+                pass
+            self._error_listener_task = None
         await super().close()
 
     async def ping(self, ctx):
@@ -2868,6 +2869,67 @@ class TradeBot(commands.Bot):
                     print(f"Failed to find channel {channel_id}")
             except Exception as exc:
                 print(f"Failed to send market_agg alert to {channel_id}: {exc}")
+
+    async def _listen_error_stream(self):
+        """Listen for critical service errors and DM the configured alert user."""
+        pubsub = self.redis_client.pubsub(ignore_subscribe_messages=True)
+        try:
+            pubsub.subscribe(self.error_alert_channel)
+        except Exception as exc:
+            print(f"Failed to subscribe to error alert channel: {exc}")
+            return
+        try:
+            while not self._error_listener_stop.is_set():
+                message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
+                if not message:
+                    await asyncio.sleep(0.1)
+                    continue
+                if message.get("type") != "message":
+                    continue
+                data = message.get("data")
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8")
+                try:
+                    payload = json.loads(data)
+                except Exception as exc:
+                    print(f"Failed to decode error alert payload: {exc}")
+                    continue
+                try:
+                    await self._dm_critical_error(payload)
+                except Exception as exc:
+                    print(f"Failed to DM critical error: {exc}")
+        finally:
+            try:
+                pubsub.close()
+            except Exception:
+                pass
+
+    async def _dm_critical_error(self, payload: dict) -> None:
+        """Format a critical error payload and DM the alert user."""
+        service = payload.get("service", "unknown")
+        message = payload.get("message", "")
+        timestamp = payload.get("timestamp", "")
+        exc_type = payload.get("exception", "")
+        tb = payload.get("traceback", "")
+
+        lines = [f"🚨 **Critical Error — {service}**"]
+        if timestamp:
+            lines.append(f"🕐 {timestamp}")
+        lines.append(f"```{message}```")
+        if exc_type:
+            lines.append(f"**Exception:** `{exc_type}`")
+        if tb:
+            # Truncate traceback to fit Discord message limit
+            tb_preview = tb[-800:] if len(tb) > 800 else tb
+            lines.append(f"**Traceback (tail):**\n```{tb_preview}```")
+
+        # Include any extra context fields
+        skip = {"service", "message", "timestamp", "exception", "traceback"}
+        extras = {k: v for k, v in payload.items() if k not in skip}
+        if extras:
+            lines.append("**Context:** " + ", ".join(f"`{k}={v}`" for k, v in extras.items()))
+
+        await self._send_alert_dm("\n".join(lines))
 
     async def _listen_correlation_alerts(self):
         """Listen for social sentiment + market correlation alerts."""

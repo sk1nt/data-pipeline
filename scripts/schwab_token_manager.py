@@ -20,6 +20,41 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _replace_token_in_env_back(refresh_token: str) -> None:
+    """Atomically replace SCHWAB_REFRESH_TOKEN in .env.back (never touches .env).
+
+    Mirrors the logic in SchwabAuthClient._append_refresh_to_env so that
+    repeated calls leave exactly one assignment — preventing the last-wins
+    shadowing bug caused by blind appending.
+    """
+    target = PROJECT_ROOT / ".env.back"
+    key = "SCHWAB_REFRESH_TOKEN"
+    original_lines: list[str] = []
+    if target.exists():
+        with open(target, "r") as fh:
+            original_lines = fh.readlines()
+
+    found = False
+    new_lines: list[str] = []
+    for ln in original_lines:
+        stripped = ln.strip()
+        if stripped.startswith(f"{key}=") or stripped.startswith(f"{key} ="):
+            new_lines.append(f'{key}="{refresh_token}"\n')
+            found = True
+        else:
+            new_lines.append(ln)
+    if not found:
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines[-1] += "\n"
+        new_lines.append(f'{key}="{refresh_token}"\n')
+
+    tmp = target.with_suffix(".tmp")
+    with open(tmp, "w") as fh:
+        fh.writelines(new_lines)
+    os.replace(tmp, target)
+    print(f"Updated {target.name} with SCHWAB_REFRESH_TOKEN (in-place replace)")
+
+
 def _load_schwab_dependencies():
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
@@ -103,10 +138,7 @@ def exchange_url(
     if append_to_env and hasattr(client, "tokens"):
         rt = client.tokens.get("refresh_token")
         if rt:
-            env_path = PROJECT_ROOT / ".env"
-            with open(env_path, "a") as fh:
-                fh.write('\nSCHWAB_REFRESH_TOKEN="%s"\n' % rt)
-            print("Appended refresh token to .env")
+            _replace_token_in_env_back(rt)
     return 0
 
 
@@ -141,9 +173,31 @@ def verify_print():
     return 0
 
 
+def print_auth_url():
+    """Print the Schwab OAuth authorization URL and usage instructions."""
+    api_key = settings.schwab_client_id
+    callback = settings.schwab_redirect_uri or "https://127.0.0.1:8182"
+    if not api_key:
+        print("SCHWAB_CLIENT_ID must be set in .env or environment")
+        return 1
+    auth_ctx = auth.get_auth_context(api_key, callback)
+    print("Open this URL in your browser:")
+    print()
+    print(auth_ctx.authorization_url)
+    print()
+    print("After authorizing, Schwab redirects to https://127.0.0.1:8182/?code=...")
+    print("Copy the FULL redirect URL and run (within ~30 seconds):")
+    print()
+    print('  python scripts/schwab_token_manager.py exchange-url \\')
+    print('    --url "<paste-full-redirect-url>" \\')
+    print('    --append-env')
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     sp = ap.add_subparsers(dest="cmd")
+    sp.add_parser("authorize", help="Print OAuth authorization URL")
     sp.add_parser("persist-env")
     eu = sp.add_parser("exchange-url")
     eu.add_argument("--url", required=True)
@@ -154,7 +208,9 @@ def main():
     ap.add_argument("--token-path", default=None)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
-    if args.cmd == "persist-env":
+    if args.cmd == "authorize":
+        return print_auth_url()
+    elif args.cmd == "persist-env":
         return persist_env(
             token_path=Path(args.token_path) if args.token_path else None,
             dry_run=args.dry_run,

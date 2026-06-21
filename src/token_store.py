@@ -117,11 +117,19 @@ class TokenStore:
         token_payload = self._extract_token_payload(token_payload) or token_payload
         issued_at = issued_at or datetime.now(timezone.utc)
         metadata = self._load_tokens_file() or {}
-        creation_ts = int(
-            metadata.get("creation_timestamp")
-            or metadata.get("updated_at")
-            or time.time()
-        )
+        existing_token = self._extract_token_payload(metadata) if metadata else None
+        new_refresh = token_payload.get("refresh_token")
+        existing_refresh = existing_token.get("refresh_token") if existing_token else None
+        # Reset creation_timestamp when the refresh token rotates so schwab-py's
+        # max_token_age check doesn't force an interactive re-login on a valid token.
+        if new_refresh and new_refresh != existing_refresh:
+            creation_ts = int(time.time())
+        else:
+            creation_ts = int(
+                metadata.get("creation_timestamp")
+                or metadata.get("updated_at")
+                or time.time()
+            )
         wrapped = {
             "creation_timestamp": creation_ts,
             "token": token_payload,
@@ -212,6 +220,12 @@ def refresh_and_cache_tokens(
         token_payload = schwab_client.session.refresh_token(token_url, **refresh_kwargs)
     except Exception as exc:  # pragma: no cover - network/lib failure
         raise TokenRefreshError(f"Schwab refresh_token call failed: {exc}") from exc
+
+    if not token_payload.get("refresh_token"):
+        raise TokenRefreshError(
+            "Schwab refresh response is missing refresh_token; not persisting "
+            "to avoid corrupting the token store."
+        )
 
     store.write_token_payload(token_payload, issued_at=issued_at)
     expires_at = issued_at + timedelta(

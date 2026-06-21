@@ -104,21 +104,22 @@ class OptionsFillService:
         if not account:
             return None
 
-        # Preflight: verify trading status to avoid placing orders when options are closing-only
+        # Closing orders (SELL_TO_CLOSE, BUY_TO_CLOSE) don't require buying power
+        is_closing = action in (OrderAction.SELL_TO_CLOSE, OrderAction.BUY_TO_CLOSE)
+
+        # Preflight: verify trading status to avoid placing opening orders when options are closing-only
         try:
             trading_status = account.get_trading_status(session)
-            # If options are closing only, we should not submit opening orders
-            if getattr(trading_status, "is_options_closing_only", False):
-                # opening orders are not allowed; abort
-                logger.warning("Trading status indicates options are closing-only; aborting order")
+            if getattr(trading_status, "is_options_closing_only", False) and not is_closing:
+                logger.warning(
+                    "Trading status indicates options are closing-only; aborting opening order"
+                )
                 return None
         except Exception:
             # Non-fatal; continue if trading status is unavailable
             pass
 
         # Preflight: verify buying power is sufficient for opening orders only
-        # Closing orders (SELL_TO_CLOSE, BUY_TO_CLOSE) don't require buying power
-        is_closing = action in (OrderAction.SELL_TO_CLOSE, OrderAction.BUY_TO_CLOSE)
         if not is_closing:
             try:
                 balances = account.get_balances(session)

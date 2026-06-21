@@ -16,7 +16,7 @@ def ivr_service(tmp_path: Path):
         db_path=tmp_path / "test.db",
         option_trades_db=tmp_path / "test.db",
     )
-    return IVRService(settings=settings, redis_client=MagicMock())
+    return IVRService(config=settings, redis_client=MagicMock())
 
 
 def _seed_option_trades(db_path: Path, rows):

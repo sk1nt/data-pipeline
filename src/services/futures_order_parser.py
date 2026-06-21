@@ -42,7 +42,12 @@ class FuturesOrderParser:
             )
 
         # Validate tp_ticks
-        if tp_ticks <= 0:
+        if action_enum == FuturesAction.FLAT:
+            if tp_ticks < 0:
+                raise ValueError(
+                    f"Invalid tp_ticks: {tp_ticks}. Must be zero or positive for flat orders."
+                )
+        elif tp_ticks <= 0:
             raise ValueError(f"Invalid tp_ticks: {tp_ticks}. Must be positive.")
 
         # Validate quantity

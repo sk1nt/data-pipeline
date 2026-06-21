@@ -175,6 +175,18 @@ class SchwabStreamingService:
             self.thread = None
         self.streamer = None
 
+    def status(self) -> Dict[str, Any]:
+        symbols = list(self.streamer.symbols) if self.streamer else []
+        return {
+            "running": self.is_running,
+            "enabled": settings.schwab_enabled,
+            "paused": settings.schwab_stream_paused,
+            "symbols": symbols,
+            "thread_alive": bool(self.thread and self.thread.is_alive()),
+            "trade_samples": self.manager.trade_counts.get("schwab", 0),
+            "last_trade_ts": self.manager.last_trade_timestamps.get("schwab"),
+        }
+
     def _run_streamer(self) -> None:
         if not self.streamer:
             return
@@ -318,6 +330,7 @@ class ServiceManager:
                 )
             },
             "tastytrade_streamer": tasty_status,
+            "schwab_streamer": self.schwab_service.status(),
             "gex_poller": getattr(self.gex_poller, "status", lambda: {})(),
             "gex_nq_poller": getattr(self.gex_nq_poller, "status", lambda: {})(),
             "redis_flush_worker": getattr(self.flush_worker, "status", lambda: {})(),
@@ -1117,8 +1130,12 @@ async def control_restart(service_name: str) -> Dict[str, Any]:
 @app.get("/control/{service_name}/status")
 async def control_status(service_name: str) -> Dict[str, Any]:
     """Return a service-specific status snapshot (no auth)."""
+    _service_attr_map = {
+        "schwab": "schwab_service",
+    }
     try:
-        svc = getattr(service_manager, service_name, None)
+        attr = _service_attr_map.get(service_name, service_name)
+        svc = getattr(service_manager, attr, None)
         if svc and hasattr(svc, "status"):
             return getattr(svc, "status")()
         raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
@@ -1167,55 +1184,109 @@ STATUS_PAGE = """
     body { font-family: Arial, sans-serif; background: #0f1115; color: #f1f1f1; margin: 0; padding: 2rem; }
     pre { background: #1e232b; padding: 1rem; border-radius: 8px; min-height: 200px; }
     .warning { color: #ffcc00; }
+    .service-controls { margin: 1.25rem 0; display: flex; flex-wrap: wrap; gap: 0.75rem; }
+    .svc-group { background: #1e232b; border-radius: 8px; padding: 0.6rem 0.9rem; display: flex; align-items: center; gap: 0.4rem; }
+    .svc-label { font-size: 0.85rem; color: #aaa; margin-right: 0.3rem; min-width: 6rem; }
+    .svc-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 0.35rem; background: #555; }
+    button { cursor: pointer; border: none; border-radius: 4px; padding: 0.25rem 0.6rem; font-size: 0.8rem; color: #fff; }
+    .btn-start  { background: #1a7a2e; }
+    .btn-stop   { background: #8a1a1a; }
+    .btn-restart{ background: #555; }
+    button:hover { opacity: 0.85; }
   </style>
 </head>
 <body>
   <h1>Data Pipeline Status</h1>
-    <p class=\"warning\">Dashboard auto-refreshes every 1 second.</p>
+  <p class=\"warning\">Dashboard auto-refreshes every 1 second.</p>
+  <div id=\"controls\" class=\"service-controls\"></div>
   <pre id=\"status\">Loading...</pre>
   <script>
+    const SERVICES = [
+      'schwab',
+      'tastytrade',
+      'gex_poller',
+      'gex_nq_poller',
+      'redis_flush',
+      'discord_bot',
+    ];
+
+    // Keys in /status JSON that map to each service's running state
+    const STATUS_KEYS = {
+      schwab:       d => d.schwab_streamer && d.schwab_streamer.running,
+      tastytrade:   d => d.tastytrade_streamer && d.tastytrade_streamer.running,
+      gex_poller:   d => d.gex_poller && d.gex_poller.running,
+      gex_nq_poller:d => d.gex_nq_poller && d.gex_nq_poller.running,
+      redis_flush:  d => d.redis_flush_worker && d.redis_flush_worker.running,
+      discord_bot:  () => null,
+    };
+
+    async function callControl(service, action) {
+      try {
+        const res = await fetch(`/control/${service}/${action}`, { method: action === 'status' ? 'GET' : 'POST' });
+        const data = await res.json();
+        if (!res.ok) { alert(`${action} ${service} failed: ${JSON.stringify(data)}`); return; }
+        if (action !== 'status') alert(`${action} ${service}: ${JSON.stringify(data)}`);
+      } catch (err) { alert(`Error calling ${action} on ${service}: ${err}`); }
+    }
+
+    let lastStatus = {};
+
+    function updateDots(data) {
+      SERVICES.forEach(s => {
+        const dot = document.getElementById(`dot-${s}`);
+        if (!dot) return;
+        const running = STATUS_KEYS[s] ? STATUS_KEYS[s](data) : null;
+        dot.style.background = running === true ? '#2ecc71' : running === false ? '#e74c3c' : '#555';
+        dot.title = running === true ? 'running' : running === false ? 'stopped' : 'unknown';
+      });
+    }
+
+    function renderControls() {
+      const container = document.getElementById('controls');
+      SERVICES.forEach(s => {
+        const grp = document.createElement('div');
+        grp.className = 'svc-group';
+        const dot = document.createElement('span');
+        dot.className = 'svc-dot';
+        dot.id = `dot-${s}`;
+        const lbl = document.createElement('span');
+        lbl.className = 'svc-label';
+        lbl.textContent = s;
+        const btnStart   = document.createElement('button');
+        btnStart.className = 'btn-start';
+        btnStart.textContent = 'Start';
+        btnStart.onclick = () => callControl(s, 'start');
+        const btnStop    = document.createElement('button');
+        btnStop.className = 'btn-stop';
+        btnStop.textContent = 'Stop';
+        btnStop.onclick = () => callControl(s, 'stop');
+        const btnRestart = document.createElement('button');
+        btnRestart.className = 'btn-restart';
+        btnRestart.textContent = 'Restart';
+        btnRestart.onclick = () => callControl(s, 'restart');
+        grp.appendChild(dot);
+        grp.appendChild(lbl);
+        grp.appendChild(btnStart);
+        grp.appendChild(btnStop);
+        grp.appendChild(btnRestart);
+        container.appendChild(grp);
+      });
+    }
+
     async function refresh() {
       try {
         const res = await fetch('/status');
         const data = await res.json();
         document.getElementById('status').textContent = JSON.stringify(data, null, 2);
+        updateDots(data);
       } catch (err) {
         document.getElementById('status').textContent = 'Error: ' + err;
       }
     }
-        refresh();
-        setInterval(refresh, 1000);
 
-        // service control helpers
-        async function restartService(service) {
-            try {
-                const res = await fetch(`/control/${service}/restart`, { method: 'POST' });
-                if (!res.ok) {
-                    const text = await res.text();
-                    alert(`Failed to restart ${service}: ${res.status} ${text}`);
-                    return;
-                }
-                const data = await res.json();
-                alert(`Restarted ${service}: ${JSON.stringify(data)}`);
-            } catch (err) {
-                alert(`Error restarting ${service}: ${err}`);
-            }
-        }
-
-        function renderControls() {
-            const services = ['tastytrade', 'gex_poller', 'gex_nq_poller', 'redis_flush', 'discord_bot'];
-            const div = document.createElement('div');
-            div.style.marginTop = '1rem';
-            services.forEach(s => {
-                const btn = document.createElement('button');
-                btn.textContent = `Restart ${s}`;
-                btn.style.marginRight = '0.5rem';
-                btn.onclick = () => restartService(s);
-                div.appendChild(btn);
-            });
-            document.body.insertBefore(div, document.getElementById('status'));
-        }
-        renderControls();
+    renderControls();
+    refresh();
+    setInterval(refresh, 1000);
   </script>
 </body>
 </html>

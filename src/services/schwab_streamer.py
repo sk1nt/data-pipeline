@@ -62,6 +62,7 @@ class SchwabAuthClient:
         self._stop_refresh = threading.Event()
         self._refresh_thread: Optional[threading.Thread] = None
         self._lock = Lock()
+        self._access_token_issued_at: datetime = datetime.utcnow()
         self._access_refresh_interval = access_refresh_interval_seconds
         self._refresh_token_rotate_interval = refresh_token_rotate_interval_seconds
         self._last_refresh_token_rotate = datetime.utcnow()
@@ -95,6 +96,7 @@ class SchwabAuthClient:
                     callback_url=callback,
                     token_path=str(self._tok_path),
                     interactive=interactive,
+                    max_token_age=None,
                 )
                 self._created_schwab_client = True
             except Exception as e:
@@ -150,10 +152,8 @@ class SchwabAuthClient:
                             "token_type": "Bearer",
                             "expires_in": int(os.environ.get("SCHWAB_EXPIRES_IN", "0")),
                         }
-            except Exception:
-                pass
-
-        # After we created/initialized the client, if tokens exist make sure they
+            except Exception as exc:
+                LOG.warning("Failed to init Schwab token assignment: %s", exc, exc_info=True)
         # are persisted; this covers interactive login flows where the client
         # wrote its own token storage but also ensures we are consistent.
         # If we created the Client instance ourselves (not provided via the
@@ -178,8 +178,8 @@ class SchwabAuthClient:
                 in ("1", "true", "yes")
             ):
                 self._append_refresh_to_env(tokens.get("refresh_token"))
-        except Exception:
-            pass
+        except Exception as exc:
+            LOG.warning("Failed to persist Schwab tokens at init: %s", exc, exc_info=True)
 
     def _load_tokens_from_env(self) -> Optional[dict]:
         """Build token dict from environment variables if present.
@@ -291,7 +291,7 @@ class SchwabAuthClient:
             access_token = self.schwab.access_token
             tokens = self.schwab.tokens
             expires_in = tokens.get("expires_in", 1800)
-            expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+            expires_at = self._access_token_issued_at + timedelta(seconds=expires_in)
             refresh_token = tokens.get("refresh_token", self.refresh_token)
             return SchwabToken(
                 access_token=access_token,
@@ -305,7 +305,14 @@ class SchwabAuthClient:
             now = datetime.utcnow()
             try:
                 with self._lock:
-                    # Refresh access token
+                    rotation_due = (
+                        now - self._last_refresh_token_rotate
+                    ).total_seconds() >= self._refresh_token_rotate_interval
+                    if rotation_due:
+                        LOG.info("Rotating refresh token (scheduled interval reached)")
+                    # One call handles both access-token refresh and refresh-token rotation.
+                    # Calling twice in the same iteration would spend the first rolled
+                    # refresh token before it can be persisted.
                     tokens = self._refresh_tokens_internal()
                     if isinstance(tokens, dict):
                         try:
@@ -326,19 +333,7 @@ class SchwabAuthClient:
                                     "Failed to append refresh token to .env during auto-refresh",
                                     exc_info=True,
                                 )
-                    # Rotate refresh token on longer schedule
-                    if (
-                        now - self._last_refresh_token_rotate
-                    ).total_seconds() >= self._refresh_token_rotate_interval:
-                        LOG.info("Rotating refresh token (scheduled interval reached)")
-                        tokens = self._refresh_tokens_internal()
-                        if isinstance(tokens, dict):
-                            try:
-                                self._persist_tokens(tokens)
-                            except Exception as e:  # pragma: no cover - defensive
-                                LOG.debug(
-                                    "Failed to persist tokens after rotation: %s", e
-                                )
+                    if rotation_due:
                         self._last_refresh_token_rotate = now
             except Exception as e:
                 LOG.error("Auto-refresh failed: %s", e)
@@ -398,6 +393,7 @@ class SchwabAuthClient:
             refresh_fn()
             tokens = getattr(self.schwab, "tokens", None)
             if isinstance(tokens, dict):
+                self._access_token_issued_at = datetime.utcnow()
                 return tokens
         session = getattr(self.schwab, "session", None)
         if session and hasattr(session, "refresh_token"):
@@ -409,6 +405,7 @@ class SchwabAuthClient:
             metadata = getattr(self.schwab, "token_metadata", None)
             if metadata is not None and hasattr(metadata, "token"):
                 metadata.token = tokens
+            self._access_token_issued_at = datetime.utcnow()
             return tokens
         raise AttributeError("Schwab client does not expose refresh_token interfaces")
 
