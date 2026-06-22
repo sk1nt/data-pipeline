@@ -501,10 +501,10 @@ class TradeBot(commands.Bot):
 
                         if lookup_feed:
                             snap = await self.get_gex_snapshot(lookup_feed)
-                            # GEX snapshots store the price in "spot"; "spot_price" is always None
-                            _snap_price = snap.get("spot") or snap.get("spot_price") if snap else None
-                            if isinstance(_snap_price, (int, float)):
-                                market_price = float(_snap_price)
+                            if snap and isinstance(
+                                snap.get("spot_price"), (int, float)
+                            ):
+                                market_price = float(snap.get("spot_price"))
                     except Exception:
                         market_price = None
                     try:
@@ -1186,10 +1186,8 @@ class TradeBot(commands.Bot):
         try:
             lookup_feed = self.ticker_aliases.get(symbol.upper(), symbol.upper())
             snap = await self.get_gex_snapshot(lookup_feed)
-            # GEX snapshots store the price in "spot"; "spot_price" is always None
-            _snap_price = snap.get("spot") or snap.get("spot_price") if snap else None
-            if isinstance(_snap_price, (int, float)):
-                market_price = float(_snap_price)
+            if snap and isinstance(snap.get("spot_price"), (int, float)):
+                market_price = float(snap.get("spot_price"))
         except Exception:
             pass
         

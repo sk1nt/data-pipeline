@@ -1097,23 +1097,35 @@ class TastyTradeClient:
             current_price = None
             if market_price is not None:
                 current_price = float(market_price)
+            elif inst_type == InstrumentType.FUTURE:
+                # Fetch live quote from TastyTrade — same session used to place the order.
+                # symbol is already normalized with leading / (e.g. /MNQU6).
+                try:
+                    from tastytrade.market_data import get_market_data_by_type
+                    results = get_market_data_by_type(session, futures=[symbol])
+                    if results:
+                        md = results[0]
+                        for attr in ("mark", "last", "bid"):
+                            val = getattr(md, attr, None)
+                            if val is not None and float(val) > 0:
+                                current_price = float(val)
+                                LOGGER.info("Pre-trade quote for %s: %s=%s", symbol, attr, current_price)
+                                break
+                    if current_price is None:
+                        LOGGER.error(
+                            "TastyTrade market-data returned no usable price for %s — bracket cannot be built",
+                            symbol,
+                        )
+                except Exception as exc:
+                    LOGGER.error(
+                        "Failed to fetch pre-trade quote for %s: %s — bracket cannot be built",
+                        symbol, exc,
+                    )
             else:
-                # Try price attrs on the Future object we already have (no network call)
-                if _future_obj is not None:
-                    for attr in ('mark_price', 'last_price', 'close_price', 'settlement_price'):
-                        val = getattr(_future_obj, attr, None)
-                        if val is not None and float(val) > 0:
-                            current_price = float(val)
-                            LOGGER.debug("Price from cached Future.%s: %s", attr, current_price)
-                            break
-                # For non-futures, try the full quote lookup
-                if current_price is None and inst_type != InstrumentType.FUTURE:
-                    try:
-                        current_price = self._get_current_price(session, symbol)
-                    except Exception as exc:
-                        LOGGER.warning("Could not fetch current price for %s: %s — will use fill price for TP", symbol, exc)
-                elif current_price is None:
-                    LOGGER.debug("No pre-trade quote for %s — TP will be calculated from fill price", symbol)
+                try:
+                    current_price = self._get_current_price(session, symbol)
+                except Exception as exc:
+                    LOGGER.warning("Could not fetch current price for %s: %s", symbol, exc)
 
             # Determine entry action
             # For futures on TastyTrade:
