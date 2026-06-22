@@ -853,7 +853,7 @@ class TradeBot(commands.Bot):
                     if orders:
                         msg = "**Orders:**\n" + "\n".join(
                             [
-                                f"• {ord.get('id', 'N/A')}: {ord.get('action', 'N/A')} {ord.get('quantity', 0)} {ord.get('symbol', 'N/A')} @ {ord.get('price', 'N/A')}"
+                                f"• {ord.get('id', 'N/A')}: {ord.get('legs', [{}])[0].get('action', 'N/A')} {ord.get('legs', [{}])[0].get('quantity', 0)} {ord.get('legs', [{}])[0].get('symbol', ord.get('underlying_symbol', 'N/A'))} @ {ord.get('price', ord.get('legs', [{}])[0].get('price', 'N/A'))}"
                                 for ord in orders
                             ]
                         )

@@ -645,16 +645,39 @@ class _SchwabStreamAdapter:
 
     async def _consume_messages(self) -> None:
         LOG.debug("Message pump loop started")
+        reconnect_delay = 5
         while self._running and self._loop and self._loop.is_running():
             try:
                 await self._sc.handle_message()
                 LOG.debug("Consumed message from Schwab stream")
+                reconnect_delay = 5  # reset on success
             except asyncio.CancelledError:
                 LOG.debug("Message pump cancelled")
                 break
             except Exception as exc:
-                LOG.warning("Schwab stream handler error: %s", exc)
-                await asyncio.sleep(1)
+                exc_str = str(exc)
+                # ConnectionClosed (including code 1000 normal close) — attempt reconnect
+                if "sent" in exc_str or "received" in exc_str or "ConnectionClosed" in type(exc).__name__:
+                    LOG.warning("Schwab WebSocket closed (%s); reconnecting in %ss", exc, reconnect_delay)
+                    await asyncio.sleep(reconnect_delay)
+                    reconnect_delay = min(reconnect_delay * 2, 120)
+                    if not self._running:
+                        break
+                    try:
+                        await self._sc.login()
+                        futures_symbols = [s for s in self._symbols if _is_futures_contract(s)]
+                        equity_symbols = [s for s in self._symbols if not _is_futures_contract(s)]
+                        if futures_symbols:
+                            await self._sc.level_one_futures_subs(futures_symbols)
+                        if equity_symbols:
+                            await self._sc.level_one_equity_subs(equity_symbols)
+                        LOG.info("Schwab stream reconnected successfully")
+                        reconnect_delay = 5
+                    except Exception as reconn_exc:
+                        LOG.error("Schwab reconnect failed: %s", reconn_exc)
+                else:
+                    LOG.warning("Schwab stream handler error: %s", exc)
+                    await asyncio.sleep(1)
 
 
 class SchwabMessageParser:

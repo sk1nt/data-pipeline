@@ -247,10 +247,10 @@ class MarketAggAlertService:
             # Choose color based on regime
             ratio_color = green if regime == "long" else (red if regime == "short" else yellow)
             
-            call_prem = float(alert['call_premium'])
-            put_prem = float(alert['put_premium'])
-            call_vol = int(alert['call_volume'])
-            put_vol = int(alert['put_volume'])
+            call_prem = float(alert['call_premium'] or 0)
+            put_prem = float(alert['put_premium'] or 0)
+            call_vol = int(alert['call_volume'] or 0)
+            put_vol = int(alert['put_volume'] or 0)
             
             return (
                 f"```ansi\n"
