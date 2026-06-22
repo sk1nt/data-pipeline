@@ -245,6 +245,7 @@ class ServiceManager:
         self.correlation_engine: Optional[CorrelationEngine] = None
         self.calendar_service: Optional[EconomicCalendarService] = None
         self.uw_rest_poller: Optional[UWRestPoller] = None
+        self._discord_bot_proc: Optional[Any] = None  # subprocess.Popen
         self.trade_count = 0
         self.depth_count = 0
         self.trade_counts: Dict[str, int] = {}
@@ -279,6 +280,22 @@ class ServiceManager:
         self._ensure_event_loop()
         self._ensure_redis_clients()
         self._silence_streamer_logs()
+        # Adopt an already-running discord bot process so status dot and restart work
+        if self._discord_bot_proc is None:
+            try:
+                import subprocess as _sp
+                result = _sp.run(
+                    ["pgrep", "-f", "run_discord_bot.py"], capture_output=True, text=True
+                )
+                pid_str = (result.stdout.strip().split() or [None])[0]
+                if pid_str:
+                    import psutil
+                    p = psutil.Process(int(pid_str))
+                    if p.is_running():
+                        self._discord_bot_proc = p
+                        LOGGER.info("Adopted existing discord bot process (pid=%s)", pid_str)
+            except Exception:
+                pass
         for service in (
             "tastytrade",
             "schwab",
@@ -307,6 +324,7 @@ class ServiceManager:
             "gex_poller",
             "gex_nq_poller",
             "redis_flush",
+            "discord_bot",
         ):
             await self.stop_service(service)
 
@@ -353,6 +371,16 @@ class ServiceManager:
                 "recent_depth_diffs": list(self.last_depth_comparison.values())[:3],
             },
             "market_data_metrics": self._status_metrics_snapshot(),
+            "discord_bot": {
+                "running": bool(
+                    self._discord_bot_proc is not None and (
+                        self._discord_bot_proc.poll() is None
+                        if hasattr(self._discord_bot_proc, "poll")
+                        else self._discord_bot_proc.is_running()
+                    )
+                ),
+                "pid": getattr(self._discord_bot_proc, "pid", None),
+            },
         }
 
     def _ensure_redis_clients(self) -> None:
@@ -609,6 +637,23 @@ class ServiceManager:
                 self._run_ivr_loop(), name="ivr-service"
             )
             LOGGER.info("IVR service started")
+        elif name == "discord_bot":
+            import subprocess
+            import sys
+            proc = self._discord_bot_proc
+            if proc is not None:
+                try:
+                    alive = proc.poll() is None if hasattr(proc, "poll") else proc.is_running()
+                except Exception:
+                    alive = False
+                if alive:
+                    return  # already running
+            bot_script = Path(__file__).parent / "discord-bot" / "run_discord_bot.py"
+            self._discord_bot_proc = subprocess.Popen(
+                [sys.executable, str(bot_script)],
+                cwd=str(Path(__file__).parent),
+            )
+            LOGGER.info("Discord bot started (pid=%d)", self._discord_bot_proc.pid)
 
     async def _run_ivr_loop(self) -> None:
         """Periodically aggregate IV history and compute IVR per symbol."""
@@ -681,6 +726,21 @@ class ServiceManager:
             self._ivr_task = None
             self.ivr_service = None
             LOGGER.info("IVR service stopped")
+        elif name == "discord_bot":
+            proc = self._discord_bot_proc
+            if proc is not None:
+                try:
+                    alive = proc.poll() is None if hasattr(proc, "poll") else proc.is_running()
+                    if alive:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=10) if hasattr(proc, "wait") else proc.wait(timeout=10)
+                        except Exception:
+                            proc.kill()
+                        LOGGER.info("Discord bot stopped (pid=%d)", proc.pid)
+                except Exception as exc:
+                    LOGGER.warning("Error stopping discord bot: %s", exc)
+            self._discord_bot_proc = None
 
     async def restart_service(self, name: str) -> None:
         """Convenience helper for the ``/control`` endpoint."""
@@ -1293,7 +1353,7 @@ STATUS_PAGE = """
       gex_poller:   d => d.gex_poller && d.gex_poller.running,
       gex_nq_poller:d => d.gex_nq_poller && d.gex_nq_poller.running,
       redis_flush:  d => d.redis_flush_worker && d.redis_flush_worker.running,
-      discord_bot:  () => null,
+      discord_bot:  d => d.discord_bot && d.discord_bot.running,
     };
 
     async function callControl(service, action) {
