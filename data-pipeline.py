@@ -501,10 +501,11 @@ class ServiceManager:
                     rth_interval_seconds=5.0,
                     off_hours_interval_seconds=settings.gex_poll_off_hours_interval_seconds,
                     dynamic_schedule=settings.gex_poll_dynamic_schedule,
-                    # Keep NQ_NDX on the dedicated NQ poller, but do not exclude
-                    # SPX from the main poller. SPX is a shared reference symbol
-                    # and should still be cached even if the NQ poller is disabled.
-                    exclude_symbols=["NQ_NDX"],
+                    # Keep NQ_NDX and VIX on the dedicated fast poller, but do
+                    # not exclude SPX from the main poller. SPX is a shared
+                    # reference symbol and should still be cached even if the
+                    # NQ poller is disabled.
+                    exclude_symbols=["NQ_NDX", "VIX"],
                 ),
                 redis_client=self.redis_client,
                 ts_client=self.rts,

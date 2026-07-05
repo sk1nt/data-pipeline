@@ -133,7 +133,7 @@ class Settings(BaseSettings):
     )
     gex_nq_poll_symbols: str = env_field(
         "GEXBOT_NQ_POLL_SYMBOLS",
-        default="NQ_NDX,SPX",
+        default="NQ_NDX,SPX,VIX",
     )
     gex_nq_poll_interval_seconds: float = env_field(
         "GEXBOT_NQ_POLL_INTERVAL_SECONDS",

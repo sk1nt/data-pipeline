@@ -15,7 +15,7 @@ def test_gex_nq_poller_uses_env_rth_interval(monkeypatch):
     try:
         settings.gexbot_api_key = "fake"
         settings.gex_nq_polling_enabled = True
-        settings.gex_nq_poll_symbols = "NQ_NDX"
+        settings.gex_nq_poll_symbols = "NQ_NDX,SPX,VIX"
         settings.gex_nq_poll_rth_interval_seconds = 0.8
 
         manager = ServiceManager()
@@ -39,6 +39,7 @@ def test_gex_nq_poller_uses_env_rth_interval(monkeypatch):
         # Start NQ poller
         manager.start_service("gex_nq_poller")
         assert manager.gex_nq_poller is not None
+        assert manager.gex_nq_poller.settings.symbols == ["NQ_NDX", "SPX", "VIX"]
         assert manager.gex_nq_poller.settings.rth_interval_seconds == 0.8
     finally:
         settings.gexbot_api_key = old_api_key
@@ -82,7 +83,7 @@ def test_gex_poller_uses_configured_symbols_when_env_missing(monkeypatch):
             "SPX",
             "NDX",
         ]
-        assert manager.gex_poller.settings.exclude_symbols == ["NQ_NDX"]
+        assert manager.gex_poller.settings.exclude_symbols == ["NQ_NDX", "VIX"]
     finally:
         settings.gexbot_api_key = old_api_key
         settings.gex_polling_enabled = old_enabled
