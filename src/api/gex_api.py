@@ -1,10 +1,13 @@
-from fastapi import APIRouter, HTTPException, Query
-from typing import List, Optional
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
-from src.db.duckdb_utils import DuckDBUtils
-from src.models.gex_snapshot import GEXSnapshot
 import json
+from typing import List, Optional
+from zoneinfo import ZoneInfo
+
+import duckdb
+from fastapi import APIRouter, HTTPException, Query
+
+from src.config import settings
+from src.models.gex_snapshot import GEXSnapshot
 
 NY_TZ = ZoneInfo("America/New_York")
 
@@ -22,31 +25,29 @@ async def get_gex_data(
 ):
     """Query GEX snapshots."""
     try:
-        db = DuckDBUtils()
-        with db:
-            query = "SELECT * FROM gex_snapshots WHERE ticker = ?"
-            params = [symbol]
+        query = "SELECT * FROM gex_snapshots WHERE ticker = ?"
+        params = [symbol]
 
-            if start:
-                query += " AND timestamp >= ?"
-                params.append(_to_epoch_ms(start))
-            if end:
-                query += " AND timestamp <= ?"
-                params.append(_to_epoch_ms(end))
+        if start:
+            query += " AND timestamp >= ?"
+            params.append(_to_epoch_ms(start))
+        if end:
+            query += " AND timestamp <= ?"
+            params.append(_to_epoch_ms(end))
 
-            query += " ORDER BY timestamp LIMIT ?"
-            params.append(limit)
+        query += " ORDER BY timestamp LIMIT ?"
+        params.append(limit)
 
-            results = db.execute_query(query, tuple(params))
+        db_path = settings.data_path / "gex_data.db"
+        with duckdb.connect(str(db_path), read_only=True) as conn:
+            result = conn.execute(query, tuple(params))
+            columns = [desc[0] for desc in result.description]
 
-            # Convert to GEXSnapshot objects
             snapshots = []
-            for row in results:
-                data = dict(row)
-                # Parse strike_data JSON
+            for row in result.fetchall():
+                data = dict(zip(columns, row))
                 if "strike_data" in data and data["strike_data"]:
                     data["strike_data"] = json.loads(data["strike_data"])
-                # Parse max_priors JSON if present
                 if (
                     "max_priors" in data
                     and data["max_priors"]

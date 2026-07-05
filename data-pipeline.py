@@ -76,6 +76,7 @@ from src.services.economic_calendar_service import EconomicCalendarService, CALE
 from src.services.market_mover_analyzer import MarketMoverAnalyzer, MarketMoverResult  # noqa: E402
 from src.services.uw_rest_poller import UWRestPoller, UWRestPollerSettings  # noqa: E402
 from src.models.social_event import SocialSource  # noqa: E402
+from src.api.routes.datastores import router as datastores_router  # noqa: E402
 
 # Trading panel router
 from backend.src.api.trading import router as trading_router  # noqa: E402
@@ -1190,6 +1191,7 @@ app.add_middleware(
 
 # Mount trading panel API and static page
 app.include_router(trading_router, prefix="/api/v1", tags=["trading"])
+app.include_router(datastores_router, prefix="/api", tags=["datastores"])
 
 
 @app.get("/order-panel")

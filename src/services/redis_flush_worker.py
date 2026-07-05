@@ -729,10 +729,12 @@ class RedisFlushWorker:
                 )
             if not snapshot_rows:
                 return {"gex_snapshots": 0, "gex_strikes": 0}
-            self._write_gex_tables(snapshot_rows, strike_rows)
+            snapshot_count, strike_count = self._write_gex_tables(
+                snapshot_rows, strike_rows
+            )
             return {
-                "gex_snapshots": len(snapshot_rows),
-                "gex_strikes": len(strike_rows),
+                "gex_snapshots": snapshot_count,
+                "gex_strikes": strike_count,
             }
         except Exception:
             LOGGER.exception("Failed to flush GEX snapshots")
@@ -884,9 +886,13 @@ class RedisFlushWorker:
 
     def _write_gex_tables(
         self, snapshots: List[Dict[str, Any]], strikes: List[Dict[str, Any]]
-    ) -> None:
-        df_snapshots = pl.from_dicts(snapshots)
-        df_strikes = pl.from_dicts(strikes) if strikes else None
+    ) -> Tuple[int, int]:
+        snapshot_rows = self._dedupe_rows(snapshots, ("ticker", "timestamp"))
+        strike_rows = self._dedupe_rows(
+            strikes, ("ticker", "timestamp", "strike")
+        ) if strikes else []
+        df_snapshots = pl.from_dicts(snapshot_rows)
+        df_strikes = pl.from_dicts(strike_rows) if strike_rows else None
         conn = duckdb.connect(str(self.settings.gex_snapshot_db))
         conn.register("gex_snapshots_flush", df_snapshots)
         conn.execute(
@@ -939,6 +945,18 @@ class RedisFlushWorker:
                 """
             )
         conn.close()
+        return len(snapshot_rows), len(strike_rows)
+
+    @staticmethod
+    def _dedupe_rows(
+        rows: List[Dict[str, Any]], key_fields: Tuple[str, ...]
+    ) -> List[Dict[str, Any]]:
+        """Collapse duplicate rows by key, keeping the last row for each key."""
+        deduped: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        for row in rows:
+            key = tuple(row.get(field) for field in key_fields)
+            deduped[key] = row
+        return list(deduped.values())
 
     def status(self) -> Dict[str, Any]:
         running = self._task is not None and not self._task.done()
