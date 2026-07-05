@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import logging
 import os
 import time
@@ -35,6 +36,20 @@ if os.getenv("GEXBOT_POLLER_DEBUG", "").lower() == "true":
     LOGGER.propagate = False
 SNAPSHOT_KEY_PREFIX = "gex:snapshot:"
 SNAPSHOT_PUBSUB_CHANNEL = "gex:snapshot:stream"
+
+
+def _sanitize_floats(obj: Any) -> Any:
+    """Recursively replace NaN/Inf floats with None for JSON compliance."""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_floats(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_floats(v) for v in obj]
+    return obj
+
 
 
 @dataclass
@@ -101,7 +116,11 @@ class GEXBotPoller:
     async def stop(self) -> None:
         self._stop_event.set()
         if self._task:
-            await self._task
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
             self._task = None
 
     async def _run(self) -> None:
@@ -238,11 +257,11 @@ class GEXBotPoller:
         symbol: str,
     ) -> Optional[Dict[str, Any]]:
         base_url = f"https://api.gexbot.com/{symbol}/classic/{self.settings.aggregation_period}"
+        headers = self._auth_headers()
 
         async def _endpoint() -> Optional[Dict[str, Any]]:
-            url = f"{base_url}?key={self.settings.api_key}"
             try:
-                async with session.get(url) as resp:
+                async with session.get(base_url, headers=headers) as resp:
                     if resp.status != 200:
                         LOGGER.debug(
                             "GEXBot %s returned %s",
@@ -258,9 +277,10 @@ class GEXBotPoller:
                 return None
 
         async def _maxchange_endpoint() -> Optional[Dict[str, Any]]:
-            url = f"{base_url}/maxchange?key={self.settings.api_key}"
             try:
-                async with session.get(url) as resp:
+                async with session.get(
+                    f"{base_url}/maxchange", headers=headers
+                ) as resp:
                     if resp.status != 200:
                         LOGGER.debug(
                             "GEXBot %s maxchange returned %s",
@@ -532,7 +552,7 @@ class GEXBotPoller:
         
         if self.redis:
             try:
-                payload = json.dumps(snapshot)
+                payload = json.dumps(_sanitize_floats(snapshot))
                 self.redis.client.set(key, payload)
                 try:
                     # Publish full snapshot for downstream consumers (Discord feed, websocket, etc.)
@@ -669,8 +689,9 @@ class GEXBotPoller:
         if not self.settings.api_key:
             return None
         url = "https://api.gexbot.com/tickers"
+        headers = self._auth_headers()
         try:
-            async with session.get(url) as resp:
+            async with session.get(url, headers=headers) as resp:
                 if resp.status != 200:
                     LOGGER.debug("GEXBot tickers failed: %s", resp.status)
                     return None
@@ -685,9 +706,21 @@ class GEXBotPoller:
                 symbols = data.get(key)
                 if isinstance(symbols, list):
                     all_symbols.extend(str(item) for item in symbols)
-            if all_symbols:
-                return all_symbols
+        if all_symbols:
+            return all_symbols
         return None
+
+    def _auth_headers(self) -> Dict[str, str]:
+        if not self.settings.api_key:
+            return {
+                "User-Agent": "DataPipeline/2.0",
+                "Accept": "application/json",
+            }
+        return {
+            "Authorization": f"Bearer {self.settings.api_key}",
+            "User-Agent": "DataPipeline/2.0",
+            "Accept": "application/json",
+        }
 
     def status(self) -> Dict[str, Any]:
         running = self._task is not None and not self._task.done()

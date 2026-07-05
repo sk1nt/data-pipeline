@@ -48,6 +48,7 @@ def build_bracket_complex_order(
     closing_leg,
     tp_price: float,
     tp_action: OrderAction,
+    entry_price: Optional[float] = None,
     sl_price: Optional[float] = None,
 ) -> NewComplexOrder:
     """Build an atomic OTOCO or OTO complex order ready for ``place_complex_order``.
@@ -62,6 +63,11 @@ def build_bracket_complex_order(
         Take-profit limit price (absolute).  Sign is derived from ``tp_action``.
     tp_action:
         Close-side action for the TP leg (``SELL_TO_CLOSE`` / ``BUY_TO_CLOSE``).
+    entry_price:
+        Current market price for the entry leg.  Used to build a marketable
+        limit trigger (required by TastyTrade — plain Market orders are rejected
+        with ``invalid_oco_order_type_combo``).  When ``None`` falls back to
+        ``tp_price`` as a rough proxy.
     sl_price:
         Optional stop-loss trigger price.  When ``None`` an OTO with a single TP
         exit is produced; otherwise an OTOCO with TP *and* SL exits.
@@ -69,12 +75,17 @@ def build_bracket_complex_order(
     Returns
     -------
     NewComplexOrder
-        ``trigger_order`` = DAY market entry; ``orders`` = [TP limit] (OTO) or
+        ``trigger_order`` = DAY marketable-limit entry; ``orders`` = [TP limit] (OTO) or
         [TP limit, SL stop] (OTOCO), all GTC.
     """
+    # TastyTrade rejects Market triggers in complex orders with
+    # invalid_oco_order_type_combo — use Marketable Limit instead.
+    _entry_price = entry_price if entry_price is not None else tp_price
+    entry_signed = signed_limit_price(_entry_price, entry_leg.action)
     trigger_order = NewOrder(
         time_in_force=OrderTimeInForce.DAY,
-        order_type=OrderType.MARKET,
+        order_type=OrderType.MARKETABLE_LIMIT,
+        price=entry_signed,
         legs=[entry_leg],
     )
 

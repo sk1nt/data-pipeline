@@ -51,7 +51,8 @@ class IVRService:
 
     def _ensure_table(self) -> None:
         """Create iv_history table if it does not exist."""
-        conn = duckdb.connect(str(self.settings.option_trades_db))
+        self.settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = duckdb.connect(str(self.settings.db_path))
         try:
             conn.execute(
                 f"""
@@ -74,10 +75,18 @@ class IVRService:
 
         Returns number of symbol-day rows written.
         """
-        conn = duckdb.connect(str(self.settings.option_trades_db))
+        try:
+            source_conn = duckdb.connect(str(self.settings.option_trades_db), read_only=True)
+        except duckdb.IOException:
+            LOGGER.warning(
+                "Unable to open option_trades DB for IV aggregation; skipping this cycle",
+                exc_info=True,
+            )
+            return 0
+
         try:
             try:
-                cols = {r[0] for r in conn.execute("DESCRIBE option_trades").fetchall()}
+                cols = {r[0] for r in source_conn.execute("DESCRIBE option_trades").fetchall()}
             except duckdb.CatalogException:
                 LOGGER.debug("option_trades table does not exist yet")
                 return 0
@@ -85,7 +94,7 @@ class IVRService:
                 LOGGER.warning("option_trades table has no implied_volatility column")
                 return 0
 
-            rows = conn.execute(
+            rows = source_conn.execute(
                 """
                 SELECT
                     ticker AS symbol,
@@ -100,12 +109,16 @@ class IVRService:
                 GROUP BY ticker, CAST(received_at AS DATE)
                 """
             ).fetchall()
+        finally:
+            source_conn.close()
 
-            if not rows:
-                return 0
+        if not rows:
+            return 0
 
+        history_conn = duckdb.connect(str(self.settings.db_path))
+        try:
             for symbol, trade_date, avg_iv, min_iv, max_iv, trade_count in rows:
-                conn.execute(
+                history_conn.execute(
                     f"""
                     INSERT OR REPLACE INTO {self.settings.iv_history_table}
                     (symbol, trade_date, avg_iv, min_iv, max_iv, trade_count)
@@ -117,7 +130,7 @@ class IVRService:
             LOGGER.info("Aggregated IV history: %d symbol-day rows", len(rows))
             return len(rows)
         finally:
-            conn.close()
+            history_conn.close()
 
     def compute_ivr(self, symbol: str) -> Dict[str, Any]:
         """Compute IVR for a symbol from iv_history.
@@ -125,7 +138,7 @@ class IVRService:
         IVR = (current_IV - IV_low_252d) / (IV_high_252d - IV_low_252d)
         Scaled to 0-100.
         """
-        conn = duckdb.connect(str(self.settings.option_trades_db))
+        conn = duckdb.connect(str(self.settings.db_path), read_only=True)
         try:
             rows = conn.execute(
                 """
@@ -204,7 +217,7 @@ class IVRService:
 
     def compute_ivr_batch(self, symbols: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
         """Compute IVR for all symbols (or a subset)."""
-        conn = duckdb.connect(str(self.settings.option_trades_db))
+        conn = duckdb.connect(str(self.settings.db_path), read_only=True)
         try:
             if symbols is None:
                 rows = conn.execute(

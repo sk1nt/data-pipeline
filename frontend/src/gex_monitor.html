@@ -561,22 +561,8 @@ tr:hover { background: var(--bg3); }
 
 <div class="metrics" id="metricsGrid">
   <div class="metric">
-    <span class="lbl" id="crossGexLabel">ES/SPX Net GEX</span>
+    <span class="lbl" id="crossGexLabel">SPX Net GEX</span>
     <span class="val neutral" id="crossGex">&mdash;</span>
-  </div>
-  <div class="metric">
-    <span class="lbl">Zero Gamma</span>
-    <span class="val neutral" id="zeroGamma">&mdash;</span>
-  </div>
-  <div class="metric">
-    <span class="lbl">Call Wall</span>
-    <span class="val neutral" id="callWall">&mdash;</span>
-    <span class="sub" id="callWallNext"></span>
-  </div>
-  <div class="metric">
-    <span class="lbl">Put Wall</span>
-    <span class="val neutral" id="putWall">&mdash;</span>
-    <span class="sub" id="putWallNext"></span>
   </div>
   <div class="metric">
     <span class="lbl">Net GEX</span>
@@ -584,21 +570,27 @@ tr:hover { background: var(--bg3); }
     <span class="sub" id="netGexDelta"></span>
   </div>
   <div class="metric">
-    <span class="lbl">Net GEX (OI)</span>
-    <span class="val neutral" id="netGexOI">&mdash;</span>
+    <span class="lbl">Zero Gamma</span>
+    <span class="val neutral" id="zeroGamma">&mdash;</span>
   </div>
   <div class="metric">
-    <span class="lbl">Delta Risk Rev</span>
-    <span class="val neutral" id="deltaRiskRev">&mdash;</span>
+    <span class="lbl">Put Wall</span>
+    <span class="val neutral" id="putWall">&mdash;</span>
+    <span class="sub" id="putWallNext"></span>
+  </div>
+  <div class="metric">
+    <span class="lbl">Call Wall</span>
+    <span class="val neutral" id="callWall">&mdash;</span>
+    <span class="sub" id="callWallNext"></span>
   </div>
   <div class="metric">
     <span class="lbl">GEX &Delta; <span style="font-size:0.75em;opacity:0.6">(15s avg)</span></span>
     <span class="val neutral" id="gexDelta">&mdash;</span>
   </div>
-</div>
-
-<div class="section-title" style="padding:8px 12px 6px;margin:0;border-top:1px solid var(--border)">Market Agg</div>
-<div class="metrics" id="marketAggGrid">
+  <div class="metric">
+    <span class="lbl">Delta Risk Rev</span>
+    <span class="val neutral" id="deltaRiskRev">&mdash;</span>
+  </div>
   <div class="metric">
     <span class="lbl">Put/Call Ratio</span>
     <span class="val neutral" id="marketAggRatio">&mdash;</span>
@@ -609,6 +601,9 @@ tr:hover { background: var(--bg3); }
     <span class="val neutral" id="marketAggSkew">&mdash;</span>
     <span class="sub" id="marketAggPremiums">&mdash;</span>
   </div>
+</div>
+
+<div class="metrics" id="marketAggGrid">
   <div class="metric">
     <span class="lbl">Call Volume</span>
     <span class="val neutral" id="marketAggCallVolume">&mdash;</span>

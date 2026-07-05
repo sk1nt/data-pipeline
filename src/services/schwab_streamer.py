@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from schwab import auth
 from schwab import streaming as schwab_streaming
@@ -26,6 +26,21 @@ from ..token_store import MissingBootstrapTokenError, TokenStore, TokenStoreErro
 from .trading_publisher import TradingEventPublisher
 
 LOG = get_logger(__name__)
+HARD_AUTH_ERROR_FRAGMENTS = (
+    "invalid_grant",
+    "unsupported_token_type",
+    "refresh token is invalid",
+    "refresh token invalid",
+    "refresh token expired",
+    "refresh token revoked",
+    "invalid or revoked",
+    "invalid or expired",
+)
+
+
+def is_hard_auth_error(exc: Exception | str | None) -> bool:
+    msg = str(exc or "").lower()
+    return any(fragment in msg for fragment in HARD_AUTH_ERROR_FRAGMENTS)
 
 
 @dataclass
@@ -66,6 +81,8 @@ class SchwabAuthClient:
         self._access_refresh_interval = access_refresh_interval_seconds
         self._refresh_token_rotate_interval = refresh_token_rotate_interval_seconds
         self._last_refresh_token_rotate = datetime.utcnow()
+        self._last_error: Optional[str] = None
+        self._needs_reauth = False
 
         self._token_store = TokenStore()
         self._tok_path = self._token_store.tokens_path
@@ -284,6 +301,16 @@ class SchwabAuthClient:
             LOG.error("Manual token refresh failed: %s", e)
             return None
 
+    def status(self) -> Dict[str, Any]:
+        """Return a lightweight auth health snapshot for monitoring."""
+        return {
+            "needs_reauth": self._needs_reauth,
+            "last_error": self._last_error,
+            "auto_refresh_running": bool(
+                self._refresh_thread and self._refresh_thread.is_alive()
+            ),
+        }
+
     def get_token(self) -> SchwabToken:
         """Return valid access token, refreshing if needed."""
         with self._lock:
@@ -337,6 +364,11 @@ class SchwabAuthClient:
                         self._last_refresh_token_rotate = now
             except Exception as e:
                 LOG.error("Auto-refresh failed: %s", e)
+                if self._needs_reauth or is_hard_auth_error(e):
+                    LOG.error(
+                        "Schwab auto-refresh stopped: refresh token is invalid, expired, or revoked"
+                    )
+                    return
             # Sleep in chunks to be responsive to stop
             slept = 0
             while (
@@ -388,26 +420,32 @@ class SchwabAuthClient:
 
     def _refresh_tokens_internal(self) -> dict:
         """Refresh tokens using either schwab-py helper or underlying OAuth session."""
-        refresh_fn = getattr(self.schwab, "refresh_token", None)
-        if callable(refresh_fn):
-            refresh_fn()
-            tokens = getattr(self.schwab, "tokens", None)
-            if isinstance(tokens, dict):
+        try:
+            refresh_fn = getattr(self.schwab, "refresh_token", None)
+            if callable(refresh_fn):
+                refresh_fn()
+                tokens = getattr(self.schwab, "tokens", None)
+                if isinstance(tokens, dict):
+                    self._access_token_issued_at = datetime.utcnow()
+                    return tokens
+            session = getattr(self.schwab, "session", None)
+            if session and hasattr(session, "refresh_token"):
+                token_url = settings.schwab_token_url
+                refreshed = session.refresh_token(token_url)
+                tokens = getattr(session, "token", None) or refreshed
+                if hasattr(self.schwab, "tokens"):
+                    self.schwab.tokens = tokens
+                metadata = getattr(self.schwab, "token_metadata", None)
+                if metadata is not None and hasattr(metadata, "token"):
+                    metadata.token = tokens
                 self._access_token_issued_at = datetime.utcnow()
                 return tokens
-        session = getattr(self.schwab, "session", None)
-        if session and hasattr(session, "refresh_token"):
-            token_url = settings.schwab_token_url
-            refreshed = session.refresh_token(token_url)
-            tokens = getattr(session, "token", None) or refreshed
-            if hasattr(self.schwab, "tokens"):
-                self.schwab.tokens = tokens
-            metadata = getattr(self.schwab, "token_metadata", None)
-            if metadata is not None and hasattr(metadata, "token"):
-                metadata.token = tokens
-            self._access_token_issued_at = datetime.utcnow()
-            return tokens
-        raise AttributeError("Schwab client does not expose refresh_token interfaces")
+            raise AttributeError("Schwab client does not expose refresh_token interfaces")
+        except Exception as exc:
+            self._last_error = str(exc)
+            if is_hard_auth_error(exc):
+                self._needs_reauth = True
+            raise
 
     def _append_refresh_to_env(self, refresh_token: str) -> None:
         """Append or replace SCHWAB_REFRESH_TOKEN in .env atomically.
@@ -528,7 +566,12 @@ class _SchwabStreamAdapter:
 
         # Login and subscribe for symbols
         LOG.debug("Logging into Schwab stream...")
-        self._run_coro(self._sc.login())
+        try:
+            self._run_coro(self._sc.login())
+        except Exception:
+            if self._auth_client:
+                self._auth_client.stop_auto_refresh()
+            raise
         LOG.debug("Login succeeded; subscribing for symbols")
         # After a successful login (which may have rotated tokens), persist
         # the current tokens from the parent auth client if available
@@ -947,9 +990,13 @@ class SchwabStreamClient:
             tick_channel,
         )
         self.auth_client.start_auto_refresh()  # Start background token refresh
-        self.stream.start(
-            symbols=self.symbols, on_tick=self._on_tick, on_level2=self._on_level2
-        )
+        try:
+            self.stream.start(
+                symbols=self.symbols, on_tick=self._on_tick, on_level2=self._on_level2
+            )
+        except Exception:
+            self.auth_client.stop_auto_refresh()
+            raise
         LOG.debug("Stream start returned control to client")
 
     def stop(self) -> None:

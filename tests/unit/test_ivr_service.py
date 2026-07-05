@@ -13,8 +13,8 @@ from src.services.ivr_service import IVRService, IVRServiceSettings
 @pytest.fixture
 def ivr_service(tmp_path: Path):
     settings = IVRServiceSettings(
-        db_path=tmp_path / "test.db",
-        option_trades_db=tmp_path / "test.db",
+        db_path=tmp_path / "ivr.db",
+        option_trades_db=tmp_path / "uw_messages.db",
     )
     return IVRService(config=settings, redis_client=MagicMock())
 

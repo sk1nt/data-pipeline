@@ -135,6 +135,7 @@ class FuturesOrderService:
             closing_leg=closing_leg,
             tp_price=tp_price,
             tp_action=tp_action,
+            entry_price=ref_price,
             sl_price=sl_price,
         )
 

@@ -57,6 +57,10 @@ class BotConfig:
     # Keep Discord rate-limit backoff small to avoid stretching cadence
     gex_feed_backoff_base_seconds: float = 0.25
     gex_feed_backoff_max_seconds: float = 1.0
+    # Sierra Chart DM trading
+    sc_dry_run: bool = True
+    sc_trade_signal_channel: str = "sc:trade:signal"
+    sc_trade_ack_channel: str = "sc:trade:ack"
 
 
 def _parse_channel_ids(value: Optional[str]) -> Optional[List[int]]:
@@ -227,4 +231,7 @@ def create_config_from_env() -> BotConfig:
         gex_feed_force_window=gex_feed_force_window,
         gex_feed_backoff_base_seconds=gex_feed_backoff_base_seconds,
         gex_feed_backoff_max_seconds=gex_feed_backoff_max_seconds,
+        sc_dry_run=os.getenv("SC_TRADE_DRY_RUN", "true").lower() == "true",
+        sc_trade_signal_channel=os.getenv("SC_TRADE_SIGNAL_CHANNEL", "sc:trade:signal"),
+        sc_trade_ack_channel=os.getenv("SC_TRADE_ACK_CHANNEL", "sc:trade:ack"),
     )
