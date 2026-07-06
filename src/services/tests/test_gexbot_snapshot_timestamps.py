@@ -19,6 +19,11 @@ class FakeTSClient:
             self.samples.append(r)
 
 
+class FailingTSClient:
+    def multi_add(self, records):
+        raise RuntimeError("TS unavailable")
+
+
 class FakeRedisClient:
     def __init__(self):
         self._store = {}
@@ -211,3 +216,33 @@ async def test_stale_snapshot_is_skipped():
 
     cached = json.loads(fake_redis.get("gex:snapshot:SPX"))
     assert cached["timestamp"] == latest_ts.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_cache_writes_even_if_timeseries_fails():
+    ts = FailingTSClient()
+    settings = GEXBotPollerSettings(api_key="apikey", symbols=["NQ_NDX"])
+    fake_redis = FakeRedisClient()
+    poller = GEXBotPoller(settings, redis_client=fake_redis, ts_client=ts)
+
+    snapshot = {
+        "symbol": "NQ_NDX",
+        "timestamp": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat(),
+        "spot": 100.0,
+        "zero_gamma": 0.1,
+        "net_gex": 50,
+        "major_pos_vol": 10,
+        "major_neg_vol": -5,
+        "major_pos_oi": 1,
+        "major_neg_oi": -1,
+        "sum_gex_oi": 100,
+        "max_priors": [],
+        "strikes": [],
+    }
+
+    await poller._record_timeseries(snapshot)
+
+    cached = json.loads(fake_redis.get("gex:snapshot:NQ_NDX"))
+    assert cached["symbol"] == "NQ_NDX"
+    assert cached["net_gex"] == 50
+    assert poller.snapshot_count == 1

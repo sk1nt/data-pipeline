@@ -511,7 +511,14 @@ class GEXBotPoller:
                         except (TypeError, ValueError):
                             continue
             if samples:
-                ts_client.multi_add(samples)
+                try:
+                    ts_client.multi_add(samples)
+                except Exception:
+                    LOGGER.warning(
+                        "RedisTimeSeries write failed for %s; continuing to cache snapshot",
+                        symbol,
+                        exc_info=True,
+                    )
         self._store_snapshot_blob(snapshot)
         self.snapshot_count += 1
         self.last_snapshot_ts = (

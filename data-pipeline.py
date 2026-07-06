@@ -773,6 +773,52 @@ class ServiceManager:
         await self.stop_service(name)
         self.start_service(name)
 
+    async def poll_service_now(
+        self, name: str, symbol: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Force a one-off poll for a managed service without relying on its loop."""
+        self._ensure_event_loop()
+        self._ensure_redis_clients()
+        name = name.lower()
+        if name != "gex_nq_poller":
+            raise HTTPException(
+                status_code=400,
+                detail=f"poll-now is only supported for gex_nq_poller, not {name}",
+            )
+
+        target_symbol = (symbol or "NQ_NDX").upper().strip() or "NQ_NDX"
+        poller = self.gex_nq_poller
+        if poller is None:
+            symbols = settings.gex_nq_poll_symbol_list
+            if not symbols:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No symbols configured for NQ poller",
+                )
+            poller = GEXBotPoller(
+                GEXBotPollerSettings(
+                    api_key=settings.gexbot_api_key or "",
+                    symbols=symbols,
+                    interval_seconds=settings.gex_nq_poll_interval_seconds,
+                    aggregation_period=settings.gex_nq_poll_aggregation,
+                    rth_interval_seconds=settings.gex_nq_poll_rth_interval_seconds,
+                    off_hours_interval_seconds=settings.gex_nq_poll_off_hours_interval_seconds,
+                    dynamic_schedule=settings.gex_nq_poll_dynamic_schedule,
+                    sierra_chart_output_path=settings.sierra_chart_output_path,
+                    auto_refresh_symbols=False,
+                ),
+                redis_client=self.redis_client,
+                ts_client=self.rts,
+            )
+
+        snapshot = await poller.fetch_symbol_now(target_symbol)
+        return {
+            "service": name,
+            "symbol": target_symbol,
+            "fetched": snapshot is not None,
+            "snapshot": snapshot,
+        }
+
     def _silence_streamer_logs(self) -> None:
         for logger_name in NOISY_STREAM_LOGGERS:
             logging.getLogger(logger_name).setLevel(logging.WARNING)
@@ -1286,6 +1332,19 @@ async def control_restart(service_name: str) -> Dict[str, Any]:
     try:
         await service_manager.restart_service(service_name)
         return {"status": "restarted", "service": service_name}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/control/{service_name}/poll-now")
+async def control_poll_now(
+    service_name: str, symbol: Optional[str] = None
+) -> Dict[str, Any]:
+    """Force a single poll for supported services (no auth)."""
+    try:
+        return await service_manager.poll_service_now(service_name, symbol=symbol)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
