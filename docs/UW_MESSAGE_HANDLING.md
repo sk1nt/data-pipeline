@@ -57,6 +57,11 @@ RedisFlushWorker now includes `_flush_uw_messages()`:
 - Clears Redis history after successful flush
 - Database: `data/uw_messages.db`
 
+### 4b. IVR History (`src/services/ivr_service.py`)
+- Reads `option_trades` from `data/uw_messages.db` in read-only mode
+- Writes computed IV history to a separate DuckDB file: `data/ivr_data.db`
+- This split avoids DuckDB file-lock contention with the flush worker
+
 #### DuckDB Schema
 
 **market_agg_state:**

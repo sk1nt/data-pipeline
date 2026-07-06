@@ -154,6 +154,9 @@ def rotate_and_print(force: bool = False):
         interactive=False,
     )
     tokens = client.refresh_refresh_token() if force else client.refresh_tokens()
+    if not tokens:
+        print("Failed to refresh Schwab tokens")
+        return 1
     print("Refreshed tokens:", tokens)
     return 0
 

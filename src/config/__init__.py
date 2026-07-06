@@ -133,7 +133,7 @@ class Settings(BaseSettings):
         default=True,
     )
     gex_poll_symbols: str = Field(
-        default="ES_SPX,SPY,QQQ,NDX",
+        default="ES_SPX,SPY,QQQ,SPX,NDX",
         validation_alias=AliasChoices("GEXBOT_POLL_SYMBOLS"),
     )
     gex_poll_aggregation: str = Field(
@@ -149,7 +149,7 @@ class Settings(BaseSettings):
     )
     gex_nq_poll_symbols: str = env_field(
         "GEXBOT_NQ_POLL_SYMBOLS",
-        default="NQ_NDX,SPX",
+        default="NQ_NDX,SPX,VIX",
     )
     gex_nq_poll_interval_seconds: float = env_field(
         "GEXBOT_NQ_POLL_INTERVAL_SECONDS",

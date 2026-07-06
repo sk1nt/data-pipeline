@@ -98,6 +98,14 @@ class TradeBot(commands.Bot):
         self.error_alert_channel = os.getenv("ERROR_ALERT_CHANNEL", "errors:critical:stream")
         self._error_listener_task: Optional[asyncio.Task] = None
         self._error_listener_stop = asyncio.Event()
+        # Sierra Chart DM trading context
+        self._dm_trading_context: Dict[int, str] = {}       # user_id → "tt" | "sc"
+        self._sc_dry_run_overrides: Dict[int, bool] = {}    # user_id → dry_run bool
+        self._sc_ack_listener_task: Optional[asyncio.Task] = None
+        self._sc_ack_listener_stop = asyncio.Event()
+        self.sc_trade_ack_channel: str = getattr(
+            config, "sc_trade_ack_channel", "sc:trade:ack"
+        )
         self.correlation_alert_channel_ids = [
             int(x) for x in os.getenv(
                 "CORRELATION_ALERT_CHANNEL_IDS",
@@ -1046,6 +1054,18 @@ class TradeBot(commands.Bot):
             self._error_listener_stop.clear()
             self._error_listener_task = asyncio.create_task(self._listen_error_stream())
             print("Error alert listener started")
+        if not self._sc_ack_listener_task:
+            self._sc_ack_listener_stop.clear()
+            self._sc_ack_listener_task = asyncio.create_task(self._listen_sc_ack())
+            print("SC trade ack listener started")
+        # Load Sierra Chart Cog
+        try:
+            from .commands.sierra_chart import SierraChartCog
+            if not self.cogs.get("SierraChart"):
+                await self.add_cog(SierraChartCog(self))
+                print("SierraChartCog loaded")
+        except Exception as exc:
+            print(f"Failed to load SierraChartCog: {exc}")
 
     async def on_message(self, message):
         if message.author == self.user:
@@ -1061,8 +1081,17 @@ class TradeBot(commands.Bot):
             f"Message received: channel_id={channel_id}, author={message.author.id}, content={message.content[:50]}"
         )
 
-        # Handle DM shorthand commands (b5, s5, etc.) for privileged users
+        # Handle DM shorthand commands for privileged users
         if is_dm:
+            # If user is in SC context and the message isn't a !-prefixed command,
+            # route to SierraChartCog before the TT shorthand handler.
+            user_ctx = self._dm_trading_context.get(message.author.id, "tt")
+            if user_ctx == "sc" and not message.content.startswith("!"):
+                sc_cog = self.cogs.get("SierraChart")
+                if sc_cog:
+                    handled = await sc_cog.handle_sc_shorthand(message)
+                    if handled:
+                        return
             handled = await self._handle_dm_shorthand(message)
             if handled:
                 return
@@ -1423,8 +1452,11 @@ class TradeBot(commands.Bot):
             pass
 
         try:
+            headers = self._gexbot_auth_headers()
             async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get("https://api.gexbot.com/tickers")
+                resp = await client.get(
+                    "https://api.gexbot.com/tickers", headers=headers
+                )
                 data = resp.json()
                 if resp.status_code == 200 and isinstance(data, dict):
                     try:
@@ -2104,12 +2136,13 @@ class TradeBot(commands.Bot):
             return None
         api_key = os.getenv("GEXBOT_API_KEY", "XXXXXXXXXXXX")
         base = "https://api.gexbot.com"
-        zero_url = f"{base}/{ticker}/classic/zero?key={api_key}"
+        zero_url = f"{base}/{ticker}/classic/zero"
+        headers = self._gexbot_auth_headers(api_key)
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             responses = {"zero": None}
             try:
-                resp = await client.get(zero_url)
+                resp = await client.get(zero_url, headers=headers)
                 if resp.status_code == 200:
                     responses["zero"] = resp.json()
             except Exception:
@@ -2154,6 +2187,20 @@ class TradeBot(commands.Bot):
                 data["strikes"] = strikes
 
         return data
+
+    @staticmethod
+    def _gexbot_auth_headers(api_key: Optional[str] = None) -> dict:
+        key = api_key or os.getenv("GEXBOT_API_KEY", "")
+        if not key:
+            return {
+                "User-Agent": "DataPipeline/2.0",
+                "Accept": "application/json",
+            }
+        return {
+            "Authorization": f"Bearer {key}",
+            "User-Agent": "DataPipeline/2.0",
+            "Accept": "application/json",
+        }
 
     async def get_gex_snapshot(self, symbol: str):
         """Fetch a GEX snapshot payload directly from the canonical redis snapshot key.
@@ -2353,6 +2400,16 @@ class TradeBot(commands.Bot):
         summary = await self._build_wall_ladders(data, ticker, cache_key, snapshot_key)
         if summary:
             data["_wall_ladders"] = summary
+            self._flatten_wall_ladder_fields(data, summary)
+            try:
+                await asyncio.to_thread(
+                    self.redis_client.setex,
+                    snapshot_key,
+                    300,
+                    json.dumps(data, default=str),
+                )
+            except Exception:
+                pass
         data["_wall_ladders_ready"] = True
 
     async def _build_wall_ladders(
@@ -2466,6 +2523,8 @@ class TradeBot(commands.Bot):
                     if len(entry) >= 2:
                         try:
                             gamma = float(entry[1])
+                            if gamma == 0.0 and len(entry) >= 3:
+                                gamma = float(entry[2])
                         except (TypeError, ValueError):
                             gamma = None
                 elif isinstance(entry, dict):
@@ -2553,6 +2612,25 @@ class TradeBot(commands.Bot):
             "major_gamma": major_gamma,
             "entries": ladder_entries,
         }
+
+    @staticmethod
+    def _flatten_wall_ladder_fields(data: dict, summary: dict) -> None:
+        if not isinstance(data, dict) or not isinstance(summary, dict):
+            return
+        for side in ("call", "put"):
+            ladder = summary.get(side)
+            if not isinstance(ladder, dict):
+                continue
+            prefix = f"{side}_wall"
+            data[f"{prefix}_major_strike"] = ladder.get("major_strike")
+            data[f"{prefix}_major_gamma"] = ladder.get("major_gamma")
+            entries = ladder.get("entries") or []
+            for idx in range(2):
+                entry = entries[idx] if idx < len(entries) and isinstance(entries[idx], dict) else {}
+                n = idx + 1
+                data[f"{prefix}_candidate{n}_strike"] = entry.get("strike")
+                data[f"{prefix}_candidate{n}_gamma"] = entry.get("gamma")
+                data[f"{prefix}_candidate{n}_pct"] = entry.get("pct_vs_major")
 
     def _parse_admin_ids(self) -> set[int]:
         ids: set[int] = set()
@@ -2930,6 +3008,62 @@ class TradeBot(commands.Bot):
             lines.append("**Context:** " + ", ".join(f"`{k}={v}`" for k, v in extras.items()))
 
         await self._send_alert_dm("\n".join(lines))
+
+    async def _listen_sc_ack(self) -> None:
+        """Subscribe to sc:trade:ack and forward fill confirmations to the originating user via DM."""
+        pubsub = self.redis_client.pubsub(ignore_subscribe_messages=True)
+        try:
+            pubsub.subscribe(self.sc_trade_ack_channel)
+        except Exception as exc:
+            print(f"Failed to subscribe to SC ack channel: {exc}")
+            return
+
+        print(f"SC ack listener subscribed to {self.sc_trade_ack_channel}")
+        while not self._sc_ack_listener_stop.is_set():
+            try:
+                msg = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
+            except Exception:
+                await asyncio.sleep(1.0)
+                continue
+            if not msg:
+                await asyncio.sleep(0.05)
+                continue
+            try:
+                data = json.loads(msg["data"])
+            except (json.JSONDecodeError, TypeError, KeyError):
+                continue
+
+            # Route to the originating user's DM
+            req_id  = data.get("request_id", "")
+            user_id = data.get("user_id") or (req_id.split("_")[1] if req_id.count("_") >= 2 else None)
+            if not user_id:
+                continue
+            try:
+                user = await self.fetch_user(int(user_id))
+            except Exception:
+                continue
+
+            status    = data.get("status", "unknown")
+            text      = data.get("message", "")
+            dry_label = " [DRY RUN]" if data.get("dry_run") else ""
+
+            if status == "filled":
+                reply = f"✅ {text}{dry_label}"
+            elif status == "dry_run":
+                reply = f"🟡 DRY RUN ack: {text}"
+            elif status == "rejected":
+                reply = f"❌ SC rejected: {text}"
+            elif status == "cancelled":
+                reply = f"🚫 Cancelled: {text}"
+            elif status == "error":
+                reply = f"⚠️ SC error: {text}"
+            else:
+                reply = f"SC ack [{status}]: {text}"
+
+            try:
+                await user.send(reply)
+            except Exception as exc:
+                print(f"SC ack DM failed for user {user_id}: {exc}")
 
     async def _listen_correlation_alerts(self):
         """Listen for social sentiment + market correlation alerts."""

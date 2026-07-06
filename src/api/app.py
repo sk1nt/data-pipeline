@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from src.api.gex_api import router as gex_router
+from src.api.routes.datastores import router as datastores_router
 from src.api.routes.admin import router as admin_router
 
 app = FastAPI(
@@ -20,6 +21,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(gex_router, prefix="/api", tags=["GEX"])
+app.include_router(datastores_router, prefix="/api", tags=["Datastores"])
 app.include_router(admin_router, prefix="/admin", tags=["Admin"])
 
 

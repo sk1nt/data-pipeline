@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # ruff: noqa: E402
 """Data pipeline orchestration entrypoint.
+import math
 
 This module wires together the FastAPI surface area, background streamers,
 Redis/DuckDB infrastructure, and auxiliary tools (Discord bot, Schwab trader,
@@ -75,6 +76,7 @@ from src.services.economic_calendar_service import EconomicCalendarService, CALE
 from src.services.market_mover_analyzer import MarketMoverAnalyzer, MarketMoverResult  # noqa: E402
 from src.services.uw_rest_poller import UWRestPoller, UWRestPollerSettings  # noqa: E402
 from src.models.social_event import SocialSource  # noqa: E402
+from src.api.routes.datastores import router as datastores_router  # noqa: E402
 
 # Trading panel router
 from backend.src.api.trading import router as trading_router  # noqa: E402
@@ -186,6 +188,13 @@ class SchwabStreamingService:
             "thread_alive": bool(self.thread and self.thread.is_alive()),
             "trade_samples": self.manager.trade_counts.get("schwab", 0),
             "last_trade_ts": self.manager.last_trade_timestamps.get("schwab"),
+            "auth": self.streamer.auth_client.status()
+            if self.streamer
+            else {
+                "needs_reauth": False,
+                "last_error": None,
+                "auto_refresh_running": False,
+            },
         }
 
     def _run_streamer(self) -> None:
@@ -194,7 +203,18 @@ class SchwabStreamingService:
         try:
             self.streamer.start()
         except Exception as exc:  # pragma: no cover - defensive
-            LOGGER.error("Schwab streamer failed to start: %s", exc)
+            auth_status = {}
+            try:
+                auth_status = self.streamer.auth_client.status()
+            except Exception:
+                pass
+            if auth_status.get("needs_reauth"):
+                LOGGER.error(
+                    "Schwab streamer failed to start: refresh token is invalid or revoked (%s)",
+                    exc,
+                )
+            else:
+                LOGGER.error("Schwab streamer failed to start: %s", exc)
             return
         LOGGER.info(
             "Schwab streamer running for symbols: %s", ",".join(self.streamer.symbols)
@@ -466,10 +486,12 @@ class ServiceManager:
         ):
             if self.gex_poller:
                 return
-            # Main poller: if GEXBOT_POLL_SYMBOLS is not set in .env, use empty list
-            # to auto-refresh from API and poll all supported symbols (minus NQ exclusions).
-            # This allows `!gex <any_symbol>` to work for all stocks/indexes.
-            base_symbols = settings.gex_symbol_list if os.getenv("GEXBOT_POLL_SYMBOLS") else []
+            # Seed the main poller with the configured symbol list so startup is
+            # resilient even when the live discovery endpoint is unavailable.
+            # The poller will still refresh the supported set from GEXBot and
+            # apply exclusions, but it no longer depends on that call to avoid
+            # silently running with zero symbols.
+            base_symbols = settings.gex_symbol_list
             self.gex_poller = GEXBotPoller(
                 GEXBotPollerSettings(
                     api_key=settings.gexbot_api_key,
@@ -480,8 +502,11 @@ class ServiceManager:
                     rth_interval_seconds=5.0,
                     off_hours_interval_seconds=settings.gex_poll_off_hours_interval_seconds,
                     dynamic_schedule=settings.gex_poll_dynamic_schedule,
-                    # Exclude the NQ poller symbols from the main poller
-                    exclude_symbols=settings.gex_nq_poll_symbol_list,
+                    # Keep NQ_NDX and VIX on the dedicated fast poller, but do
+                    # not exclude SPX from the main poller. SPX is a shared
+                    # reference symbol and should still be cached even if the
+                    # NQ poller is disabled.
+                    exclude_symbols=["NQ_NDX", "VIX"],
                 ),
                 redis_client=self.redis_client,
                 ts_client=self.rts,
@@ -629,6 +654,7 @@ class ServiceManager:
             self._ensure_redis_clients()
             self.ivr_service = IVRService(
                 config=IVRServiceSettings(
+                    db_path=settings.data_path / "ivr_data.db",
                     option_trades_db=settings.data_path / "uw_messages.db",
                 ),
                 redis_client=self.redis_client,
@@ -746,6 +772,52 @@ class ServiceManager:
         """Convenience helper for the ``/control`` endpoint."""
         await self.stop_service(name)
         self.start_service(name)
+
+    async def poll_service_now(
+        self, name: str, symbol: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Force a one-off poll for a managed service without relying on its loop."""
+        self._ensure_event_loop()
+        self._ensure_redis_clients()
+        name = name.lower()
+        if name != "gex_nq_poller":
+            raise HTTPException(
+                status_code=400,
+                detail=f"poll-now is only supported for gex_nq_poller, not {name}",
+            )
+
+        target_symbol = (symbol or "NQ_NDX").upper().strip() or "NQ_NDX"
+        poller = self.gex_nq_poller
+        if poller is None:
+            symbols = settings.gex_nq_poll_symbol_list
+            if not symbols:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No symbols configured for NQ poller",
+                )
+            poller = GEXBotPoller(
+                GEXBotPollerSettings(
+                    api_key=settings.gexbot_api_key or "",
+                    symbols=symbols,
+                    interval_seconds=settings.gex_nq_poll_interval_seconds,
+                    aggregation_period=settings.gex_nq_poll_aggregation,
+                    rth_interval_seconds=settings.gex_nq_poll_rth_interval_seconds,
+                    off_hours_interval_seconds=settings.gex_nq_poll_off_hours_interval_seconds,
+                    dynamic_schedule=settings.gex_nq_poll_dynamic_schedule,
+                    sierra_chart_output_path=settings.sierra_chart_output_path,
+                    auto_refresh_symbols=False,
+                ),
+                redis_client=self.redis_client,
+                ts_client=self.rts,
+            )
+
+        snapshot = await poller.fetch_symbol_now(target_symbol)
+        return {
+            "service": name,
+            "symbol": target_symbol,
+            "fetched": snapshot is not None,
+            "snapshot": snapshot,
+        }
 
     def _silence_streamer_logs(self) -> None:
         for logger_name in NOISY_STREAM_LOGGERS:
@@ -1165,6 +1237,7 @@ app.add_middleware(
 
 # Mount trading panel API and static page
 app.include_router(trading_router, prefix="/api/v1", tags=["trading"])
+app.include_router(datastores_router, prefix="/api", tags=["datastores"])
 
 
 @app.get("/order-panel")
@@ -1259,6 +1332,19 @@ async def control_restart(service_name: str) -> Dict[str, Any]:
     try:
         await service_manager.restart_service(service_name)
         return {"status": "restarted", "service": service_name}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/control/{service_name}/poll-now")
+async def control_poll_now(
+    service_name: str, symbol: Optional[str] = None
+) -> Dict[str, Any]:
+    """Force a single poll for supported services (no auth)."""
+    try:
+        return await service_manager.poll_service_now(service_name, symbol=symbol)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -1780,6 +1866,20 @@ async def lookup_depth_diff(symbol: str) -> Dict[str, Any]:
     return summary
 
 
+
+def _sanitize_floats(obj):
+    """Recursively replace NaN/Inf floats with None for JSON compliance."""
+    import math
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_floats(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_floats(v) for v in obj]
+    return obj
+
 @app.get("/lookup/gex_snapshot")
 async def lookup_gex_snapshot(symbol: str) -> Dict[str, Any]:
     """Return the latest cached GEX snapshot for a symbol from Redis."""
@@ -1797,6 +1897,7 @@ async def lookup_gex_snapshot(symbol: str) -> Dict[str, Any]:
             snapshot = json.loads(raw.decode("utf-8"))
         except Exception:
             snapshot = {"raw": raw.decode("utf-8", errors="replace")}
+    snapshot = _sanitize_floats(snapshot)
     return {
         "symbol": symbol.upper(),
         "sum_gex_vol": snapshot.get("sum_gex_vol")
@@ -2058,7 +2159,7 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
     )
 
     # Map primary symbol to a secondary symbol whose net_gex we display
-    CROSS_GEX_MAP = {"NQ_NDX": "ES_SPX", "ES_SPX": "NQ_NDX"}
+    CROSS_GEX_MAP = {"NQ_NDX": "SPX", "SPX": "NQ_NDX"}
 
     def _summarize_wall(major_strike, strikes, prefer_positive):
         """Compute wall ladder: major + up to 2 next candidates with %."""
@@ -2090,6 +2191,16 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
                 break
         return {"major": major[0], "next": entries}
 
+    def _flatten_wall_fields(out: Dict[str, Any], side: str, ladder: Dict[str, Any]) -> None:
+        prefix = f"{side}_wall"
+        out[f"{prefix}_major_strike"] = ladder.get("major")
+        entries = ladder.get("next") or []
+        for idx in range(2):
+            entry = entries[idx] if idx < len(entries) and isinstance(entries[idx], dict) else {}
+            n = idx + 1
+            out[f"{prefix}_candidate{n}_strike"] = entry.get("strike")
+            out[f"{prefix}_candidate{n}_pct"] = entry.get("pct")
+
     def _parse_strikes(raw):
         """Normalize strikes list into [(strike, gamma), ...]."""
         if not isinstance(raw, list):
@@ -2098,7 +2209,10 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
         for entry in raw:
             if isinstance(entry, (list, tuple)) and len(entry) >= 2:
                 try:
-                    result.append((float(entry[0]), float(entry[1])))
+                    gamma = float(entry[1])
+                    if gamma == 0.0 and len(entry) >= 3:
+                        gamma = float(entry[2])
+                    result.append((float(entry[0]), gamma))
                 except (TypeError, ValueError):
                     pass
         return result
@@ -2113,8 +2227,19 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
             put_ladder = _summarize_wall(payload.get("major_neg_vol"), strikes, False)
             if call_ladder:
                 out["call_wall_ladder"] = call_ladder
+                _flatten_wall_fields(out, "call", call_ladder)
             if put_ladder:
                 out["put_wall_ladder"] = put_ladder
+                _flatten_wall_fields(out, "put", put_ladder)
+            flat = {k: v for k, v in out.items() if k.startswith(("call_wall_", "put_wall_"))}
+            if flat:
+                try:
+                    key = f"{SNAPSHOT_KEY_PREFIX}{normalized}"
+                    enriched = dict(payload)
+                    enriched.update(flat)
+                    redis_conn.setex(key, 300, json.dumps(enriched, default=str))
+                except Exception:
+                    pass
         # Cross-symbol net GEX (e.g. ES_SPX net_gex when viewing NQ_NDX)
         cross_sym = CROSS_GEX_MAP.get(normalized)
         if cross_sym:

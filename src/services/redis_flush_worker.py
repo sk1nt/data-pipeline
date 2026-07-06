@@ -192,6 +192,25 @@ class RedisFlushWorker:
                 continue
             new_records.extend((key, ts, value) for ts, value in samples)
             last_updates[key] = samples[-1][0]
+        gex_ts_records = self._collect_gex_candidate_timeseries_records()
+        if gex_ts_records:
+            self.ts_client.multi_add(
+                (
+                    (
+                        key,
+                        ts,
+                        value,
+                        {
+                            "type": "gex",
+                            "field": key.split(":")[2],
+                            "symbol": key.rsplit(":", 1)[-1],
+                        },
+                    )
+                    for key, ts, value in gex_ts_records
+                )
+            )
+            new_records.extend(gex_ts_records)
+
         if not new_records:
             gex_summary = self._flush_gex_snapshots()
             uw_summary = self._flush_uw_messages()
@@ -240,6 +259,128 @@ class RedisFlushWorker:
             summary["keys"],
             summary["duration"],
         )
+
+    def _collect_gex_candidate_timeseries_records(self) -> List[Tuple[str, int, float]]:
+        records: List[Tuple[str, int, float]] = []
+        for symbol in self._collect_gex_symbols():
+            snapshot = self._load_snapshot(symbol)
+            if not snapshot:
+                continue
+            epoch_ms = self._parse_snapshot_epoch_ms(snapshot.get("timestamp"))
+            if epoch_ms is None:
+                continue
+            for field, value in self._gex_candidate_fields(snapshot).items():
+                numeric = self._coerce_float(value)
+                if numeric is None:
+                    continue
+                records.append((f"ts:gex:{field}:{symbol}", epoch_ms, numeric))
+        return records
+
+    @staticmethod
+    def _coerce_float(value: Any) -> Optional[float]:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _gex_candidate_fields(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        fields: Dict[str, Any] = {}
+        for side in ("call", "put"):
+            prefix = f"{side}_wall"
+            for name in ("major_strike", "major_gamma"):
+                fields[f"{prefix}_{name}"] = snapshot.get(f"{prefix}_{name}")
+            for idx in (1, 2):
+                for name in ("strike", "gamma", "pct"):
+                    field = f"{prefix}_candidate{idx}_{name}"
+                    fields[field] = snapshot.get(field)
+        if any(value is not None for value in fields.values()):
+            return fields
+
+        strikes = RedisFlushWorker._normalize_gex_strikes(snapshot.get("strikes"))
+        fields.update(
+            RedisFlushWorker._summarize_gex_wall_candidates(
+                "call",
+                snapshot.get("major_pos_vol"),
+                strikes,
+                prefer_positive=True,
+            )
+        )
+        fields.update(
+            RedisFlushWorker._summarize_gex_wall_candidates(
+                "put",
+                snapshot.get("major_neg_vol"),
+                strikes,
+                prefer_positive=False,
+            )
+        )
+        return fields
+
+    @staticmethod
+    def _normalize_gex_strikes(raw: Any) -> List[Tuple[float, float]]:
+        strikes: List[Tuple[float, float]] = []
+        if not isinstance(raw, list):
+            return strikes
+        for entry in raw:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                try:
+                    gamma = float(entry[1])
+                    if gamma == 0.0 and len(entry) >= 3:
+                        gamma = float(entry[2])
+                    strikes.append((float(entry[0]), gamma))
+                except (TypeError, ValueError):
+                    continue
+            elif isinstance(entry, dict):
+                try:
+                    strikes.append((float(entry.get("strike")), float(entry.get("gamma"))))
+                except (TypeError, ValueError):
+                    continue
+        return strikes
+
+    @staticmethod
+    def _summarize_gex_wall_candidates(
+        side: str,
+        major_strike: Any,
+        strikes: List[Tuple[float, float]],
+        *,
+        prefer_positive: bool,
+    ) -> Dict[str, Any]:
+        fields: Dict[str, Any] = {}
+        filtered = []
+        for strike, gamma in strikes:
+            if prefer_positive and gamma <= 0:
+                continue
+            if not prefer_positive and gamma >= 0:
+                continue
+            filtered.append((strike, gamma))
+        if not filtered:
+            return fields
+        filtered.sort(key=lambda pair: abs(pair[1]), reverse=True)
+        major = None
+        if isinstance(major_strike, (int, float)):
+            for strike, gamma in filtered:
+                if abs(strike - major_strike) <= 0.51:
+                    major = (strike, gamma)
+                    break
+        if major is None:
+            major = filtered[0]
+        prefix = f"{side}_wall"
+        fields[f"{prefix}_major_strike"] = major[0]
+        fields[f"{prefix}_major_gamma"] = major[1]
+        entries = []
+        for strike, gamma in filtered:
+            if abs(strike - major[0]) <= 0.51:
+                continue
+            entries.append((strike, gamma))
+            if len(entries) >= 2:
+                break
+        for idx, (strike, gamma) in enumerate(entries, start=1):
+            fields[f"{prefix}_candidate{idx}_strike"] = strike
+            fields[f"{prefix}_candidate{idx}_gamma"] = gamma
+            fields[f"{prefix}_candidate{idx}_pct"] = (
+                abs(gamma) / abs(major[1]) * 100 if major[1] else None
+            )
+        return fields
 
     def _seconds_until_daily_run(self) -> float:
         try:
@@ -588,10 +729,12 @@ class RedisFlushWorker:
                 )
             if not snapshot_rows:
                 return {"gex_snapshots": 0, "gex_strikes": 0}
-            self._write_gex_tables(snapshot_rows, strike_rows)
+            snapshot_count, strike_count = self._write_gex_tables(
+                snapshot_rows, strike_rows
+            )
             return {
-                "gex_snapshots": len(snapshot_rows),
-                "gex_strikes": len(strike_rows),
+                "gex_snapshots": snapshot_count,
+                "gex_strikes": strike_count,
             }
         except Exception:
             LOGGER.exception("Failed to flush GEX snapshots")
@@ -603,7 +746,15 @@ class RedisFlushWorker:
             for s in getattr(config_settings, "gex_symbol_list", [])
             if s.strip()
         }
-        # Dynamic symbol enrollment no longer used — only use configured symbol list
+        prefix = self.settings.gex_snapshot_prefix
+        try:
+            for key in self.redis_client.client.scan_iter(match=f"{prefix}*"):
+                normalized = self._normalize_key(key)
+                symbol = normalized.removeprefix(prefix).strip().upper()
+                if symbol:
+                    symbols.add(symbol)
+        except Exception:
+            LOGGER.debug("Failed to scan GEX snapshot keys", exc_info=True)
         return symbols
 
     @staticmethod
@@ -735,9 +886,13 @@ class RedisFlushWorker:
 
     def _write_gex_tables(
         self, snapshots: List[Dict[str, Any]], strikes: List[Dict[str, Any]]
-    ) -> None:
-        df_snapshots = pl.from_dicts(snapshots)
-        df_strikes = pl.from_dicts(strikes) if strikes else None
+    ) -> Tuple[int, int]:
+        snapshot_rows = self._dedupe_rows(snapshots, ("ticker", "timestamp"))
+        strike_rows = self._dedupe_rows(
+            strikes, ("ticker", "timestamp", "strike")
+        ) if strikes else []
+        df_snapshots = pl.from_dicts(snapshot_rows)
+        df_strikes = pl.from_dicts(strike_rows) if strike_rows else None
         conn = duckdb.connect(str(self.settings.gex_snapshot_db))
         conn.register("gex_snapshots_flush", df_snapshots)
         conn.execute(
@@ -790,6 +945,18 @@ class RedisFlushWorker:
                 """
             )
         conn.close()
+        return len(snapshot_rows), len(strike_rows)
+
+    @staticmethod
+    def _dedupe_rows(
+        rows: List[Dict[str, Any]], key_fields: Tuple[str, ...]
+    ) -> List[Dict[str, Any]]:
+        """Collapse duplicate rows by key, keeping the last row for each key."""
+        deduped: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        for row in rows:
+            key = tuple(row.get(field) for field in key_fields)
+            deduped[key] = row
+        return list(deduped.values())
 
     def status(self) -> Dict[str, Any]:
         running = self._task is not None and not self._task.done()
