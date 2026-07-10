@@ -1034,7 +1034,7 @@ function toggleCollapse(el, bodyId) {
     var drr = data.delta_risk_reversal;
     var drrEl = $('deltaRiskRev');
     drrEl.textContent = fmtPrice(drr); drrEl.className = 'val ' + valClass(drr);
-    // GEX Delta: average of tick-by-tick changes over a 15-second rolling window
+    // GEX Delta: prefer backend-provided delta, fall back to a local rolling window.
     var curGex = data.net_gex;
     if (typeof curGex === 'number') {
       var now = Date.now();
@@ -1042,13 +1042,16 @@ function toggleCollapse(el, bodyId) {
       // Drop entries older than the window
       var cutoff = now - GEX_DELTA_WINDOW_MS;
       gexHistory = gexHistory.filter(function(e) { return e.t >= cutoff; });
-      // Compute average of consecutive differences within the window
-      if (gexHistory.length >= 2) {
+      var gexDiff = (typeof data.gex_delta === 'number') ? data.gex_delta : null;
+      // Compute average of consecutive differences within the window if the backend did not supply one.
+      if (gexDiff === null && gexHistory.length >= 2) {
         var diffs = [];
         for (var i = 1; i < gexHistory.length; i++) {
           diffs.push(gexHistory[i].v - gexHistory[i - 1].v);
         }
-        var gexDiff = diffs.reduce(function(a, b) { return a + b; }, 0) / diffs.length;
+        gexDiff = diffs.reduce(function(a, b) { return a + b; }, 0) / diffs.length;
+      }
+      if (typeof gexDiff === 'number') {
         gexDeltaEl.textContent = (gexDiff >= 0 ? '+' : '') + fmtBn(gexDiff);
         gexDeltaEl.className = 'val ' + valClass(gexDiff);
         if (Math.abs(gexDiff) >= cfg.threshold) triggerAlert(gexDiff, 'gex_delta');
@@ -1325,6 +1328,8 @@ function toggleCollapse(el, bodyId) {
   var ttHeaders = { 'Content-Type': 'application/json', 'X-API-Key': API_KEY };
 
   var orderState = { symbol: 'MNQ', quantity: 2, symbols: [], presets: [], dryRun: true, confirmOrders: false };
+  var KEYBOARD_ORDER_LIMIT_PER_SEC = 5;
+  var keyboardOrderTimestamps = [];
 
   // --- TT API helper ---
   function ttApi(method, path, body) {
@@ -1366,6 +1371,18 @@ function toggleCollapse(el, bodyId) {
   }
 
   function fmtCurrency(n) { if (n == null) return '\u2014'; return Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+  function allowKeyboardOrderShortcut() {
+    var now = Date.now();
+    keyboardOrderTimestamps = keyboardOrderTimestamps.filter(function(ts) {
+      return now - ts < 1000;
+    });
+    if (keyboardOrderTimestamps.length >= KEYBOARD_ORDER_LIMIT_PER_SEC) {
+      return false;
+    }
+    keyboardOrderTimestamps.push(now);
+    return true;
+  }
 
   // --- Renderers ---
   function renderSymbols() {
@@ -1556,9 +1573,14 @@ function toggleCollapse(el, bodyId) {
     // Keyboard shortcuts
     document.addEventListener('keydown', function(e) {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-      if (e.key === 'b' || e.key === 'B') $('buy-btn').click();
-      if (e.key === 's' || e.key === 'S') $('sell-btn').click();
-      if (e.key === 'f' || e.key === 'F') $('flatten-btn').click();
+      if (e.repeat) return;
+      var key = e.key.toLowerCase();
+      if (key === 'b' || key === 's' || key === 'f') {
+        if (!allowKeyboardOrderShortcut()) return;
+      }
+      if (key === 'b') $('buy-btn').click();
+      if (key === 's') $('sell-btn').click();
+      if (key === 'f') $('flatten-btn').click();
       if (e.key === 'Escape') $('confirm-modal').classList.remove('active');
     });
 

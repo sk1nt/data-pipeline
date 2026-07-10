@@ -52,5 +52,6 @@ Run all real-time services via `data-pipeline.py`, buffering one full trading da
 
 ## Notes
 - GEXBot poller now stores latest snapshot/max-change in memory/Redis instead of JSON files.
+- Live GEX updates now append directly to `data/gex_data.db`; the flush worker no longer collapses snapshots back to a latest-state blob.
 - Redis retention/flush cadence can be tuned later; start with 24h retention and 10-minute flush.
 - Guardrails/backups defer until ingestion proves stable.

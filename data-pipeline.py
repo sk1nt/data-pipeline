@@ -52,6 +52,10 @@ from src.config import settings  # noqa: E402
 from src.import_gex_history import process_historical_imports  # noqa: E402
 from src.lib.gex_history_queue import gex_history_queue  # noqa: E402
 from src.lib.redis_client import RedisClient  # noqa: E402
+from src.services.gex_duckdb_writer import (  # noqa: E402
+    GEXDuckDBWriter,
+    GEXDuckDBWriterSettings,
+)
 from src.services.gexbot_poller import (
     GEXBotPoller,
     GEXBotPollerSettings,
@@ -82,6 +86,8 @@ from src.api.routes.datastores import router as datastores_router  # noqa: E402
 from backend.src.api.trading import router as trading_router  # noqa: E402
 
 LOGGER = logging.getLogger("data_pipeline")
+SNAPSHOT_VIEW_KEY_PREFIX = "gex:snapshot:view:"
+GEX_NET_GEX_TS_PREFIX = "ts:gex:net_gex:"
 NOISY_STREAM_LOGGERS = [
     "tastytrade",
     "tastytrade.session",
@@ -256,6 +262,7 @@ class ServiceManager:
         self._ivr_task: Optional[asyncio.Task[None]] = None
         self.gex_poller: Optional[GEXBotPoller] = None
         self.gex_nq_poller: Optional[GEXBotPoller] = None
+        self.gex_duckdb_writer: Optional[GEXDuckDBWriter] = None
         self.redis_client: Optional[RedisClient] = None
         self.rts: Optional[RedisTimeSeriesClient] = None
         self.flush_worker: Optional[RedisFlushWorker] = None
@@ -321,6 +328,7 @@ class ServiceManager:
             "schwab",
             "gex_poller",
             "gex_nq_poller",
+            "gex_duckdb_writer",
             "redis_flush",
             "social_feed",
             "correlation",
@@ -343,6 +351,7 @@ class ServiceManager:
             "schwab",
             "gex_poller",
             "gex_nq_poller",
+            "gex_duckdb_writer",
             "redis_flush",
             "discord_bot",
         ):
@@ -376,6 +385,7 @@ class ServiceManager:
             "schwab_streamer": self.schwab_service.status(),
             "gex_poller": getattr(self.gex_poller, "status", lambda: {})(),
             "gex_nq_poller": getattr(self.gex_nq_poller, "status", lambda: {})(),
+            "gex_duckdb_writer": getattr(self.gex_duckdb_writer, "status", lambda: {})(),
             "redis_flush_worker": getattr(self.flush_worker, "status", lambda: {})(),
             "uw_rest_poller": getattr(self.uw_rest_poller, "status", lambda: {})(),
             "trin_history_recorder": {
@@ -415,6 +425,15 @@ class ServiceManager:
             self.rts = RedisTimeSeriesClient(self.redis_client.client)
         if not self.lookup_service and self.redis_client and self.rts:
             self.lookup_service = LookupService(self.redis_client, self.rts)
+
+    def _ensure_gex_duckdb_writer(self) -> None:
+        if self.gex_duckdb_writer:
+            return
+        self.gex_duckdb_writer = GEXDuckDBWriter(
+            GEXDuckDBWriterSettings(db_path=settings.data_path / "gex_data.db")
+        )
+        self.gex_duckdb_writer.start()
+        LOGGER.info("GEX DuckDB writer started")
 
     def start_service(self, name: str) -> None:
         """Start a specific service by name if it is enabled via settings."""
@@ -492,6 +511,7 @@ class ServiceManager:
             # apply exclusions, but it no longer depends on that call to avoid
             # silently running with zero symbols.
             base_symbols = settings.gex_symbol_list
+            self._ensure_gex_duckdb_writer()
             self.gex_poller = GEXBotPoller(
                 GEXBotPollerSettings(
                     api_key=settings.gexbot_api_key,
@@ -510,6 +530,7 @@ class ServiceManager:
                 ),
                 redis_client=self.redis_client,
                 ts_client=self.rts,
+                duckdb_writer=self.gex_duckdb_writer,
             )
             self.gex_poller.start()
             LOGGER.info("GEXBot poller started")
@@ -524,6 +545,7 @@ class ServiceManager:
             if not symbols:
                 LOGGER.warning("No symbols configured for NQ poller; skipping start")
                 return
+            self._ensure_gex_duckdb_writer()
             self.gex_nq_poller = GEXBotPoller(
                 GEXBotPollerSettings(
                     api_key=settings.gexbot_api_key,
@@ -538,6 +560,7 @@ class ServiceManager:
                 ),
                 redis_client=self.redis_client,
                 ts_client=self.rts,
+                duckdb_writer=self.gex_duckdb_writer,
             )
             self.gex_nq_poller.start()
             LOGGER.info("GEXBot NQ poller started")
@@ -550,6 +573,8 @@ class ServiceManager:
             )
             self.flush_worker.start()
             LOGGER.info("Redis flush worker started")
+        elif name == "gex_duckdb_writer":
+            self._ensure_gex_duckdb_writer()
         elif name == "social_feed" and settings.social_feed_enabled:
             if self.social_feed:
                 return
@@ -723,6 +748,10 @@ class ServiceManager:
             await self.gex_nq_poller.stop()
             self.gex_nq_poller = None
             LOGGER.info("GEXBot NQ poller stopped")
+        elif name == "gex_duckdb_writer" and self.gex_duckdb_writer:
+            await self.gex_duckdb_writer.stop()
+            self.gex_duckdb_writer = None
+            LOGGER.info("GEX DuckDB writer stopped")
         elif name == "redis_flush" and self.flush_worker:
             await self.flush_worker.stop()
             self.flush_worker = None
@@ -1880,6 +1909,14 @@ def _sanitize_floats(obj):
         return [_sanitize_floats(v) for v in obj]
     return obj
 
+
+def _cache_gex_snapshot_view(
+    redis_conn: Any, symbol: str, payload: Dict[str, Any], ttl_seconds: int = 300
+) -> None:
+    """Cache the websocket-enriched payload separately from the canonical snapshot."""
+    key = f"{SNAPSHOT_VIEW_KEY_PREFIX}{symbol.upper()}"
+    redis_conn.setex(key, ttl_seconds, json.dumps(payload, default=str))
+
 @app.get("/lookup/gex_snapshot")
 async def lookup_gex_snapshot(symbol: str) -> Dict[str, Any]:
     """Return the latest cached GEX snapshot for a symbol from Redis."""
@@ -1941,11 +1978,11 @@ def _market_agg_snapshot_from_cache(payload: Dict[str, Any]) -> Dict[str, Any]:
         "regime": _market_agg_regime(ratio),
         "call_premium": _safe_float(data.get("call_premium")),
         "put_premium": _safe_float(data.get("put_premium")),
-        "call_volume": data.get("call_volume"),
-        "put_volume": data.get("put_volume"),
+        "call_volume": _safe_float(data.get("call_volume")),
+        "put_volume": _safe_float(data.get("put_volume")),
         "net_call_premium": _safe_float(data.get("net_call_premium")),
         "net_put_premium": _safe_float(data.get("net_put_premium")),
-        "net_volume": data.get("net_volume"),
+        "net_volume": _safe_float(data.get("net_volume")),
         "bar_bias": data.get("bar_bias"),
         "overall_bias": data.get("overall_bias"),
         "timestamp": data.get("timestamp"),
@@ -2155,7 +2192,7 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
         "symbol", "timestamp", "spot", "zero_gamma",
         "net_gex", "net_gex_oi", "sum_gex_vol", "sum_gex_oi",
         "major_pos_vol", "major_neg_vol", "major_pos_oi", "major_neg_oi",
-        "delta_risk_reversal", "maxchange", "max_priors",
+        "delta_risk_reversal", "max_priors",
     )
 
     # Map primary symbol to a secondary symbol whose net_gex we display
@@ -2220,6 +2257,9 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
     def _extract(payload: Dict[str, Any]) -> Dict[str, Any]:
         out = {k: payload.get(k) for k in GEX_FIELDS}
         out["symbol"] = normalized
+        gex_delta = _get_latest_gex_delta(redis_conn, normalized)
+        if gex_delta is not None:
+            out["gex_delta"] = gex_delta
         # Wall ladders from strikes data
         strikes = _parse_strikes(payload.get("strikes"))
         if strikes:
@@ -2234,10 +2274,9 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
             flat = {k: v for k, v in out.items() if k.startswith(("call_wall_", "put_wall_"))}
             if flat:
                 try:
-                    key = f"{SNAPSHOT_KEY_PREFIX}{normalized}"
                     enriched = dict(payload)
                     enriched.update(flat)
-                    redis_conn.setex(key, 300, json.dumps(enriched, default=str))
+                    _cache_gex_snapshot_view(redis_conn, normalized, enriched)
                 except Exception:
                     pass
         # Cross-symbol net GEX (e.g. ES_SPX net_gex when viewing NQ_NDX)
@@ -2608,6 +2647,36 @@ def _get_redis_client():
     if not wrapper:
         raise HTTPException(status_code=503, detail="Redis unavailable")
     return wrapper.client
+
+
+def _get_latest_gex_delta(redis_conn, symbol: str) -> Optional[float]:
+    """Return the rolling 15s average net GEX delta from RedisTimeSeries, if available."""
+    key = f"{GEX_NET_GEX_TS_PREFIX}{(symbol or '').upper()}"
+    try:
+        rows = redis_conn.execute_command("TS.REVRANGE", key, "+", "-", "COUNT", 100)
+    except Exception:
+        return None
+
+    points: List[tuple[int, float]] = []
+    for row in rows or []:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        try:
+            points.append((int(row[0]), float(row[1])))
+        except (TypeError, ValueError):
+            continue
+
+    if len(points) < 2:
+        return None
+
+    points.sort(key=lambda item: item[0])
+    cutoff = points[-1][0] - 15_000
+    window = [point for point in points if point[0] >= cutoff]
+    if len(window) < 2:
+        return None
+
+    diffs = [window[i][1] - window[i - 1][1] for i in range(1, len(window))]
+    return sum(diffs) / len(diffs)
 
 
 def _normalize_string(value: Optional[Any]) -> str:

@@ -117,7 +117,7 @@ class Settings(BaseSettings):
         default=True,
     )
     gex_poll_symbols: str = Field(
-        default="ES_SPX,SPY,QQQ,SPX,NDX",
+        default="ES_SPX,SPY,QQQ,NDX",
         validation_alias=AliasChoices("GEXBOT_POLL_SYMBOLS"),
     )
     gex_poll_aggregation: str = Field(
@@ -157,7 +157,7 @@ class Settings(BaseSettings):
     )
     gexbot_nq_poll_symbols: str = env_field(
         "GEXBOT_NQ_POLL_SYMBOLS",
-        default="NQ_NDX",
+        default="NQ_NDX,SPX,VIX",
     )
 
     # Sierra Chart bridge (optional)

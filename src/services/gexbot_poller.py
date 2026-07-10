@@ -7,7 +7,6 @@ import json
 import math
 import logging
 import os
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import date, datetime, timezone, timedelta
@@ -18,6 +17,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 
 from lib.redis_client import RedisClient
+from .gex_duckdb_writer import GEXDuckDBWriter
 from .redis_timeseries import RedisTimeSeriesClient
 
 
@@ -51,6 +51,15 @@ def _sanitize_floats(obj: Any) -> Any:
     return obj
 
 
+def _to_float(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 
 @dataclass
 class GEXBotPollerSettings:
@@ -77,6 +86,7 @@ class GEXBotPoller:
         *,
         redis_client: Optional[RedisClient] = None,
         ts_client: Optional[RedisTimeSeriesClient] = None,
+        duckdb_writer: Optional[GEXDuckDBWriter] = None,
         dynamic_key: str = "gexbot:symbols:dynamic",
         supported_key: str = "gexbot:symbols:supported",
     ) -> None:
@@ -86,6 +96,7 @@ class GEXBotPoller:
         self.latest: Dict[str, Dict[str, Any]] = {}
         self.redis = redis_client
         self.ts_client = ts_client
+        self.duckdb_writer = duckdb_writer
         self.dynamic_key = dynamic_key
         self.supported_key = supported_key
         self._base_symbols: Set[str] = {s.upper() for s in settings.symbols}
@@ -95,6 +106,23 @@ class GEXBotPoller:
         self._last_supported_refresh: Optional[date] = None
         self.snapshot_count = 0
         self.last_snapshot_ts: Optional[str] = None
+        self._last_cycle_started_ts: Optional[str] = None
+        self._last_cycle_completed_ts: Optional[str] = None
+        self._last_cycle_duration_seconds: Optional[float] = None
+        self._last_cycle_interval_seconds: Optional[float] = None
+        self._last_cycle_symbols: List[str] = []
+        self._last_cycle_success_count = 0
+        self._last_cycle_mode: Optional[str] = None
+        self._last_cycle_fetch_duration_seconds: Optional[float] = None
+        self._last_cycle_store_duration_seconds: Optional[float] = None
+        self._last_cycle_redis_duration_seconds: Optional[float] = None
+        self._last_cycle_ts_duration_seconds: Optional[float] = None
+        self._last_cycle_fetch_max_seconds: Optional[float] = None
+        self._last_cycle_fetch_avg_seconds: Optional[float] = None
+        self._last_cycle_store_max_seconds: Optional[float] = None
+        self._last_cycle_store_avg_seconds: Optional[float] = None
+        self._last_cycle_symbol_timings: List[Dict[str, Any]] = []
+        self._pending_ts_tasks: Set[asyncio.Task[None]] = set()
         # Track last written timestamp per symbol (ms) to ensure monotonic writes
         self._last_snapshot_ms_by_symbol: Dict[str, int] = {}
         self._snapshot_lock = threading.Lock()
@@ -115,6 +143,7 @@ class GEXBotPoller:
 
     async def stop(self) -> None:
         self._stop_event.set()
+        await self.wait_for_pending_timeseries_writes()
         if self._task:
             self._task.cancel()
             try:
@@ -144,39 +173,88 @@ class GEXBotPoller:
                 # Only poll configured symbols; intersect with supported list when available.
                 effective_symbols = self._effective_symbols()
                 # For NQ poller (base symbols include NQ_NDX), prefer a very fast RTH poll of the
-                # key symbols to reduce load: only SPX and NQ_NDX (in priority order) during RTH.
+                # key symbols to reduce load: SPX, NQ_NDX, and VIX (in priority order) during RTH.
+                is_rth = self._is_rth_now()
                 if "NQ_NDX" in self._base_symbols:
-                    fast_list = ["SPX", "NQ_NDX"]  # SPX first for priority ordering
-                    symbols = (
-                        [s for s in fast_list if s in set(effective_symbols)]
-                        if self._is_rth_now()
-                        else effective_symbols
-                    )
+                    fast_list = ["SPX", "NQ_NDX", "VIX"]  # SPX first for priority ordering
+                    symbols = [s for s in fast_list if s in set(effective_symbols)] if is_rth else effective_symbols
+                    mode = "rth_fast_path" if is_rth else "configured"
                 else:
                     symbols = effective_symbols
+                    mode = "configured"
+                self._last_cycle_started_ts = datetime.now(timezone.utc).isoformat()
+                self._last_cycle_symbols = list(symbols)
+                self._last_cycle_interval_seconds = interval_seconds
+                self._last_cycle_mode = mode
                 LOGGER.debug(
                     "poll-loop symbols=%s interval=%.3fs", symbols, interval_seconds
                 )
 
-                async def _fetch_and_store(symbol: str) -> None:
+                async def _fetch_and_store(symbol: str) -> Dict[str, Any]:
                     try:
                         fetch_start = asyncio.get_event_loop().time()
                         snapshot = await self._fetch_symbol(session, symbol)
                         if snapshot:
+                            store_start = asyncio.get_event_loop().time()
                             self.latest[symbol.upper()] = snapshot
                             await self._record_timeseries(snapshot)
+                            fetch_duration = store_start - fetch_start
+                            store_duration = asyncio.get_event_loop().time() - store_start
                             LOGGER.debug(
-                                "fetched %s ts=%s in %.3fs",
+                                "fetched %s ts=%s in %.3fs (store=%.3fs)",
                                 symbol,
                                 snapshot.get("timestamp"),
-                                asyncio.get_event_loop().time() - fetch_start,
+                                fetch_duration,
+                                store_duration,
                             )
+                            return {
+                                "symbol": symbol.upper(),
+                                "ok": True,
+                                "fetch_seconds": fetch_duration,
+                                "store_seconds": store_duration,
+                            }
                         else:
                             LOGGER.debug("no snapshot returned for %s", symbol)
+                            return {
+                                "symbol": symbol.upper(),
+                                "ok": False,
+                                "fetch_seconds": None,
+                                "store_seconds": None,
+                            }
                     except Exception:  # pragma: no cover - defensive logging
                         LOGGER.exception("Failed to poll GEXBot for %s", symbol)
+                        return {
+                            "symbol": symbol.upper(),
+                            "ok": False,
+                            "fetch_seconds": None,
+                            "store_seconds": None,
+                        }
 
-                await asyncio.gather(*[_fetch_and_store(sym) for sym in symbols])
+                results = await asyncio.gather(*[_fetch_and_store(sym) for sym in symbols])
+                self._last_cycle_success_count = sum(1 for item in results if item.get("ok"))
+                fetch_durations = [
+                    float(item["fetch_seconds"])
+                    for item in results
+                    if item.get("fetch_seconds") is not None
+                ]
+                store_durations = [
+                    float(item["store_seconds"])
+                    for item in results
+                    if item.get("store_seconds") is not None
+                ]
+                self._last_cycle_fetch_max_seconds = max(fetch_durations) if fetch_durations else None
+                self._last_cycle_fetch_avg_seconds = (
+                    sum(fetch_durations) / len(fetch_durations) if fetch_durations else None
+                )
+                self._last_cycle_store_max_seconds = max(store_durations) if store_durations else None
+                self._last_cycle_store_avg_seconds = (
+                    sum(store_durations) / len(store_durations) if store_durations else None
+                )
+                self._last_cycle_symbol_timings = results
+                self._last_cycle_completed_ts = datetime.now(timezone.utc).isoformat()
+                self._last_cycle_duration_seconds = (
+                    asyncio.get_event_loop().time() - loop_start
+                )
                 interval_seconds = self._current_interval_seconds()
                 label = "RTH" if self._is_rth_now() else "off-hours"
                 if label != self._last_interval_setting:
@@ -259,69 +337,54 @@ class GEXBotPoller:
         base_url = f"https://api.gexbot.com/{symbol}/classic/{self.settings.aggregation_period}"
         headers = self._auth_headers()
 
-        async def _endpoint() -> Optional[Dict[str, Any]]:
-            try:
-                async with session.get(base_url, headers=headers) as resp:
-                    if resp.status != 200:
-                        LOGGER.debug(
-                            "GEXBot %s returned %s",
-                            symbol,
-                            resp.status,
-                        )
-                        return None
-                    return await resp.json()
-            except asyncio.CancelledError:
-                raise
-            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
-                LOGGER.debug("GEXBot %s request failed: %s", symbol, exc)
-                return None
+        try:
+            async with session.get(base_url, headers=headers) as resp:
+                if resp.status != 200:
+                    LOGGER.debug("GEXBot %s returned %s", symbol, resp.status)
+                    return None
+                zero = await resp.json()
+        except asyncio.CancelledError:
+            raise
+        except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+            LOGGER.debug("GEXBot %s request failed: %s", symbol, exc)
+            return None
 
-        async def _maxchange_endpoint() -> Optional[Dict[str, Any]]:
-            try:
-                async with session.get(
-                    f"{base_url}/maxchange", headers=headers
-                ) as resp:
-                    if resp.status != 200:
-                        LOGGER.debug(
-                            "GEXBot %s maxchange returned %s",
-                            symbol,
-                            resp.status,
-                        )
-                        return None
-                    return await resp.json()
-            except asyncio.CancelledError:
-                raise
-            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
-                LOGGER.debug("GEXBot %s maxchange request failed: %s", symbol, exc)
-                return None
-
-        # Fetch zero and maxchange endpoints concurrently
-        zero, maxchange_data = await asyncio.gather(_endpoint(), _maxchange_endpoint())
         if not zero:
             LOGGER.debug("GEXBot %s returned no data", symbol)
             return None
 
-        result = self._combine_payloads(symbol, zero, maxchange_data=maxchange_data)
-        result["raw"] = {"zero": zero, "maxchange": maxchange_data}
+        result = self._combine_payloads(symbol, zero)
+        result["raw"] = {"zero": zero}
         return result
 
     async def _record_timeseries(self, snapshot: Dict[str, Any]) -> None:
+        redis_start = asyncio.get_event_loop().time()
+        self._store_snapshot_blob(snapshot)
+        self._last_cycle_redis_duration_seconds = (
+            asyncio.get_event_loop().time() - redis_start
+        )
+        ts_start = asyncio.get_event_loop().time()
         if self.ts_client:
-            await asyncio.to_thread(self._write_snapshot_series, snapshot)
+            self._queue_timeseries_write(snapshot)
+        self._last_cycle_ts_duration_seconds = (
+            asyncio.get_event_loop().time() - ts_start
+        )
+        if self.duckdb_writer:
+            self.duckdb_writer.enqueue_snapshot(snapshot)
         else:
-            # Even without a timeseries sink, persist the snapshot for downstream consumers
-            self._store_snapshot_blob(snapshot)
-            self.snapshot_count += 1
-            self.last_snapshot_ts = (
-                snapshot.get("timestamp") or datetime.utcnow().isoformat()
+            LOGGER.debug(
+                "Skipping DuckDB enqueue for %s because no shared writer is attached",
+                snapshot.get("symbol") or snapshot.get("ticker") or "UNKNOWN",
             )
+        self.snapshot_count += 1
+        self.last_snapshot_ts = (
+            snapshot.get("timestamp") or datetime.utcnow().isoformat()
+        )
 
     def _combine_payloads(
         self,
         symbol: str,
         zero: Optional[Dict[str, Any]],
-        *,
-        maxchange_data: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         def _first(*values):
             for value in values:
@@ -336,29 +399,6 @@ class GEXBotPoller:
                 float(timestamp), tz=timezone.utc
             ).isoformat()
 
-        # Prefer dedicated maxchange endpoint response, fall back to embedded field
-        maxchange_source = maxchange_data if isinstance(maxchange_data, dict) else None
-        if not maxchange_source:
-            maxchange_source = (
-                zero_payload.get("maxchange") if isinstance(zero_payload, dict) else {}
-            )
-        maxchange_payload = maxchange_source or {}
-
-        maxchange_windows: Dict[str, list[float]] = {}
-        if isinstance(maxchange_payload, dict):
-            for window, data in maxchange_payload.items():
-                if window in {"ticker", "timestamp"}:
-                    continue
-                if isinstance(data, (list, tuple)) and len(data) == 2:
-                    try:
-                        strike = float(data[0]) if data[0] is not None else None
-                        delta = float(data[1]) if data[1] is not None else None
-                    except (TypeError, ValueError):
-                        continue
-                    if strike is None or delta is None:
-                        continue
-                    maxchange_windows[window] = [strike, delta]
-
         net_gex = _first(
             zero_payload.get("net_gex"),
             zero_payload.get("net_gex_vol"),
@@ -372,38 +412,19 @@ class GEXBotPoller:
         snapshot = {
             "symbol": symbol.upper(),
             "timestamp": timestamp,
-            "spot": _first(
-                zero_payload.get("spot"),
-            ),
-            "zero_gamma": _first(
-                zero_payload.get("zero_gamma"),
-            ),
-            "net_gex": net_gex,
-            "net_gex_oi": net_gex_oi,
-            "sum_gex_vol": zero_payload.get("sum_gex_vol"),
-            "sum_gex_oi": zero_payload.get("sum_gex_oi"),
-            "major_pos_vol": _first(
-                zero_payload.get("major_pos_vol"),
-            ),
-            "major_neg_vol": _first(
-                zero_payload.get("major_neg_vol"),
-            ),
-            "major_pos_oi": _first(
-                zero_payload.get("major_pos_oi"),
-            ),
-            "major_neg_oi": _first(
-                zero_payload.get("major_neg_oi"),
-            ),
-            "major_pos_strike": _first(
-                zero_payload.get("major_pos_strike"),
-            ),
-            "major_neg_strike": _first(
-                zero_payload.get("major_neg_strike"),
-            ),
-            "delta_risk_reversal": _first(
-                zero_payload.get("delta_risk_reversal"),
-            ),
-            "maxchange": maxchange_windows,
+            "spot": _to_float(_first(zero_payload.get("spot"))),
+            "zero_gamma": _to_float(_first(zero_payload.get("zero_gamma"))),
+            "net_gex": _to_float(net_gex),
+            "net_gex_oi": _to_float(net_gex_oi),
+            "sum_gex_vol": _to_float(zero_payload.get("sum_gex_vol")),
+            "sum_gex_oi": _to_float(zero_payload.get("sum_gex_oi")),
+            "major_pos_vol": _to_float(_first(zero_payload.get("major_pos_vol"))),
+            "major_neg_vol": _to_float(_first(zero_payload.get("major_neg_vol"))),
+            "major_pos_oi": _to_float(_first(zero_payload.get("major_pos_oi"))),
+            "major_neg_oi": _to_float(_first(zero_payload.get("major_neg_oi"))),
+            "major_pos_strike": _to_float(_first(zero_payload.get("major_pos_strike"))),
+            "major_neg_strike": _to_float(_first(zero_payload.get("major_neg_strike"))),
+            "delta_risk_reversal": _to_float(_first(zero_payload.get("delta_risk_reversal"))),
         }
         snapshot["net_gex_vol"] = snapshot["net_gex"]
         snapshot["major_pos"] = snapshot["major_pos_vol"]
@@ -422,18 +443,6 @@ class GEXBotPoller:
         symbol = snapshot.get("symbol", "UNKNOWN").upper()
         timestamp = snapshot.get("timestamp") or datetime.utcnow().isoformat()
         timestamp_ms = _timestamp_ms(timestamp)
-        symbol = snapshot.get("symbol", "UNKNOWN").upper()
-        # Reject live data that is stale: within 1-hour recency window but older than 5 min.
-        # Historical snapshots (> 1 hour old) bypass this check so backfills still work.
-        now_ms = int(time.time() * 1000)
-        age_ms = now_ms - timestamp_ms
-        _LIVE_WINDOW_MS = 60 * 60 * 1000   # 1 hour
-        _FRESHNESS_CUTOFF_MS = 5 * 60 * 1000  # 5 minutes
-        if 0 < age_ms < _LIVE_WINDOW_MS and age_ms > _FRESHNESS_CUTOFF_MS:
-            LOGGER.debug(
-                "Skipping stale live snapshot for %s (age=%.1fmin)", symbol, age_ms / 60_000
-            )
-            return
         metrics = {
             "spot": snapshot.get("spot"),
             "zero_gamma": snapshot.get("zero_gamma"),
@@ -447,20 +456,13 @@ class GEXBotPoller:
             "major_neg_oi": snapshot.get("major_neg_oi"),
             "delta_risk_reversal": snapshot.get("delta_risk_reversal"),
         }
-        maxchange = snapshot.get("maxchange") or {}
         # Hold the snapshot lock while assigning the timestamp AND writing to ts_client so
         # that insertion order into ts_client.samples always matches the timestamp order.
         # This prevents a race where the higher-timestamp thread writes before the lower one.
         with self._snapshot_lock:
             last_ms = self._last_snapshot_ms_by_symbol.get(symbol)
             if last_ms is not None:
-                if timestamp_ms < last_ms:
-                    LOGGER.debug(
-                        "Skipping out-of-order snapshot for %s (ts=%d < last=%d)",
-                        symbol, timestamp_ms, last_ms,
-                    )
-                    return
-                if timestamp_ms == last_ms:
+                if timestamp_ms <= last_ms:
                     timestamp_ms = last_ms + 1
             self._last_snapshot_ms_by_symbol[symbol] = timestamp_ms
             samples = []
@@ -479,37 +481,6 @@ class GEXBotPoller:
                         {"symbol": symbol, "type": "gex", "field": metric_name},
                     )
                 )
-            if isinstance(maxchange, dict):
-                for window, data in maxchange.items():
-                    if isinstance(data, (list, tuple)) and len(data) == 2:
-                        strike, delta = data
-                        try:
-                            samples.append(
-                                (
-                                    f"ts:gex:maxchange:{symbol}:{window}:delta",
-                                    timestamp_ms,
-                                    float(delta or 0.0),
-                                    {
-                                        "symbol": symbol,
-                                        "type": "gex",
-                                        "field": f"maxchange_{window}_delta",
-                                    },
-                                )
-                            )
-                            samples.append(
-                                (
-                                    f"ts:gex:maxchange:{symbol}:{window}:strike",
-                                    timestamp_ms,
-                                    float(strike or 0.0),
-                                    {
-                                        "symbol": symbol,
-                                        "type": "gex",
-                                        "field": f"maxchange_{window}_strike",
-                                    },
-                                )
-                            )
-                        except (TypeError, ValueError):
-                            continue
             if samples:
                 try:
                     ts_client.multi_add(samples)
@@ -519,11 +490,26 @@ class GEXBotPoller:
                         symbol,
                         exc_info=True,
                     )
-        self._store_snapshot_blob(snapshot)
-        self.snapshot_count += 1
-        self.last_snapshot_ts = (
-            snapshot.get("timestamp") or datetime.utcnow().isoformat()
-        )
+
+    def _queue_timeseries_write(self, snapshot: Dict[str, Any]) -> None:
+        async def _run() -> None:
+            try:
+                await asyncio.to_thread(self._write_snapshot_series, snapshot)
+            except Exception:
+                LOGGER.exception(
+                    "GEX RedisTimeSeries write failed for %s",
+                    snapshot.get("symbol") or snapshot.get("ticker") or "UNKNOWN",
+                )
+
+        task = asyncio.create_task(_run(), name="gexbot-ts-write")
+        self._pending_ts_tasks.add(task)
+        task.add_done_callback(self._pending_ts_tasks.discard)
+
+    async def wait_for_pending_timeseries_writes(self) -> None:
+        if not self._pending_ts_tasks:
+            return
+        pending = list(self._pending_ts_tasks)
+        await asyncio.gather(*pending, return_exceptions=True)
 
     def _store_snapshot_blob(self, snapshot: Dict[str, Any]) -> None:
         symbol = snapshot.get("symbol") or snapshot.get("ticker")
@@ -736,6 +722,25 @@ class GEXBotPoller:
             "snapshot_count": self.snapshot_count,
             "last_snapshot_ts": self.last_snapshot_ts,
             "base_symbols": sorted(self._base_symbols),
+            "effective_interval_seconds": self._current_interval_seconds(),
+            "last_cycle_started_ts": self._last_cycle_started_ts,
+            "last_cycle_completed_ts": self._last_cycle_completed_ts,
+            "last_cycle_duration_seconds": self._last_cycle_duration_seconds,
+            "last_cycle_interval_seconds": self._last_cycle_interval_seconds,
+            "last_cycle_mode": self._last_cycle_mode,
+            "last_cycle_symbols": self._last_cycle_symbols,
+            "last_cycle_success_count": self._last_cycle_success_count,
+            "last_cycle_fetch_duration_seconds": self._last_cycle_fetch_duration_seconds,
+            "last_cycle_store_duration_seconds": self._last_cycle_store_duration_seconds,
+            "last_cycle_redis_duration_seconds": self._last_cycle_redis_duration_seconds,
+            "last_cycle_ts_duration_seconds": self._last_cycle_ts_duration_seconds,
+            "last_cycle_fetch_max_seconds": self._last_cycle_fetch_max_seconds,
+            "last_cycle_fetch_avg_seconds": self._last_cycle_fetch_avg_seconds,
+            "last_cycle_store_max_seconds": self._last_cycle_store_max_seconds,
+            "last_cycle_store_avg_seconds": self._last_cycle_store_avg_seconds,
+            "last_cycle_symbol_timings": self._last_cycle_symbol_timings,
+            "pending_timeseries_writes": len(self._pending_ts_tasks),
+            "is_rth_now": self._is_rth_now(),
         }
 
 

@@ -66,5 +66,6 @@ async def test_gexbot_poller_uses_authorization_header():
         "User-Agent": "DataPipeline/2.0",
         "Accept": "application/json",
     }
-    assert session.calls[-2][1] == expected_headers
+    assert len(session.calls) == 2
+    assert session.calls[-1][0] == "https://api.gexbot.com/SPX/classic/zero"
     assert session.calls[-1][1] == expected_headers

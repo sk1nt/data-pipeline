@@ -38,6 +38,10 @@ def _create_temp_databases(base_dir: Path) -> Path:
                 sum_gex_oi DOUBLE,
                 delta_risk_reversal DOUBLE,
                 max_priors VARCHAR,
+                call_wall_candidate1_pct DOUBLE,
+                call_wall_candidate2_pct DOUBLE,
+                put_wall_candidate1_pct DOUBLE,
+                put_wall_candidate2_pct DOUBLE,
                 strikes VARCHAR
             )
             """
@@ -57,7 +61,7 @@ def _create_temp_databases(base_dir: Path) -> Path:
         conn.execute(
             """
             INSERT INTO gex_snapshots VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 1720008000000,
@@ -75,6 +79,10 @@ def _create_temp_databases(base_dir: Path) -> Path:
                 15.0,
                 0.5,
                 json.dumps([[1.0, 2.0]]),
+                12.5,
+                7.5,
+                10.0,
+                5.0,
                 json.dumps([{"strike": 20000.0, "gamma": 1.2}]),
             ],
         )

@@ -42,6 +42,10 @@ def _create_gex_tables(db_path: Path) -> None:
             sum_gex_oi DOUBLE,
             delta_risk_reversal DOUBLE,
             max_priors VARCHAR,
+            call_wall_candidate1_pct DOUBLE,
+            call_wall_candidate2_pct DOUBLE,
+            put_wall_candidate1_pct DOUBLE,
+            put_wall_candidate2_pct DOUBLE,
             strikes VARCHAR
         )
         """
@@ -84,6 +88,10 @@ def test_write_gex_tables_dedupes_duplicate_rows(tmp_path: Path) -> None:
             "sum_gex_oi": 10.0,
             "delta_risk_reversal": 11.0,
             "max_priors": "first",
+            "call_wall_candidate1_pct": 50.0,
+            "call_wall_candidate2_pct": 25.0,
+            "put_wall_candidate1_pct": 40.0,
+            "put_wall_candidate2_pct": 20.0,
         },
         {
             "timestamp": 1234,
@@ -101,6 +109,10 @@ def test_write_gex_tables_dedupes_duplicate_rows(tmp_path: Path) -> None:
             "sum_gex_oi": 10.5,
             "delta_risk_reversal": 11.5,
             "max_priors": "second",
+            "call_wall_candidate1_pct": 60.0,
+            "call_wall_candidate2_pct": 30.0,
+            "put_wall_candidate1_pct": 45.0,
+            "put_wall_candidate2_pct": 22.5,
         },
     ]
     strike_rows = [
@@ -129,12 +141,65 @@ def test_write_gex_tables_dedupes_duplicate_rows(tmp_path: Path) -> None:
 
     conn = duckdb.connect(str(db_path), read_only=True)
     snapshot = conn.execute(
-        "SELECT timestamp, ticker, spot_price, max_priors FROM gex_snapshots"
+        """
+        SELECT
+            timestamp,
+            ticker,
+            spot_price,
+            max_priors,
+            call_wall_candidate1_pct,
+            call_wall_candidate2_pct,
+            put_wall_candidate1_pct,
+            put_wall_candidate2_pct
+        FROM gex_snapshots
+        """
     ).fetchone()
     strike = conn.execute(
         "SELECT timestamp, ticker, strike, gamma, oi_gamma, priors FROM gex_strikes"
     ).fetchone()
     conn.close()
 
-    assert snapshot == (1234, "NQ_NDX", 101.0, "second")
+    assert snapshot == (
+        1234,
+        "NQ_NDX",
+        101.0,
+        "second",
+        60.0,
+        30.0,
+        45.0,
+        22.5,
+    )
     assert strike == (1234, "NQ_NDX", 28974.92, 3.0, 4.0, "second")
+
+
+def test_build_snapshot_row_derives_candidate_percentages_from_strikes() -> None:
+    worker = RedisFlushWorker(_FakeRedisClient(), object())
+    snapshot = {
+        "symbol": "NQ_NDX",
+        "timestamp": 1234,
+        "spot": 20000.0,
+        "zero_gamma": 19950.0,
+        "net_gex": 1.0,
+        "major_pos_vol": 20010.0,
+        "major_neg_vol": 19900.0,
+        "sum_gex_vol": 2.0,
+        "sum_gex_oi": 3.0,
+        "delta_risk_reversal": 0.1,
+        "max_priors": ["x"],
+        "strikes": [
+            [20010.0, 10.0],
+            [20011.0, 5.0],
+            [20012.0, 2.5],
+            [19900.0, -20.0],
+            [19899.0, -10.0],
+            [19898.0, -5.0],
+        ],
+    }
+
+    row = worker._build_snapshot_row(snapshot)
+
+    assert row is not None
+    assert row["call_wall_candidate1_pct"] == 50.0
+    assert row["call_wall_candidate2_pct"] == 25.0
+    assert row["put_wall_candidate1_pct"] == 50.0
+    assert row["put_wall_candidate2_pct"] == 25.0

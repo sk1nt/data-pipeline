@@ -24,6 +24,14 @@ class FailingTSClient:
         raise RuntimeError("TS unavailable")
 
 
+class FakeDuckDBWriter:
+    def __init__(self):
+        self.snapshots = []
+
+    def enqueue_snapshot(self, snapshot):
+        self.snapshots.append(snapshot)
+
+
 class FakeRedisClient:
     def __init__(self):
         self._store = {}
@@ -82,6 +90,7 @@ async def test_snapshot_timestamps_increment():
     # Force RTH branch to use SPX and NQ_NDX
     poller._is_rth_now = lambda: True
     await poller._run()
+    await poller.wait_for_pending_timeseries_writes()
 
     # Collect snapshot keys and timestamps
     pairs = [(rec[0], rec[1]) for rec in ts.samples if rec[0].startswith("ts:gex:")]
@@ -133,6 +142,7 @@ async def test_static_snapshot_timestamps_bumped():
     poller._fetch_symbol = fake_fetch_symbol_static
     poller._is_rth_now = lambda: True
     await poller._run()
+    await poller.wait_for_pending_timeseries_writes()
 
     # Ensure duplicate timestamps are bumped so they still publish in order
     pairs = [(rec[0], rec[1]) for rec in ts.samples if rec[0].startswith("ts:gex:")]
@@ -150,11 +160,14 @@ async def test_static_snapshot_timestamps_bumped():
 
 
 @pytest.mark.asyncio
-async def test_snapshot_older_than_cutoff_is_skipped():
+async def test_snapshot_older_than_cutoff_is_persisted():
     ts = FakeTSClient()
     settings = GEXBotPollerSettings(api_key="apikey", symbols=["SPX"])
     fake_redis = FakeRedisClient()
-    poller = GEXBotPoller(settings, redis_client=fake_redis, ts_client=ts)
+    fake_writer = FakeDuckDBWriter()
+    poller = GEXBotPoller(
+        settings, redis_client=fake_redis, ts_client=ts, duckdb_writer=fake_writer
+    )
 
     stale_ts = datetime.utcnow().replace(tzinfo=timezone.utc) - timedelta(minutes=10)
     stale_snapshot = {
@@ -173,18 +186,24 @@ async def test_snapshot_older_than_cutoff_is_skipped():
     }
 
     await poller._record_timeseries(stale_snapshot)
+    await poller.wait_for_pending_timeseries_writes()
 
-    assert ts.samples == []
-    assert poller.snapshot_count == 0
-    assert fake_redis.get("gex:snapshot:SPX") is None
+    assert ts.samples
+    assert poller.snapshot_count == 1
+    assert json.loads(fake_redis.get("gex:snapshot:SPX"))["timestamp"] == stale_ts.isoformat()
+    assert len(fake_writer.snapshots) == 1
+    assert fake_writer.snapshots[0]["symbol"] == "SPX"
 
 
 @pytest.mark.asyncio
-async def test_stale_snapshot_is_skipped():
+async def test_stale_snapshot_still_persists():
     ts = FakeTSClient()
     settings = GEXBotPollerSettings(api_key="apikey", symbols=["SPX"])
     fake_redis = FakeRedisClient()
-    poller = GEXBotPoller(settings, redis_client=fake_redis, ts_client=ts)
+    fake_writer = FakeDuckDBWriter()
+    poller = GEXBotPoller(
+        settings, redis_client=fake_redis, ts_client=ts, duckdb_writer=fake_writer
+    )
 
     latest_ts = datetime(2024, 1, 2, 12, 0, tzinfo=timezone.utc)
     stale_ts = latest_ts - timedelta(minutes=5)
@@ -208,14 +227,47 @@ async def test_stale_snapshot_is_skipped():
 
     await poller._record_timeseries(fresh_snapshot)
     await poller._record_timeseries(stale_snapshot)
+    await poller.wait_for_pending_timeseries_writes()
 
-    # Only the fresh snapshot should be stored and published
     net_gex_samples = [rec for rec in ts.samples if ":net_gex:" in rec[0]]
-    assert len(net_gex_samples) == 1
-    assert poller.snapshot_count == 1
+    assert len(net_gex_samples) == 2
+    assert poller.snapshot_count == 2
+    assert len(fake_writer.snapshots) == 2
 
     cached = json.loads(fake_redis.get("gex:snapshot:SPX"))
-    assert cached["timestamp"] == latest_ts.isoformat()
+    assert cached["timestamp"] == stale_ts.isoformat()
+    assert fake_writer.snapshots[-1]["timestamp"] == stale_ts.isoformat()
+
+
+def test_combine_payloads_normalizes_numeric_strings():
+    poller = GEXBotPoller(GEXBotPollerSettings(api_key="apikey", symbols=["SPX"]))
+
+    snapshot = poller._combine_payloads(
+        "SPX",
+        {
+            "timestamp": 1700000000,
+            "spot": "100.5",
+            "zero_gamma": "101.5",
+            "net_gex": "2500000",
+            "net_gex_oi": "1250000",
+            "sum_gex_vol": "2500000",
+            "sum_gex_oi": "1250000",
+            "major_pos_vol": "1200000",
+            "major_neg_vol": "-900000",
+            "major_pos_oi": "800000",
+            "major_neg_oi": "-700000",
+            "major_pos_strike": "5025",
+            "major_neg_strike": "4980",
+            "delta_risk_reversal": "-0.75",
+        },
+    )
+
+    assert snapshot["spot"] == 100.5
+    assert snapshot["zero_gamma"] == 101.5
+    assert snapshot["net_gex"] == 2500000.0
+    assert snapshot["delta_risk_reversal"] == -0.75
+    assert snapshot["major_pos_vol"] == 1200000.0
+    assert snapshot["major_neg_vol"] == -900000.0
 
 
 @pytest.mark.asyncio
@@ -223,7 +275,10 @@ async def test_snapshot_cache_writes_even_if_timeseries_fails():
     ts = FailingTSClient()
     settings = GEXBotPollerSettings(api_key="apikey", symbols=["NQ_NDX"])
     fake_redis = FakeRedisClient()
-    poller = GEXBotPoller(settings, redis_client=fake_redis, ts_client=ts)
+    fake_writer = FakeDuckDBWriter()
+    poller = GEXBotPoller(
+        settings, redis_client=fake_redis, ts_client=ts, duckdb_writer=fake_writer
+    )
 
     snapshot = {
         "symbol": "NQ_NDX",
@@ -241,8 +296,11 @@ async def test_snapshot_cache_writes_even_if_timeseries_fails():
     }
 
     await poller._record_timeseries(snapshot)
+    await poller.wait_for_pending_timeseries_writes()
 
     cached = json.loads(fake_redis.get("gex:snapshot:NQ_NDX"))
     assert cached["symbol"] == "NQ_NDX"
     assert cached["net_gex"] == 50
     assert poller.snapshot_count == 1
+    assert len(fake_writer.snapshots) == 1
+    assert fake_writer.snapshots[0]["symbol"] == "NQ_NDX"

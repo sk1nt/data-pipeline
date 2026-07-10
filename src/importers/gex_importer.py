@@ -30,6 +30,10 @@ class GEXImporter:
         sum_gex_oi DOUBLE,
         delta_risk_reversal DOUBLE,
         max_priors VARCHAR,
+        call_wall_candidate1_pct DOUBLE,
+        call_wall_candidate2_pct DOUBLE,
+        put_wall_candidate1_pct DOUBLE,
+        put_wall_candidate2_pct DOUBLE,
         strike_data VARCHAR
         """
         self.db_utils.create_table_if_not_exists(self.table_name, schema)

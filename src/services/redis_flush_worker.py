@@ -710,35 +710,10 @@ class RedisFlushWorker:
         return str(key)
 
     def _flush_gex_snapshots(self) -> Dict[str, int]:
-        try:
-            symbols = self._collect_gex_symbols()
-            if not symbols:
-                return {"gex_snapshots": 0, "gex_strikes": 0}
-            snapshot_rows: List[Dict[str, Any]] = []
-            strike_rows: List[Dict[str, Any]] = []
-            for symbol in symbols:
-                snapshot = self._load_snapshot(symbol)
-                if not snapshot:
-                    continue
-                snapshot_row = self._build_snapshot_row(snapshot)
-                if not snapshot_row:
-                    continue
-                snapshot_rows.append(snapshot_row)
-                strike_rows.extend(
-                    self._build_strike_rows(snapshot, snapshot_row["timestamp"])
-                )
-            if not snapshot_rows:
-                return {"gex_snapshots": 0, "gex_strikes": 0}
-            snapshot_count, strike_count = self._write_gex_tables(
-                snapshot_rows, strike_rows
-            )
-            return {
-                "gex_snapshots": snapshot_count,
-                "gex_strikes": strike_count,
-            }
-        except Exception:
-            LOGGER.exception("Failed to flush GEX snapshots")
-            return {"gex_snapshots": 0, "gex_strikes": 0}
+        # Live GEX snapshots now persist directly from the poller into DuckDB.
+        # Keep this hook as a no-op so the flush worker does not collapse the
+        # event stream back down to the latest blob per symbol.
+        return {"gex_snapshots": 0, "gex_strikes": 0}
 
     def _collect_gex_symbols(self) -> Set[str]:
         symbols = {
@@ -811,6 +786,7 @@ class RedisFlushWorker:
         epoch_ms = self._parse_snapshot_epoch_ms(snapshot.get("timestamp"))
         if not ticker or epoch_ms is None:
             return None
+        candidate_fields = self._gex_candidate_fields(snapshot)
         max_priors = snapshot.get("max_priors")
         if max_priors is not None:
             try:
@@ -835,6 +811,18 @@ class RedisFlushWorker:
             "sum_gex_oi": snapshot.get("sum_gex_oi"),
             "delta_risk_reversal": snapshot.get("delta_risk_reversal"),
             "max_priors": max_priors_str,
+            "call_wall_candidate1_pct": snapshot.get("call_wall_candidate1_pct")
+            if snapshot.get("call_wall_candidate1_pct") is not None
+            else candidate_fields.get("call_wall_candidate1_pct"),
+            "call_wall_candidate2_pct": snapshot.get("call_wall_candidate2_pct")
+            if snapshot.get("call_wall_candidate2_pct") is not None
+            else candidate_fields.get("call_wall_candidate2_pct"),
+            "put_wall_candidate1_pct": snapshot.get("put_wall_candidate1_pct")
+            if snapshot.get("put_wall_candidate1_pct") is not None
+            else candidate_fields.get("put_wall_candidate1_pct"),
+            "put_wall_candidate2_pct": snapshot.get("put_wall_candidate2_pct")
+            if snapshot.get("put_wall_candidate2_pct") is not None
+            else candidate_fields.get("put_wall_candidate2_pct"),
         }
 
     def _build_strike_rows(
@@ -894,6 +882,7 @@ class RedisFlushWorker:
         df_snapshots = pl.from_dicts(snapshot_rows)
         df_strikes = pl.from_dicts(strike_rows) if strike_rows else None
         conn = duckdb.connect(str(self.settings.gex_snapshot_db))
+        self._ensure_gex_snapshot_columns(conn)
         conn.register("gex_snapshots_flush", df_snapshots)
         conn.execute(
             """
@@ -905,7 +894,28 @@ class RedisFlushWorker:
         )
         conn.execute(
             """
-            INSERT INTO gex_snapshots
+            INSERT INTO gex_snapshots (
+                timestamp,
+                ticker,
+                spot_price,
+                zero_gamma,
+                net_gex,
+                min_dte,
+                sec_min_dte,
+                major_pos_vol,
+                major_pos_oi,
+                major_neg_vol,
+                major_neg_oi,
+                sum_gex_vol,
+                sum_gex_oi,
+                delta_risk_reversal,
+                max_priors,
+                call_wall_candidate1_pct,
+                call_wall_candidate2_pct,
+                put_wall_candidate1_pct,
+                put_wall_candidate2_pct,
+                strikes
+            )
             SELECT
                 timestamp,
                 ticker,
@@ -922,6 +932,10 @@ class RedisFlushWorker:
                 sum_gex_oi,
                 delta_risk_reversal,
                 max_priors,
+                call_wall_candidate1_pct,
+                call_wall_candidate2_pct,
+                put_wall_candidate1_pct,
+                put_wall_candidate2_pct,
                 NULL AS strikes
             FROM gex_snapshots_flush
             """
@@ -946,6 +960,20 @@ class RedisFlushWorker:
             )
         conn.close()
         return len(snapshot_rows), len(strike_rows)
+
+    def _ensure_gex_snapshot_columns(self, conn: duckdb.DuckDBPyConnection) -> None:
+        """Add candidate percentage columns to legacy gex_snapshots tables."""
+        for column in (
+            "call_wall_candidate1_pct",
+            "call_wall_candidate2_pct",
+            "put_wall_candidate1_pct",
+            "put_wall_candidate2_pct",
+            "strikes",
+        ):
+            conn.execute(
+                f"ALTER TABLE gex_snapshots ADD COLUMN IF NOT EXISTS {column} "
+                f"{'VARCHAR' if column == 'strikes' else 'DOUBLE'}"
+            )
 
     @staticmethod
     def _dedupe_rows(

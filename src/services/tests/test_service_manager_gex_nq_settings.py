@@ -92,6 +92,62 @@ def test_gex_poller_uses_configured_symbols_when_env_missing(monkeypatch):
         settings.gex_poll_symbols = old_symbols
 
 
+def test_gex_pollers_share_one_duckdb_writer(monkeypatch):
+    old_api_key = settings.gexbot_api_key
+    old_gex_enabled = settings.gex_polling_enabled
+    old_nq_enabled = settings.gex_nq_polling_enabled
+    try:
+        settings.gexbot_api_key = "fake"
+        settings.gex_polling_enabled = True
+        settings.gex_nq_polling_enabled = True
+
+        manager = ServiceManager()
+
+        class FakeWriter:
+            def __init__(self, settings_obj=None):
+                self.settings = settings_obj
+                self.started = False
+                self.stopped = False
+
+            def start(self):
+                self.started = True
+
+            async def stop(self):
+                self.stopped = True
+
+            def status(self):
+                return {"running": self.started and not self.stopped}
+
+        class FakeGEXBotPoller:
+            def __init__(self, settings_obj, *, redis_client=None, ts_client=None, duckdb_writer=None, **_):
+                self.settings = settings_obj
+                self.duckdb_writer = duckdb_writer
+                self.redis_client = redis_client
+                self.ts_client = ts_client
+
+            def start(self):
+                return None
+
+        import src.data_pipeline
+
+        monkeypatch.setattr(src.data_pipeline._module, "GEXDuckDBWriter", FakeWriter)
+        monkeypatch.setattr(src.data_pipeline._module, "GEXBotPoller", FakeGEXBotPoller)
+
+        manager.start_service("gex_poller")
+        manager.start_service("gex_nq_poller")
+
+        assert manager.gex_duckdb_writer is not None
+        assert manager.gex_duckdb_writer.started is True
+        assert manager.gex_poller is not None
+        assert manager.gex_nq_poller is not None
+        assert manager.gex_poller.duckdb_writer is manager.gex_duckdb_writer
+        assert manager.gex_nq_poller.duckdb_writer is manager.gex_duckdb_writer
+    finally:
+        settings.gexbot_api_key = old_api_key
+        settings.gex_polling_enabled = old_gex_enabled
+        settings.gex_nq_polling_enabled = old_nq_enabled
+
+
 @pytest.mark.asyncio
 async def test_gex_nq_poller_poll_now_uses_one_shot_fetch(monkeypatch):
     old_api_key = settings.gexbot_api_key

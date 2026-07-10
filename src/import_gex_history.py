@@ -165,9 +165,30 @@ class GEXHistoryImporter:
         with gex_db.gex_data_connection() as conn:
             # Ensure new columns exist
             try:
+                for column in (
+                    "call_wall_candidate1_pct",
+                    "call_wall_candidate2_pct",
+                    "put_wall_candidate1_pct",
+                    "put_wall_candidate2_pct",
+                ):
+                    conn.execute(
+                        f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column} DOUBLE"
+                    )
+                conn.execute(
+                    f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS strikes VARCHAR"
+                )
                 conn.execute(
                     "ALTER TABLE gex_snapshots ADD COLUMN IF NOT EXISTS strikes VARCHAR"
                 )
+                for column in (
+                    "call_wall_candidate1_pct",
+                    "call_wall_candidate2_pct",
+                    "put_wall_candidate1_pct",
+                    "put_wall_candidate2_pct",
+                ):
+                    conn.execute(
+                        f"ALTER TABLE gex_snapshots ADD COLUMN IF NOT EXISTS {column} DOUBLE"
+                    )
             except Exception:
                 pass
             conn.execute(
@@ -183,7 +204,10 @@ class GEXHistoryImporter:
                     timestamp, ticker, spot_price, zero_gamma, net_gex,
                     min_dte, sec_min_dte, major_pos_vol, major_pos_oi,
                     major_neg_vol, major_neg_oi, sum_gex_vol, sum_gex_oi,
-                    delta_risk_reversal, max_priors
+                    delta_risk_reversal, max_priors,
+                    call_wall_candidate1_pct, call_wall_candidate2_pct,
+                    put_wall_candidate1_pct, put_wall_candidate2_pct,
+                    strikes
                 )
                 SELECT
                     CAST(timestamp * 1000 AS BIGINT) AS timestamp,
@@ -201,6 +225,10 @@ class GEXHistoryImporter:
                     sum_gex_oi,
                     delta_risk_reversal,
                     CASE WHEN max_priors IS NULL THEN NULL ELSE to_json(max_priors) END AS max_priors,
+                    CASE WHEN call_wall_candidate1_pct IS NULL THEN NULL ELSE CAST(call_wall_candidate1_pct AS DOUBLE) END AS call_wall_candidate1_pct,
+                    CASE WHEN call_wall_candidate2_pct IS NULL THEN NULL ELSE CAST(call_wall_candidate2_pct AS DOUBLE) END AS call_wall_candidate2_pct,
+                    CASE WHEN put_wall_candidate1_pct IS NULL THEN NULL ELSE CAST(put_wall_candidate1_pct AS DOUBLE) END AS put_wall_candidate1_pct,
+                    CASE WHEN put_wall_candidate2_pct IS NULL THEN NULL ELSE CAST(put_wall_candidate2_pct AS DOUBLE) END AS put_wall_candidate2_pct,
                     CASE WHEN strikes IS NULL THEN NULL ELSE to_json(strikes) END AS strikes
                 FROM {table_name}
                 """

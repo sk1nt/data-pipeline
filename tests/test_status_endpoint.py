@@ -98,6 +98,26 @@ def test_control_endpoints(monkeypatch):
         assert resp.json().get("status") == "restarted"
 
 
+def test_get_latest_gex_delta_uses_timeseries_history():
+    class _FakeRedis:
+        def execute_command(self, *args):
+            assert args[:4] == ("TS.REVRANGE", "ts:gex:net_gex:NQ_NDX", "+", "-")
+            return [
+                [1730000000000, "1250000"],
+                [1729999990000, "1247500"],
+            ]
+
+    assert module._get_latest_gex_delta(_FakeRedis(), "NQ_NDX") == 2500.0
+
+
+def test_get_latest_gex_delta_handles_missing_history():
+    class _FakeRedis:
+        def execute_command(self, *args):
+            return [[1730000000000, "1250000"]]
+
+    assert module._get_latest_gex_delta(_FakeRedis(), "NQ_NDX") is None
+
+
 class _FakePipeline:
     def __init__(self, recorder):
         self.recorder = recorder
