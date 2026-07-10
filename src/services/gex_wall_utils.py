@@ -139,9 +139,11 @@ def build_compact_wall_fields(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     for prefix, entries in (("pos", pos_entries), ("neg", neg_entries)):
         for idx in (1, 2):
             entry = entries[idx - 1] if idx - 1 < len(entries) else {}
-            fields[f"{prefix}_can{idx}_strike"] = entry.get("strike")
-            fields[f"{prefix}_can{idx}_value"] = entry.get("value")
-            fields[f"{prefix}_can{idx}_pct"] = entry.get("pct")
+            for field in ("strike", "value", "pct"):
+                key = f"{prefix}_can{idx}_{field}"
+                if key in fields and fields[key] is not None:
+                    continue
+                fields[key] = entry.get(field)
     return fields
 
 

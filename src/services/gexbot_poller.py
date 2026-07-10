@@ -7,6 +7,7 @@ import json
 import math
 import logging
 import os
+import socket
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
@@ -74,6 +75,7 @@ class GEXBotPollerSettings:
     dynamic_schedule: bool = True
     exclude_symbols: List[str] = field(default_factory=list)
     auto_refresh_symbols: bool = True
+    maxchange_refresh_seconds: float = 5.0
 
 
 class GEXBotPoller:
@@ -129,6 +131,8 @@ class GEXBotPoller:
         self._auto_refresh_symbols = getattr(
             self.settings, "auto_refresh_symbols", True
         )
+        self._last_maxchange_payload_by_symbol: Dict[str, Dict[str, Any]] = {}
+        self._last_maxchange_fetch_ms_by_symbol: Dict[str, int] = {}
 
     def start(self) -> None:
         if self._task and not self._task.done():
@@ -158,7 +162,14 @@ class GEXBotPoller:
             self.settings.interval_seconds,
         )
         timeout = aiohttp.ClientTimeout(total=12)
-        connector = aiohttp.TCPConnector(limit=8, force_close=True)
+        connector = aiohttp.TCPConnector(
+            limit=16,
+            limit_per_host=8,
+            ttl_dns_cache=300,
+            force_close=False,
+            enable_cleanup_closed=True,
+            family=socket.AF_INET,
+        )
         async with aiohttp.ClientSession(
             connector=connector, timeout=timeout
         ) as session:
@@ -350,10 +361,32 @@ class GEXBotPoller:
                 LOGGER.debug("GEXBot %s request failed for %s: %s", symbol, url, exc)
                 return None
 
-        zero, maxchange = await asyncio.gather(
-            _fetch_json(base_url),
-            _fetch_json(maxchange_url),
+        symbol_key = symbol.upper()
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        maxchange_refresh_ms = int(
+            max(0.0, float(getattr(self.settings, "maxchange_refresh_seconds", 5.0)))
+            * 1000
         )
+        last_maxchange_ms = self._last_maxchange_fetch_ms_by_symbol.get(symbol_key)
+        cached_maxchange = self._last_maxchange_payload_by_symbol.get(symbol_key)
+        fetch_maxchange = (
+            cached_maxchange is None
+            or last_maxchange_ms is None
+            or (now_ms - last_maxchange_ms) >= maxchange_refresh_ms
+        )
+
+        zero_task = asyncio.create_task(_fetch_json(base_url))
+        maxchange_task = asyncio.create_task(_fetch_json(maxchange_url)) if fetch_maxchange else None
+        if maxchange_task is None:
+            zero = await zero_task
+            maxchange = cached_maxchange
+        else:
+            zero, maxchange = await asyncio.gather(zero_task, maxchange_task)
+            if maxchange:
+                self._last_maxchange_payload_by_symbol[symbol_key] = maxchange
+                self._last_maxchange_fetch_ms_by_symbol[symbol_key] = now_ms
+            elif cached_maxchange is not None:
+                maxchange = cached_maxchange
 
         if not zero:
             LOGGER.debug("GEXBot %s returned no data", symbol)
