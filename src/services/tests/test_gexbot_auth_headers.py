@@ -31,6 +31,17 @@ class _FakeSession:
         self.calls.append((url, headers))
         if url.endswith("/tickers"):
             return _FakeResponse(payload={"stocks": ["SPY"], "indexes": ["SPX"]})
+        if url.endswith("/maxchange"):
+            return _FakeResponse(
+                payload={
+                    "current": [100.0, 1.0],
+                    "one": [101.0, 2.0],
+                    "five": [102.0, 3.0],
+                    "ten": [103.0, 4.0],
+                    "fifteen": [104.0, 5.0],
+                    "thirty": [105.0, 6.0],
+                }
+            )
         return _FakeResponse(
             payload={
                 "timestamp": "2026-06-29T13:00:00Z",
@@ -38,10 +49,16 @@ class _FakeSession:
                 "zero_gamma": 1.0,
                 "net_gex": 2.0,
                 "sum_gex_oi": 3.0,
-                "major_pos_vol": 4.0,
-                "major_neg_vol": -5.0,
+                "major_pos_vol": 101.0,
+                "major_neg_vol": 99.0,
                 "major_pos_oi": 6.0,
                 "major_neg_oi": -7.0,
+                "strikes": [
+                    [101.0, 10.0],
+                    [102.0, 5.0],
+                    [99.0, -12.0],
+                    [98.0, -6.0],
+                ],
             }
         )
 
@@ -66,6 +83,22 @@ async def test_gexbot_poller_uses_authorization_header():
         "User-Agent": "DataPipeline/2.0",
         "Accept": "application/json",
     }
-    assert len(session.calls) == 2
-    assert session.calls[-1][0] == "https://api.gexbot.com/SPX/classic/zero"
-    assert session.calls[-1][1] == expected_headers
+    assert len(session.calls) == 3
+    assert {call[0] for call in session.calls} == {
+        "https://api.gexbot.com/tickers",
+        "https://api.gexbot.com/SPX/classic/zero",
+        "https://api.gexbot.com/SPX/classic/zero/maxchange",
+    }
+    assert all(call[1] == expected_headers for call in session.calls[1:])
+    assert snapshot["maxchange"]["current"] == [100.0, 1.0]
+    assert snapshot["pos_can1_strike"] == 102.0
+    assert snapshot["pos_can1_value"] == 5.0
+    assert snapshot["pos_can1_pct"] == 50.0
+    assert snapshot["pos_can2_strike"] is None
+    assert snapshot["pos_can2_value"] is None
+    assert snapshot["neg_can1_strike"] == 98.0
+    assert snapshot["neg_can1_value"] == -6.0
+    assert snapshot["neg_can1_pct"] == 50.0
+    assert snapshot["neg_can2_strike"] is None
+    assert snapshot["neg_can2_value"] is None
+    assert "strikes" not in snapshot

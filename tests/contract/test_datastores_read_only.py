@@ -38,10 +38,18 @@ def _create_temp_databases(base_dir: Path) -> Path:
                 sum_gex_oi DOUBLE,
                 delta_risk_reversal DOUBLE,
                 max_priors VARCHAR,
-                call_wall_candidate1_pct DOUBLE,
-                call_wall_candidate2_pct DOUBLE,
-                put_wall_candidate1_pct DOUBLE,
-                put_wall_candidate2_pct DOUBLE,
+                pos_can1_strike DOUBLE,
+                pos_can1_value DOUBLE,
+                pos_can1_pct DOUBLE,
+                pos_can2_strike DOUBLE,
+                pos_can2_value DOUBLE,
+                pos_can2_pct DOUBLE,
+                neg_can1_strike DOUBLE,
+                neg_can1_value DOUBLE,
+                neg_can1_pct DOUBLE,
+                neg_can2_strike DOUBLE,
+                neg_can2_value DOUBLE,
+                neg_can2_pct DOUBLE,
                 strikes VARCHAR
             )
             """
@@ -60,8 +68,18 @@ def _create_temp_databases(base_dir: Path) -> Path:
         )
         conn.execute(
             """
-            INSERT INTO gex_snapshots VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO gex_snapshots (
+                timestamp, ticker, spot_price, zero_gamma, net_gex, min_dte,
+                sec_min_dte, major_pos_vol, major_pos_oi, major_neg_vol,
+                major_neg_oi, sum_gex_vol, sum_gex_oi, delta_risk_reversal,
+                max_priors, pos_can1_strike, pos_can1_value, pos_can1_pct,
+                pos_can2_strike, pos_can2_value, pos_can2_pct, neg_can1_strike,
+                neg_can1_value, neg_can1_pct, neg_can2_strike, neg_can2_value,
+                neg_can2_pct, strikes
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?
+            )
             """,
             [
                 1720008000000,
@@ -79,9 +97,17 @@ def _create_temp_databases(base_dir: Path) -> Path:
                 15.0,
                 0.5,
                 json.dumps([[1.0, 2.0]]),
-                12.5,
-                7.5,
+                20010.0,
                 10.0,
+                12.5,
+                20011.0,
+                7.5,
+                7.5,
+                19900.0,
+                -10.0,
+                10.0,
+                19899.0,
+                -5.0,
                 5.0,
                 json.dumps([{"strike": 20000.0, "gamma": 1.2}]),
             ],
@@ -223,7 +249,8 @@ def test_new_datastore_handlers_are_read_only(monkeypatch, tmp_path):
 
     assert snapshots["count"] == 1
     assert snapshots["data"][0]["ticker"] == "NQ_NDX"
-    assert snapshots["data"][0]["strikes"][0]["strike"] == 20000.0
+    assert snapshots["data"][0]["pos_can1_strike"] == 20010.0
+    assert snapshots["data"][0]["neg_can1_value"] == -10.0
     assert strikes["data"][0]["priors"] == [19900.0, 20000.0]
     assert market_agg["data"][0]["call_premium"] == 101.1
     assert option_trades["count"] == 0

@@ -56,6 +56,7 @@ from src.services.gex_duckdb_writer import (  # noqa: E402
     GEXDuckDBWriter,
     GEXDuckDBWriterSettings,
 )
+from src.services.gex_wall_utils import build_wall_ladder_from_compact  # noqa: E402
 from src.services.gexbot_poller import (
     GEXBotPoller,
     GEXBotPollerSettings,
@@ -555,7 +556,6 @@ class ServiceManager:
                     rth_interval_seconds=settings.gex_nq_poll_rth_interval_seconds,
                     off_hours_interval_seconds=settings.gex_nq_poll_off_hours_interval_seconds,
                     dynamic_schedule=settings.gex_nq_poll_dynamic_schedule,
-                    sierra_chart_output_path=settings.sierra_chart_output_path,
                     auto_refresh_symbols=False,
                 ),
                 redis_client=self.redis_client,
@@ -833,7 +833,6 @@ class ServiceManager:
                     rth_interval_seconds=settings.gex_nq_poll_rth_interval_seconds,
                     off_hours_interval_seconds=settings.gex_nq_poll_off_hours_interval_seconds,
                     dynamic_schedule=settings.gex_nq_poll_dynamic_schedule,
-                    sierra_chart_output_path=settings.sierra_chart_output_path,
                     auto_refresh_symbols=False,
                 ),
                 redis_client=self.redis_client,
@@ -2192,67 +2191,15 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
         "symbol", "timestamp", "spot", "zero_gamma",
         "net_gex", "net_gex_oi", "sum_gex_vol", "sum_gex_oi",
         "major_pos_vol", "major_neg_vol", "major_pos_oi", "major_neg_oi",
-        "delta_risk_reversal", "max_priors",
+        "delta_risk_reversal", "max_priors", "maxchange",
+        "pos_can1_strike", "pos_can1_value", "pos_can1_pct",
+        "pos_can2_strike", "pos_can2_value", "pos_can2_pct",
+        "neg_can1_strike", "neg_can1_value", "neg_can1_pct",
+        "neg_can2_strike", "neg_can2_value", "neg_can2_pct",
     )
 
     # Map primary symbol to a secondary symbol whose net_gex we display
     CROSS_GEX_MAP = {"NQ_NDX": "SPX", "SPX": "NQ_NDX"}
-
-    def _summarize_wall(major_strike, strikes, prefer_positive):
-        """Compute wall ladder: major + up to 2 next candidates with %."""
-        filtered = []
-        for s, g in strikes:
-            if prefer_positive and g <= 0:
-                continue
-            if not prefer_positive and g >= 0:
-                continue
-            filtered.append((s, g))
-        if not filtered:
-            return None
-        filtered.sort(key=lambda p: abs(p[1]), reverse=True)
-        major = None
-        if isinstance(major_strike, (int, float)):
-            for s, g in filtered:
-                if abs(s - major_strike) <= 0.51:
-                    major = (s, g)
-                    break
-        if major is None:
-            major = filtered[0]
-        entries = []
-        for s, g in filtered:
-            if abs(s - major[0]) <= 0.51:
-                continue
-            pct = (abs(g) / abs(major[1]) * 100) if major[1] else None
-            entries.append({"strike": s, "pct": pct})
-            if len(entries) >= 2:
-                break
-        return {"major": major[0], "next": entries}
-
-    def _flatten_wall_fields(out: Dict[str, Any], side: str, ladder: Dict[str, Any]) -> None:
-        prefix = f"{side}_wall"
-        out[f"{prefix}_major_strike"] = ladder.get("major")
-        entries = ladder.get("next") or []
-        for idx in range(2):
-            entry = entries[idx] if idx < len(entries) and isinstance(entries[idx], dict) else {}
-            n = idx + 1
-            out[f"{prefix}_candidate{n}_strike"] = entry.get("strike")
-            out[f"{prefix}_candidate{n}_pct"] = entry.get("pct")
-
-    def _parse_strikes(raw):
-        """Normalize strikes list into [(strike, gamma), ...]."""
-        if not isinstance(raw, list):
-            return []
-        result = []
-        for entry in raw:
-            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
-                try:
-                    gamma = float(entry[1])
-                    if gamma == 0.0 and len(entry) >= 3:
-                        gamma = float(entry[2])
-                    result.append((float(entry[0]), gamma))
-                except (TypeError, ValueError):
-                    pass
-        return result
 
     def _extract(payload: Dict[str, Any]) -> Dict[str, Any]:
         out = {k: payload.get(k) for k in GEX_FIELDS}
@@ -2260,25 +2207,32 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
         gex_delta = _get_latest_gex_delta(redis_conn, normalized)
         if gex_delta is not None:
             out["gex_delta"] = gex_delta
-        # Wall ladders from strikes data
-        strikes = _parse_strikes(payload.get("strikes"))
-        if strikes:
-            call_ladder = _summarize_wall(payload.get("major_pos_vol"), strikes, True)
-            put_ladder = _summarize_wall(payload.get("major_neg_vol"), strikes, False)
-            if call_ladder:
-                out["call_wall_ladder"] = call_ladder
-                _flatten_wall_fields(out, "call", call_ladder)
-            if put_ladder:
-                out["put_wall_ladder"] = put_ladder
-                _flatten_wall_fields(out, "put", put_ladder)
-            flat = {k: v for k, v in out.items() if k.startswith(("call_wall_", "put_wall_"))}
-            if flat:
-                try:
-                    enriched = dict(payload)
-                    enriched.update(flat)
-                    _cache_gex_snapshot_view(redis_conn, normalized, enriched)
-                except Exception:
-                    pass
+        call_ladder = build_wall_ladder_from_compact(payload, "call")
+        put_ladder = build_wall_ladder_from_compact(payload, "put")
+        if call_ladder.get("next"):
+            out["call_wall_ladder"] = call_ladder
+            out["call_wall_major_strike"] = call_ladder.get("major")
+            for idx, entry in enumerate(call_ladder.get("next") or [], start=1):
+                out[f"call_wall_candidate{idx}_strike"] = entry.get("strike")
+                out[f"call_wall_candidate{idx}_value"] = entry.get("value")
+                out[f"call_wall_candidate{idx}_pct"] = entry.get("pct")
+        if put_ladder.get("next"):
+            out["put_wall_ladder"] = put_ladder
+            out["put_wall_major_strike"] = put_ladder.get("major")
+            for idx, entry in enumerate(put_ladder.get("next") or [], start=1):
+                out[f"put_wall_candidate{idx}_strike"] = entry.get("strike")
+                out[f"put_wall_candidate{idx}_value"] = entry.get("value")
+                out[f"put_wall_candidate{idx}_pct"] = entry.get("pct")
+        flat = {
+            k: v for k, v in out.items() if k.startswith(("call_wall_", "put_wall_"))
+        }
+        if flat:
+            try:
+                enriched = dict(payload)
+                enriched.update(flat)
+                _cache_gex_snapshot_view(redis_conn, normalized, enriched)
+            except Exception:
+                pass
         # Cross-symbol net GEX (e.g. ES_SPX net_gex when viewing NQ_NDX)
         cross_sym = CROSS_GEX_MAP.get(normalized)
         if cross_sym:

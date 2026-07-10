@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 import duckdb
 
 from ..config import settings as config_settings
+from .gex_wall_utils import build_compact_wall_fields
 
 LOGGER = logging.getLogger(__name__)
 
@@ -60,7 +61,6 @@ class GEXDuckDBWriter:
         self._last_snapshot_ms_by_symbol: Dict[str, int] = {}
         self._enqueued_count = 0
         self._written_snapshots = 0
-        self._written_strikes = 0
         self._last_write_ts: Optional[str] = None
         self._last_batch_size = 0
         self._last_error: Optional[str] = None
@@ -172,13 +172,11 @@ class GEXDuckDBWriter:
         if not batch:
             return
         snapshot_rows: List[tuple[Any, ...]] = []
-        strike_rows: List[tuple[Any, ...]] = []
         for snapshot in batch:
             row = self._build_snapshot_row(snapshot)
             if row is None:
                 continue
             snapshot_rows.append(row)
-            strike_rows.extend(self._build_strike_rows(snapshot, row[0], row[1]))
         if not snapshot_rows:
             return
         with duckdb.connect(str(db_path)) as conn:
@@ -201,31 +199,23 @@ class GEXDuckDBWriter:
                     sum_gex_oi,
                     delta_risk_reversal,
                     max_priors,
-                    strikes,
-                    call_wall_candidate1_pct,
-                    call_wall_candidate2_pct,
-                    put_wall_candidate1_pct,
-                    put_wall_candidate2_pct
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    pos_can1_strike,
+                    pos_can1_value,
+                    pos_can1_pct,
+                    pos_can2_strike,
+                    pos_can2_value,
+                    pos_can2_pct,
+                    neg_can1_strike,
+                    neg_can1_value,
+                    neg_can1_pct,
+                    neg_can2_strike,
+                    neg_can2_value,
+                    neg_can2_pct
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 snapshot_rows,
             )
-            if strike_rows:
-                conn.executemany(
-                    """
-                    INSERT INTO gex_strikes (
-                        timestamp,
-                        ticker,
-                        strike,
-                        gamma,
-                        oi_gamma,
-                        priors
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    strike_rows,
-                )
         self._written_snapshots += len(snapshot_rows)
-        self._written_strikes += len(strike_rows)
 
     def _build_snapshot_row(self, snapshot: Dict[str, Any]) -> Optional[tuple[Any, ...]]:
         ticker = (snapshot.get("symbol") or snapshot.get("ticker") or "").upper()
@@ -243,11 +233,7 @@ class GEXDuckDBWriter:
                 max_priors = json.dumps(max_priors)
             except (TypeError, ValueError):
                 max_priors = None
-        strikes = snapshot.get("strikes")
-        try:
-            strikes_json = json.dumps(strikes) if strikes is not None else None
-        except (TypeError, ValueError):
-            strikes_json = None
+        compact_fields = build_compact_wall_fields(snapshot)
         return (
             epoch_ms,
             ticker,
@@ -264,35 +250,19 @@ class GEXDuckDBWriter:
             _to_float(snapshot.get("sum_gex_oi")),
             _to_float(snapshot.get("delta_risk_reversal")),
             max_priors,
-            strikes_json,
-            snapshot.get("call_wall_candidate1_pct"),
-            snapshot.get("call_wall_candidate2_pct"),
-            snapshot.get("put_wall_candidate1_pct"),
-            snapshot.get("put_wall_candidate2_pct"),
+            _to_float(compact_fields.get("pos_can1_strike")),
+            _to_float(compact_fields.get("pos_can1_value")),
+            _to_float(compact_fields.get("pos_can1_pct")),
+            _to_float(compact_fields.get("pos_can2_strike")),
+            _to_float(compact_fields.get("pos_can2_value")),
+            _to_float(compact_fields.get("pos_can2_pct")),
+            _to_float(compact_fields.get("neg_can1_strike")),
+            _to_float(compact_fields.get("neg_can1_value")),
+            _to_float(compact_fields.get("neg_can1_pct")),
+            _to_float(compact_fields.get("neg_can2_strike")),
+            _to_float(compact_fields.get("neg_can2_value")),
+            _to_float(compact_fields.get("neg_can2_pct")),
         )
-
-    @staticmethod
-    def _build_strike_rows(
-        snapshot: Dict[str, Any], timestamp_ms: int, ticker: str
-    ) -> List[tuple[Any, ...]]:
-        rows: List[tuple[Any, ...]] = []
-        for entry in snapshot.get("strikes") or []:
-            if not isinstance(entry, (list, tuple)) or not entry:
-                continue
-            try:
-                strike = float(entry[0])
-            except (TypeError, ValueError):
-                continue
-            gamma = _to_float(entry[1] if len(entry) > 1 else None)
-            oi_gamma = _to_float(entry[2] if len(entry) > 2 else None)
-            priors = entry[3] if len(entry) > 3 else None
-            if priors is not None:
-                try:
-                    priors = json.dumps(priors)
-                except (TypeError, ValueError):
-                    priors = None
-            rows.append((timestamp_ms, ticker, strike, gamma, oi_gamma, priors))
-        return rows
 
     @staticmethod
     def _ensure_schema(conn: duckdb.DuckDBPyConnection) -> None:
@@ -315,37 +285,40 @@ class GEXDuckDBWriter:
                 delta_risk_reversal DOUBLE,
                 max_priors VARCHAR,
                 strikes VARCHAR,
-                call_wall_candidate1_pct DOUBLE,
-                call_wall_candidate2_pct DOUBLE,
-                put_wall_candidate1_pct DOUBLE,
-                put_wall_candidate2_pct DOUBLE
+                pos_can1_strike DOUBLE,
+                pos_can1_value DOUBLE,
+                pos_can1_pct DOUBLE,
+                pos_can2_strike DOUBLE,
+                pos_can2_value DOUBLE,
+                pos_can2_pct DOUBLE,
+                neg_can1_strike DOUBLE,
+                neg_can1_value DOUBLE,
+                neg_can1_pct DOUBLE,
+                neg_can2_strike DOUBLE,
+                neg_can2_value DOUBLE,
+                neg_can2_pct DOUBLE
             )
             """
         )
         for column in (
-            "call_wall_candidate1_pct",
-            "call_wall_candidate2_pct",
-            "put_wall_candidate1_pct",
-            "put_wall_candidate2_pct",
             "strikes",
+            "pos_can1_strike",
+            "pos_can1_value",
+            "pos_can1_pct",
+            "pos_can2_strike",
+            "pos_can2_value",
+            "pos_can2_pct",
+            "neg_can1_strike",
+            "neg_can1_value",
+            "neg_can1_pct",
+            "neg_can2_strike",
+            "neg_can2_value",
+            "neg_can2_pct",
         ):
             conn.execute(
                 f"ALTER TABLE gex_snapshots ADD COLUMN IF NOT EXISTS {column} "
                 f"{'VARCHAR' if column == 'strikes' else 'DOUBLE'}"
             )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS gex_strikes (
-                timestamp BIGINT,
-                ticker VARCHAR,
-                strike DOUBLE,
-                gamma DOUBLE,
-                oi_gamma DOUBLE,
-                priors VARCHAR
-            )
-            """
-        )
-        conn.execute("ALTER TABLE gex_strikes ADD COLUMN IF NOT EXISTS priors VARCHAR")
 
     def status(self) -> Dict[str, Any]:
         return {
@@ -356,7 +329,6 @@ class GEXDuckDBWriter:
             "queue_depth": self._queue_depth,
             "enqueued_count": self._enqueued_count,
             "written_snapshots": self._written_snapshots,
-            "written_strikes": self._written_strikes,
             "last_write_ts": self._last_write_ts,
             "last_batch_size": self._last_batch_size,
             "last_error": self._last_error,

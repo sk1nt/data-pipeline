@@ -104,6 +104,18 @@ async def read_gex_snapshots(
             sum_gex_oi,
             delta_risk_reversal,
             max_priors,
+            pos_can1_strike,
+            pos_can1_value,
+            pos_can1_pct,
+            pos_can2_strike,
+            pos_can2_value,
+            pos_can2_pct,
+            neg_can1_strike,
+            neg_can1_value,
+            neg_can1_pct,
+            neg_can2_strike,
+            neg_can2_value,
+            neg_can2_pct,
             strikes
         FROM gex_snapshots
         WHERE {" AND ".join(clauses)}

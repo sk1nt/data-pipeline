@@ -42,10 +42,18 @@ def _create_gex_tables(db_path: Path) -> None:
             sum_gex_oi DOUBLE,
             delta_risk_reversal DOUBLE,
             max_priors VARCHAR,
-            call_wall_candidate1_pct DOUBLE,
-            call_wall_candidate2_pct DOUBLE,
-            put_wall_candidate1_pct DOUBLE,
-            put_wall_candidate2_pct DOUBLE,
+            pos_can1_strike DOUBLE,
+            pos_can1_value DOUBLE,
+            pos_can1_pct DOUBLE,
+            pos_can2_strike DOUBLE,
+            pos_can2_value DOUBLE,
+            pos_can2_pct DOUBLE,
+            neg_can1_strike DOUBLE,
+            neg_can1_value DOUBLE,
+            neg_can1_pct DOUBLE,
+            neg_can2_strike DOUBLE,
+            neg_can2_value DOUBLE,
+            neg_can2_pct DOUBLE,
             strikes VARCHAR
         )
         """
@@ -88,10 +96,18 @@ def test_write_gex_tables_dedupes_duplicate_rows(tmp_path: Path) -> None:
             "sum_gex_oi": 10.0,
             "delta_risk_reversal": 11.0,
             "max_priors": "first",
-            "call_wall_candidate1_pct": 50.0,
-            "call_wall_candidate2_pct": 25.0,
-            "put_wall_candidate1_pct": 40.0,
-            "put_wall_candidate2_pct": 20.0,
+            "pos_can1_strike": 20010.0,
+            "pos_can1_value": 10.0,
+            "pos_can1_pct": 50.0,
+            "pos_can2_strike": 20011.0,
+            "pos_can2_value": 5.0,
+            "pos_can2_pct": 25.0,
+            "neg_can1_strike": 19900.0,
+            "neg_can1_value": -20.0,
+            "neg_can1_pct": 40.0,
+            "neg_can2_strike": 19899.0,
+            "neg_can2_value": -10.0,
+            "neg_can2_pct": 20.0,
         },
         {
             "timestamp": 1234,
@@ -109,10 +125,18 @@ def test_write_gex_tables_dedupes_duplicate_rows(tmp_path: Path) -> None:
             "sum_gex_oi": 10.5,
             "delta_risk_reversal": 11.5,
             "max_priors": "second",
-            "call_wall_candidate1_pct": 60.0,
-            "call_wall_candidate2_pct": 30.0,
-            "put_wall_candidate1_pct": 45.0,
-            "put_wall_candidate2_pct": 22.5,
+            "pos_can1_strike": 20012.0,
+            "pos_can1_value": 12.0,
+            "pos_can1_pct": 60.0,
+            "pos_can2_strike": 20013.0,
+            "pos_can2_value": 6.0,
+            "pos_can2_pct": 30.0,
+            "neg_can1_strike": 19898.0,
+            "neg_can1_value": -18.0,
+            "neg_can1_pct": 45.0,
+            "neg_can2_strike": 19897.0,
+            "neg_can2_value": -9.0,
+            "neg_can2_pct": 22.5,
         },
     ]
     strike_rows = [
@@ -147,10 +171,18 @@ def test_write_gex_tables_dedupes_duplicate_rows(tmp_path: Path) -> None:
             ticker,
             spot_price,
             max_priors,
-            call_wall_candidate1_pct,
-            call_wall_candidate2_pct,
-            put_wall_candidate1_pct,
-            put_wall_candidate2_pct
+            pos_can1_strike,
+            pos_can1_value,
+            pos_can1_pct,
+            pos_can2_strike,
+            pos_can2_value,
+            pos_can2_pct,
+            neg_can1_strike,
+            neg_can1_value,
+            neg_can1_pct,
+            neg_can2_strike,
+            neg_can2_value,
+            neg_can2_pct
         FROM gex_snapshots
         """
     ).fetchone()
@@ -164,9 +196,17 @@ def test_write_gex_tables_dedupes_duplicate_rows(tmp_path: Path) -> None:
         "NQ_NDX",
         101.0,
         "second",
+        20012.0,
+        12.0,
         60.0,
+        20013.0,
+        6.0,
         30.0,
+        19898.0,
+        -18.0,
         45.0,
+        19897.0,
+        -9.0,
         22.5,
     )
     assert strike == (1234, "NQ_NDX", 28974.92, 3.0, 4.0, "second")
@@ -199,7 +239,7 @@ def test_build_snapshot_row_derives_candidate_percentages_from_strikes() -> None
     row = worker._build_snapshot_row(snapshot)
 
     assert row is not None
-    assert row["call_wall_candidate1_pct"] == 50.0
-    assert row["call_wall_candidate2_pct"] == 25.0
-    assert row["put_wall_candidate1_pct"] == 50.0
-    assert row["put_wall_candidate2_pct"] == 25.0
+    assert row["pos_can1_pct"] == 50.0
+    assert row["pos_can2_pct"] == 25.0
+    assert row["neg_can1_pct"] == 50.0
+    assert row["neg_can2_pct"] == 25.0

@@ -17,6 +17,7 @@ import redis
 
 from ..config import settings as config_settings
 from lib.redis_client import RedisClient
+from .gex_wall_utils import build_compact_wall_fields, parse_gex_strikes, summarize_wall_candidates
 from .redis_timeseries import RedisTimeSeriesClient
 
 LOGGER = logging.getLogger(__name__)
@@ -286,100 +287,40 @@ class RedisFlushWorker:
     @staticmethod
     def _gex_candidate_fields(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         fields: Dict[str, Any] = {}
-        for side in ("call", "put"):
-            prefix = f"{side}_wall"
-            for name in ("major_strike", "major_gamma"):
-                fields[f"{prefix}_{name}"] = snapshot.get(f"{prefix}_{name}")
+        compact = build_compact_wall_fields(snapshot)
+        for prefix in ("pos", "neg"):
             for idx in (1, 2):
-                for name in ("strike", "gamma", "pct"):
-                    field = f"{prefix}_candidate{idx}_{name}"
-                    fields[field] = snapshot.get(field)
+                for name in ("strike", "value", "pct"):
+                    field = f"{prefix}_can{idx}_{name}"
+                    fields[field] = compact.get(field, snapshot.get(field))
         if any(value is not None for value in fields.values()):
             return fields
 
-        strikes = RedisFlushWorker._normalize_gex_strikes(snapshot.get("strikes"))
+        strikes = parse_gex_strikes(snapshot.get("strikes"))
         fields.update(
-            RedisFlushWorker._summarize_gex_wall_candidates(
-                "call",
-                snapshot.get("major_pos_vol"),
-                strikes,
-                prefer_positive=True,
-            )
+            {
+                f"pos_can{idx}_{name}": value
+                for idx, entry in enumerate(
+                    summarize_wall_candidates(
+                        snapshot.get("major_pos_vol"), strikes, prefer_positive=True
+                    ),
+                    start=1,
+                )
+                for name, value in entry.items()
+            }
         )
         fields.update(
-            RedisFlushWorker._summarize_gex_wall_candidates(
-                "put",
-                snapshot.get("major_neg_vol"),
-                strikes,
-                prefer_positive=False,
-            )
+            {
+                f"neg_can{idx}_{name}": value
+                for idx, entry in enumerate(
+                    summarize_wall_candidates(
+                        snapshot.get("major_neg_vol"), strikes, prefer_positive=False
+                    ),
+                    start=1,
+                )
+                for name, value in entry.items()
+            }
         )
-        return fields
-
-    @staticmethod
-    def _normalize_gex_strikes(raw: Any) -> List[Tuple[float, float]]:
-        strikes: List[Tuple[float, float]] = []
-        if not isinstance(raw, list):
-            return strikes
-        for entry in raw:
-            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
-                try:
-                    gamma = float(entry[1])
-                    if gamma == 0.0 and len(entry) >= 3:
-                        gamma = float(entry[2])
-                    strikes.append((float(entry[0]), gamma))
-                except (TypeError, ValueError):
-                    continue
-            elif isinstance(entry, dict):
-                try:
-                    strikes.append((float(entry.get("strike")), float(entry.get("gamma"))))
-                except (TypeError, ValueError):
-                    continue
-        return strikes
-
-    @staticmethod
-    def _summarize_gex_wall_candidates(
-        side: str,
-        major_strike: Any,
-        strikes: List[Tuple[float, float]],
-        *,
-        prefer_positive: bool,
-    ) -> Dict[str, Any]:
-        fields: Dict[str, Any] = {}
-        filtered = []
-        for strike, gamma in strikes:
-            if prefer_positive and gamma <= 0:
-                continue
-            if not prefer_positive and gamma >= 0:
-                continue
-            filtered.append((strike, gamma))
-        if not filtered:
-            return fields
-        filtered.sort(key=lambda pair: abs(pair[1]), reverse=True)
-        major = None
-        if isinstance(major_strike, (int, float)):
-            for strike, gamma in filtered:
-                if abs(strike - major_strike) <= 0.51:
-                    major = (strike, gamma)
-                    break
-        if major is None:
-            major = filtered[0]
-        prefix = f"{side}_wall"
-        fields[f"{prefix}_major_strike"] = major[0]
-        fields[f"{prefix}_major_gamma"] = major[1]
-        entries = []
-        for strike, gamma in filtered:
-            if abs(strike - major[0]) <= 0.51:
-                continue
-            entries.append((strike, gamma))
-            if len(entries) >= 2:
-                break
-        for idx, (strike, gamma) in enumerate(entries, start=1):
-            fields[f"{prefix}_candidate{idx}_strike"] = strike
-            fields[f"{prefix}_candidate{idx}_gamma"] = gamma
-            fields[f"{prefix}_candidate{idx}_pct"] = (
-                abs(gamma) / abs(major[1]) * 100 if major[1] else None
-            )
         return fields
 
     def _seconds_until_daily_run(self) -> float:
@@ -811,18 +752,42 @@ class RedisFlushWorker:
             "sum_gex_oi": snapshot.get("sum_gex_oi"),
             "delta_risk_reversal": snapshot.get("delta_risk_reversal"),
             "max_priors": max_priors_str,
-            "call_wall_candidate1_pct": snapshot.get("call_wall_candidate1_pct")
-            if snapshot.get("call_wall_candidate1_pct") is not None
-            else candidate_fields.get("call_wall_candidate1_pct"),
-            "call_wall_candidate2_pct": snapshot.get("call_wall_candidate2_pct")
-            if snapshot.get("call_wall_candidate2_pct") is not None
-            else candidate_fields.get("call_wall_candidate2_pct"),
-            "put_wall_candidate1_pct": snapshot.get("put_wall_candidate1_pct")
-            if snapshot.get("put_wall_candidate1_pct") is not None
-            else candidate_fields.get("put_wall_candidate1_pct"),
-            "put_wall_candidate2_pct": snapshot.get("put_wall_candidate2_pct")
-            if snapshot.get("put_wall_candidate2_pct") is not None
-            else candidate_fields.get("put_wall_candidate2_pct"),
+            "pos_can1_strike": snapshot.get("pos_can1_strike")
+            if snapshot.get("pos_can1_strike") is not None
+            else candidate_fields.get("pos_can1_strike"),
+            "pos_can1_value": snapshot.get("pos_can1_value")
+            if snapshot.get("pos_can1_value") is not None
+            else candidate_fields.get("pos_can1_value"),
+            "pos_can1_pct": snapshot.get("pos_can1_pct")
+            if snapshot.get("pos_can1_pct") is not None
+            else candidate_fields.get("pos_can1_pct"),
+            "pos_can2_strike": snapshot.get("pos_can2_strike")
+            if snapshot.get("pos_can2_strike") is not None
+            else candidate_fields.get("pos_can2_strike"),
+            "pos_can2_value": snapshot.get("pos_can2_value")
+            if snapshot.get("pos_can2_value") is not None
+            else candidate_fields.get("pos_can2_value"),
+            "pos_can2_pct": snapshot.get("pos_can2_pct")
+            if snapshot.get("pos_can2_pct") is not None
+            else candidate_fields.get("pos_can2_pct"),
+            "neg_can1_strike": snapshot.get("neg_can1_strike")
+            if snapshot.get("neg_can1_strike") is not None
+            else candidate_fields.get("neg_can1_strike"),
+            "neg_can1_value": snapshot.get("neg_can1_value")
+            if snapshot.get("neg_can1_value") is not None
+            else candidate_fields.get("neg_can1_value"),
+            "neg_can1_pct": snapshot.get("neg_can1_pct")
+            if snapshot.get("neg_can1_pct") is not None
+            else candidate_fields.get("neg_can1_pct"),
+            "neg_can2_strike": snapshot.get("neg_can2_strike")
+            if snapshot.get("neg_can2_strike") is not None
+            else candidate_fields.get("neg_can2_strike"),
+            "neg_can2_value": snapshot.get("neg_can2_value")
+            if snapshot.get("neg_can2_value") is not None
+            else candidate_fields.get("neg_can2_value"),
+            "neg_can2_pct": snapshot.get("neg_can2_pct")
+            if snapshot.get("neg_can2_pct") is not None
+            else candidate_fields.get("neg_can2_pct"),
         }
 
     def _build_strike_rows(
@@ -910,10 +875,18 @@ class RedisFlushWorker:
                 sum_gex_oi,
                 delta_risk_reversal,
                 max_priors,
-                call_wall_candidate1_pct,
-                call_wall_candidate2_pct,
-                put_wall_candidate1_pct,
-                put_wall_candidate2_pct,
+                pos_can1_strike,
+                pos_can1_value,
+                pos_can1_pct,
+                pos_can2_strike,
+                pos_can2_value,
+                pos_can2_pct,
+                neg_can1_strike,
+                neg_can1_value,
+                neg_can1_pct,
+                neg_can2_strike,
+                neg_can2_value,
+                neg_can2_pct,
                 strikes
             )
             SELECT
@@ -932,10 +905,18 @@ class RedisFlushWorker:
                 sum_gex_oi,
                 delta_risk_reversal,
                 max_priors,
-                call_wall_candidate1_pct,
-                call_wall_candidate2_pct,
-                put_wall_candidate1_pct,
-                put_wall_candidate2_pct,
+                pos_can1_strike,
+                pos_can1_value,
+                pos_can1_pct,
+                pos_can2_strike,
+                pos_can2_value,
+                pos_can2_pct,
+                neg_can1_strike,
+                neg_can1_value,
+                neg_can1_pct,
+                neg_can2_strike,
+                neg_can2_value,
+                neg_can2_pct,
                 NULL AS strikes
             FROM gex_snapshots_flush
             """
@@ -962,12 +943,20 @@ class RedisFlushWorker:
         return len(snapshot_rows), len(strike_rows)
 
     def _ensure_gex_snapshot_columns(self, conn: duckdb.DuckDBPyConnection) -> None:
-        """Add candidate percentage columns to legacy gex_snapshots tables."""
+        """Add compact candidate columns to legacy gex_snapshots tables."""
         for column in (
-            "call_wall_candidate1_pct",
-            "call_wall_candidate2_pct",
-            "put_wall_candidate1_pct",
-            "put_wall_candidate2_pct",
+            "pos_can1_strike",
+            "pos_can1_value",
+            "pos_can1_pct",
+            "pos_can2_strike",
+            "pos_can2_value",
+            "pos_can2_pct",
+            "neg_can1_strike",
+            "neg_can1_value",
+            "neg_can1_pct",
+            "neg_can2_strike",
+            "neg_can2_value",
+            "neg_can2_pct",
             "strikes",
         ):
             conn.execute(

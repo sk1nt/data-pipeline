@@ -8,7 +8,6 @@ import math
 import logging
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
 from datetime import date, datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
 import threading
@@ -18,6 +17,7 @@ import aiohttp
 
 from lib.redis_client import RedisClient
 from .gex_duckdb_writer import GEXDuckDBWriter
+from .gex_wall_utils import build_compact_wall_fields
 from .redis_timeseries import RedisTimeSeriesClient
 
 
@@ -73,7 +73,6 @@ class GEXBotPollerSettings:
     off_hours_interval_seconds: float = 300.0
     dynamic_schedule: bool = True
     exclude_symbols: List[str] = field(default_factory=list)
-    sierra_chart_output_path: Optional[str] = None
     auto_refresh_symbols: bool = True
 
 
@@ -335,26 +334,32 @@ class GEXBotPoller:
         symbol: str,
     ) -> Optional[Dict[str, Any]]:
         base_url = f"https://api.gexbot.com/{symbol}/classic/{self.settings.aggregation_period}"
+        maxchange_url = f"{base_url}/maxchange"
         headers = self._auth_headers()
 
-        try:
-            async with session.get(base_url, headers=headers) as resp:
-                if resp.status != 200:
-                    LOGGER.debug("GEXBot %s returned %s", symbol, resp.status)
-                    return None
-                zero = await resp.json()
-        except asyncio.CancelledError:
-            raise
-        except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
-            LOGGER.debug("GEXBot %s request failed: %s", symbol, exc)
-            return None
+        async def _fetch_json(url: str) -> Optional[Dict[str, Any]]:
+            try:
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status != 200:
+                        LOGGER.debug("GEXBot %s returned %s for %s", symbol, resp.status, url)
+                        return None
+                    return await resp.json()
+            except asyncio.CancelledError:
+                raise
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                LOGGER.debug("GEXBot %s request failed for %s: %s", symbol, url, exc)
+                return None
+
+        zero, maxchange = await asyncio.gather(
+            _fetch_json(base_url),
+            _fetch_json(maxchange_url),
+        )
 
         if not zero:
             LOGGER.debug("GEXBot %s returned no data", symbol)
             return None
 
-        result = self._combine_payloads(symbol, zero)
-        result["raw"] = {"zero": zero}
+        result = self._combine_payloads(symbol, zero, maxchange=maxchange)
         return result
 
     async def _record_timeseries(self, snapshot: Dict[str, Any]) -> None:
@@ -385,6 +390,8 @@ class GEXBotPoller:
         self,
         symbol: str,
         zero: Optional[Dict[str, Any]],
+        *,
+        maxchange: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         def _first(*values):
             for value in values:
@@ -425,6 +432,7 @@ class GEXBotPoller:
             "major_pos_strike": _to_float(_first(zero_payload.get("major_pos_strike"))),
             "major_neg_strike": _to_float(_first(zero_payload.get("major_neg_strike"))),
             "delta_risk_reversal": _to_float(_first(zero_payload.get("delta_risk_reversal"))),
+            "maxchange": maxchange or {},
         }
         snapshot["net_gex_vol"] = snapshot["net_gex"]
         snapshot["major_pos"] = snapshot["major_pos_vol"]
@@ -433,7 +441,7 @@ class GEXBotPoller:
         snapshot["min_dte"] = zero_payload.get("min_dte")
         snapshot["sec_min_dte"] = zero_payload.get("sec_min_dte")
         snapshot["max_priors"] = zero_payload.get("max_priors")
-        snapshot["strikes"] = zero_payload.get("strikes")
+        snapshot.update(build_compact_wall_fields({**snapshot, "strikes": zero_payload.get("strikes")}))
         return snapshot
 
     def _write_snapshot_series(self, snapshot: Dict[str, Any]) -> None:
@@ -455,6 +463,18 @@ class GEXBotPoller:
             "major_pos_oi": snapshot.get("major_pos_oi"),
             "major_neg_oi": snapshot.get("major_neg_oi"),
             "delta_risk_reversal": snapshot.get("delta_risk_reversal"),
+            "pos_can1_strike": snapshot.get("pos_can1_strike"),
+            "pos_can1_value": snapshot.get("pos_can1_value"),
+            "pos_can1_pct": snapshot.get("pos_can1_pct"),
+            "pos_can2_strike": snapshot.get("pos_can2_strike"),
+            "pos_can2_value": snapshot.get("pos_can2_value"),
+            "pos_can2_pct": snapshot.get("pos_can2_pct"),
+            "neg_can1_strike": snapshot.get("neg_can1_strike"),
+            "neg_can1_value": snapshot.get("neg_can1_value"),
+            "neg_can1_pct": snapshot.get("neg_can1_pct"),
+            "neg_can2_strike": snapshot.get("neg_can2_strike"),
+            "neg_can2_value": snapshot.get("neg_can2_value"),
+            "neg_can2_pct": snapshot.get("neg_can2_pct"),
         }
         # Hold the snapshot lock while assigning the timestamp AND writing to ts_client so
         # that insertion order into ts_client.samples always matches the timestamp order.
@@ -517,14 +537,11 @@ class GEXBotPoller:
             return
         key = f"{SNAPSHOT_KEY_PREFIX}{symbol.upper()}"
         
-        # Don't overwrite good snapshots with incomplete data (after market close)
-        # If net_gex is null/zero and major_pos_vol is zero, this is likely stale/incomplete
         net_gex = snapshot.get("net_gex")
         major_pos_vol = snapshot.get("major_pos_vol") or 0
         major_neg_vol = snapshot.get("major_neg_vol") or 0
-        
+
         if net_gex is None and major_pos_vol == 0 and major_neg_vol == 0:
-            # Check if we have a better snapshot already cached
             if self.redis:
                 try:
                     existing = self.redis.client.get(key)
@@ -532,8 +549,7 @@ class GEXBotPoller:
                         existing_data = json.loads(existing)
                         existing_net_gex = existing_data.get("net_gex")
                         existing_pos_vol = existing_data.get("major_pos_vol") or 0
-                        
-                        # Preserve existing snapshot if it has volume data
+
                         if existing_net_gex is not None or existing_pos_vol > 0:
                             LOGGER.info(
                                 "Preserving existing snapshot for %s (has volume data)",
@@ -542,13 +558,12 @@ class GEXBotPoller:
                             return
                 except Exception as e:
                     LOGGER.debug("Failed to check existing snapshot: %s", e)
-        
+
         if self.redis:
             try:
                 payload = json.dumps(_sanitize_floats(snapshot))
                 self.redis.client.set(key, payload)
                 try:
-                    # Publish full snapshot for downstream consumers (Discord feed, websocket, etc.)
                     self.redis.client.publish(SNAPSHOT_PUBSUB_CHANNEL, payload)
                 except Exception:
                     LOGGER.debug(
@@ -558,41 +573,6 @@ class GEXBotPoller:
                 LOGGER.warning(
                     "Failed to cache GEX snapshot for %s", symbol, exc_info=True
                 )
-        self._write_sierra_chart_bridge(snapshot)
-
-    def _write_sierra_chart_bridge(self, snapshot: Dict[str, Any]) -> None:
-        """Optionally write NQ_NDX sum_gex_vol into Sierra Chart JSON bridge."""
-        path = getattr(self.settings, "sierra_chart_output_path", None)
-        if not path:
-            return
-        symbol = (snapshot.get("symbol") or snapshot.get("ticker") or "").upper()
-        if symbol != "NQ_NDX":
-            return
-        value = snapshot.get("sum_gex_vol")
-        if value is None:
-            return
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            LOGGER.debug(
-                "Skipping Sierra Chart write; sum_gex_vol not numeric: %s", value
-            )
-            return
-        payload = {"sum_gex_vol": numeric}
-        try:
-            target = Path(path)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with target.open("w", encoding="utf-8") as f:
-                json.dump(payload, f)
-        except Exception:
-            LOGGER.warning(
-                "Failed to write Sierra Chart bridge file at %s", path, exc_info=True
-            )
-
-    # dynamic symbol helpers removed
-
-    # dynamic symbol persistence removed
-
     def _parse_expiry(self, raw: Any) -> Optional[datetime]:
         if isinstance(raw, (int, float)):
             return datetime.fromtimestamp(float(raw), tz=timezone.utc)
