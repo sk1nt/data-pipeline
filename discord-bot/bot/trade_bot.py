@@ -291,12 +291,13 @@ class TradeBot(commands.Bot):
                                 return
                     except Exception:
                         pass
-                data = await self.get_gex_data(symbol)
+                data, failure_reason = await self.get_gex_data(symbol)
                 if data:
                     formatter = self.format_gex if show_full else self.format_gex_small
                     await ctx.send(formatter(data))
                 else:
-                    await ctx.send("GEX data not available")
+                    suffix = f": {failure_reason}" if failure_reason else ""
+                    await ctx.send(f"GEX data not available{suffix}")
 
             async def _status_cmd(ctx):
                 if not await self._ensure_status_channel_access(ctx):
@@ -1835,7 +1836,9 @@ class TradeBot(commands.Bot):
             "call_wall", data.get("major_pos_vol"), now
         )
         mapping["put_wall"] = tracker.update("put_wall", data.get("major_neg_vol"), now)
-        mapping["net_gex"] = tracker.update("net_gex", data.get("net_gex"), now)
+        mapping["sum_gex_vol"] = tracker.update(
+            "sum_gex_vol", data.get("sum_gex_vol"), now
+        )
         mapping["scaled_gamma"] = tracker.update(
             "scaled_gamma", data.get("sum_gex_oi"), now
         )
@@ -1851,14 +1854,15 @@ class TradeBot(commands.Bot):
     async def gex(self, ctx, *args):
         """Get GEX snapshot for a symbol. Uses DuckDB first then GEXBot API fallback."""
         symbol, show_full = self._resolve_gex_request(args)
-        data = await self.get_gex_data(symbol)
+        data, failure_reason = await self.get_gex_data(symbol)
         if data:
             response = (
                 self.format_gex(data) if show_full else self.format_gex_short(data)
             )
             await ctx.send(response)
         else:
-            await ctx.send("GEX data not available")
+            suffix = f": {failure_reason}" if failure_reason else ""
+            await ctx.send(f"GEX data not available{suffix}")
 
     async def status(self, ctx):
         try:
@@ -1909,6 +1913,7 @@ class TradeBot(commands.Bot):
         ticker = self.ticker_aliases.get(display_symbol, display_symbol)
         # No transient cache key: use canonical snapshot key only
         snapshot_key = f"{self.redis_snapshot_prefix}{ticker.upper()}"
+        failure_reasons: List[str] = []
 
         # Prefer the canonical snapshot key (written by poller/pipeline)
         try:
@@ -1934,9 +1939,14 @@ class TradeBot(commands.Bot):
                             300,
                             json.dumps(normalized, default=str),
                         )
-                        return normalized
+                        return normalized, None
+                    failure_reasons.append(
+                        f"Redis snapshot at {snapshot_key} is older than 30 seconds"
+                    )
+            else:
+                failure_reasons.append(f"Redis snapshot miss at {snapshot_key}")
         except Exception as e:
-            print(f"Redis snapshot check failed: {e}")
+            failure_reasons.append(f"Redis snapshot lookup failed: {e}")
 
         # NOTE: transient cache key removed; only canonical snapshot key is used for feed and lookups
 
@@ -1965,7 +1975,7 @@ class TradeBot(commands.Bot):
                             300,
                             json.dumps(normalized, default=str),
                         )
-                        return normalized
+                        return normalized, None
                     if age <= 30:
                         normalized["_freshness"] = "stale"
                         normalized["_source"] = "redis-snapshot"
@@ -1980,18 +1990,25 @@ class TradeBot(commands.Bot):
                                 ticker, snapshot_key, display_symbol
                             )
                         )
-                        return normalized
+                        return normalized, None
                     normalized["_freshness"] = "incomplete"
                     normalized["_source"] = "redis-snapshot"
+                    failure_reasons.append(
+                        f"Redis snapshot at {snapshot_key} is older than 30 seconds"
+                    )
                     await asyncio.to_thread(
                         self.redis_client.setex,
                         snapshot_key,
                         300,
                         json.dumps(normalized, default=str),
                     )
-                    return normalized
+                    return normalized, None
+            else:
+                failure_reasons.append(f"Canonical Redis snapshot miss at {snapshot_key}")
         except Exception as e:
-            print(f"Snapshot redis check failed for {snapshot_key}: {e}")
+            failure_reasons.append(
+                f"Canonical Redis snapshot lookup failed for {snapshot_key}: {e}"
+            )
 
         # 2) Query local DuckDB snapshot before resorting to live API
         try:
@@ -2000,7 +2017,7 @@ class TradeBot(commands.Bot):
                 import duckdb
 
                 q = f"""
-                SELECT timestamp, ticker, spot_price, zero_gamma, net_gex,
+                SELECT timestamp, ticker, spot_price, zero_gamma,
                        sum_gex_vol, delta_risk_reversal, min_dte, sec_min_dte,
                        major_pos_vol, major_neg_vol, major_pos_oi, major_neg_oi,
                        sum_gex_oi, max_priors,
@@ -2047,7 +2064,6 @@ class TradeBot(commands.Bot):
                     "ticker",
                     "spot_price",
                     "zero_gamma",
-                    "net_gex",
                     "sum_gex_vol",
                     "delta_risk_reversal",
                     "min_dte",
@@ -2121,14 +2137,18 @@ class TradeBot(commands.Bot):
                     300,
                     json.dumps(data, default=str),
                 )
-                return data
+                return data, None
+            failure_reasons.append(f"DuckDB row miss for {ticker}")
         except Exception as e:
-            print(f"DuckDB query failed: {e}")
+            failure_reasons.append(f"DuckDB lookup failed: {e}")
 
         # 3) Finally, poll the live API as a last resort
         try:
             if not self.gex_api_enabled:
-                return None
+                failure_reasons.append(
+                    "Live GEXBot API fallback is disabled (GEX_API_ENABLED=false)"
+                )
+                return None, "; ".join(failure_reasons)
             api_data = await self._poll_gexbot_api(ticker)
             if api_data:
                 api_data["_freshness"] = "current"
@@ -2143,11 +2163,12 @@ class TradeBot(commands.Bot):
                     )
                 except Exception:
                     pass
-                return api_data
+                return api_data, None
+            failure_reasons.append(f"Live GEXBot API returned no data for {ticker}")
         except Exception as e:
-            print(f"API fetch failed: {e}")
+            failure_reasons.append(f"Live GEXBot API lookup failed: {e}")
 
-        return None
+        return None, "; ".join(failure_reasons) if failure_reasons else None
 
     async def _poll_gexbot_api(self, ticker: str):
         """Poll the zero endpoint only, limiting outbound requests."""
@@ -2174,7 +2195,7 @@ class TradeBot(commands.Bot):
             "ticker": ticker,
             "spot_price": None,
             "zero_gamma": None,
-            "net_gex": None,
+            "sum_gex_vol": None,
             "major_pos_vol": None,
             "major_neg_vol": None,
             "major_pos_oi": None,
@@ -2193,18 +2214,20 @@ class TradeBot(commands.Bot):
             data["zero_gamma"] = (
                 z.get("zero_gamma") or z.get("zero_gamma_vol") or data["zero_gamma"]
             )
-            data["net_gex"] = z.get("net_gex") or z.get("sum_gex") or data["net_gex"]
+            data["sum_gex_vol"] = z.get("sum_gex_vol") or z.get("sum_gex")
             data["major_pos_vol"] = z.get("major_pos_vol") or data["major_pos_vol"]
             data["major_neg_vol"] = z.get("major_neg_vol") or data["major_neg_vol"]
             data["major_pos_oi"] = z.get("major_pos_oi") or data["major_pos_oi"]
             data["major_neg_oi"] = z.get("major_neg_oi") or data["major_neg_oi"]
-            data["sum_gex_oi"] = (
-                z.get("sum_gex_oi") or z.get("net_gex_oi") or data["sum_gex_oi"]
-            )
+            data["sum_gex_oi"] = z.get("sum_gex_oi") or data["sum_gex_oi"]
             strikes = z.get("strikes")
             if strikes:
                 data["strikes"] = strikes
             data.update(self._extract_compact_wall_fields(z))
+            wall_ladders = self._build_compact_wall_ladders(data)
+            if wall_ladders:
+                data["_wall_ladders"] = wall_ladders
+                self._flatten_wall_ladder_fields(data, wall_ladders)
 
         return data
 
@@ -2343,12 +2366,12 @@ class TradeBot(commands.Bot):
             "zero_gamma": get_first(
                 payload.get("zero_gamma"), payload.get("zero_gamma_vol")
             ),
-            "net_gex": payload.get("net_gex") or payload.get("sum_gex"),
             "major_pos_vol": payload.get("major_pos_vol"),
             "major_neg_vol": payload.get("major_neg_vol"),
             "major_pos_oi": payload.get("major_pos_oi"),
             "major_neg_oi": payload.get("major_neg_oi"),
-            "sum_gex_oi": payload.get("sum_gex_oi") or payload.get("net_gex_oi"),
+            "sum_gex_vol": payload.get("sum_gex_vol") or payload.get("sum_gex"),
+            "sum_gex_oi": payload.get("sum_gex_oi"),
             "max_priors": self._extract_max_priors(payload),
             "maxchange": payload.get("maxchange")
             if isinstance(payload.get("maxchange"), dict)
@@ -2467,11 +2490,9 @@ class TradeBot(commands.Bot):
 
     @staticmethod
     def _build_compact_wall_ladders(data: dict) -> Optional[dict]:
-        compact = TradeBot._extract_compact_wall_fields(data)
-        if not compact:
-            return None
-
         summary: Dict[str, dict] = {}
+        compact = TradeBot._extract_compact_wall_fields(data)
+        strikes = TradeBot._normalize_strike_entries(data.get("strikes"))
         for side, prefix in (("call", "pos"), ("put", "neg")):
             major_key = "major_pos_vol" if side == "call" else "major_neg_vol"
             entries = []
@@ -2488,6 +2509,13 @@ class TradeBot(commands.Bot):
                         "pct_vs_major": pct,
                     }
                 )
+            if not entries:
+                fallback_summary = TradeBot._summarize_wall_ladder(
+                    data.get(major_key), strikes, prefer_positive=(side == "call")
+                )
+                if fallback_summary:
+                    summary[side] = fallback_summary
+                    continue
             if entries:
                 summary[side] = {
                     "major_strike": data.get(major_key),
@@ -3748,10 +3776,10 @@ class TradeBot(commands.Bot):
             call_wall_line,
             put_wall_line,
             fmt_pair(
-                "net gex",
-                data.get("net_gex"),
+                "sum gex vol",
+                data.get("sum_gex_vol"),
                 data.get("sum_gex_oi"),
-                volume_color=color_for_value(data.get("net_gex")),
+                volume_color=color_for_value(data.get("sum_gex_vol")),
                 oi_color=color_for_value(data.get("sum_gex_oi")),
                 formatter=fmt_net_gex,
             ),
@@ -3899,9 +3927,11 @@ class TradeBot(commands.Bot):
             + "  "
         )
 
-        net_color_code = ansi.get(color_for_value(data.get("net_gex")))
-        net_value = colorize(net_color_code, fmt_net_gex(data.get("net_gex")))
-        net_line = f"{'net gex':<{classic_label_width}}{net_value}"
+        net_color_code = ansi.get(color_for_value(data.get("sum_gex_vol")))
+        net_value = colorize(
+            net_color_code, fmt_net_gex(data.get("sum_gex_vol"))
+        )
+        net_line = f"{'sum gex vol':<{classic_label_width}}{net_value}"
 
         current_entry = self._extract_current_maxchange_entry(data)
 
@@ -4040,8 +4070,10 @@ class TradeBot(commands.Bot):
             ),
         )
 
-        net_color_code = ansi.get(color_for_value(data.get("net_gex")))
-        net_value = colorize(net_color_code, fmt_net_gex(data.get("net_gex")))
+        net_color_code = ansi.get(color_for_value(data.get("sum_gex_vol")))
+        net_value = colorize(
+            net_color_code, fmt_net_gex(data.get("sum_gex_vol"))
+        )
 
         sum_gex_oi_value = fmt_price(data.get("sum_gex_oi"))
         sum_gex_oi_color = ansi.get(color_for_value(data.get("sum_gex_oi")))
@@ -4260,14 +4292,14 @@ class TradeBot(commands.Bot):
                 return "N/ABn"
             return f"{(abs(delta) / 1000):.4f}Bn"
 
-        net_snap = snapshot("net_gex")
+        net_snap = snapshot("sum_gex_vol")
         net_value = colorize(
-            ansi.get(color_for_value(data.get("net_gex"))),
-            fmt_net_gex(data.get("net_gex")),
+            ansi.get(color_for_value(data.get("sum_gex_vol"))),
+            fmt_net_gex(data.get("sum_gex_vol")),
         )
         net_change_color = ansi.get(color_for_delta(net_snap.delta))
         net_change_txt = colorize(net_change_color, fmt_net_change(net_snap.delta))
-        lines.append(f"net gex           {net_value:<10} Δ{net_change_txt}")
+        lines.append(f"sum gex vol       {net_value:<10} Δ{net_change_txt}")
 
         scaled_snap = snapshot("scaled_gamma")
         scaled_value = fmt_net_gex(data.get("sum_gex_oi"))

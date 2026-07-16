@@ -427,24 +427,16 @@ class GEXBotPoller:
                 float(timestamp), tz=timezone.utc
             ).isoformat()
 
-        net_gex = _first(
-            zero_payload.get("net_gex"),
-            zero_payload.get("net_gex_vol"),
+        sum_gex_vol = _first(
             zero_payload.get("sum_gex_vol"),
+            zero_payload.get("sum_gex"),
         )
-        net_gex_oi = _first(
-            zero_payload.get("net_gex_oi"),
-            zero_payload.get("sum_gex_oi"),
-        )
-
         snapshot = {
             "symbol": symbol.upper(),
             "timestamp": timestamp,
             "spot": _to_float(_first(zero_payload.get("spot"))),
             "zero_gamma": _to_float(_first(zero_payload.get("zero_gamma"))),
-            "net_gex": _to_float(net_gex),
-            "net_gex_oi": _to_float(net_gex_oi),
-            "sum_gex_vol": _to_float(zero_payload.get("sum_gex_vol")),
+            "sum_gex_vol": _to_float(sum_gex_vol),
             "sum_gex_oi": _to_float(zero_payload.get("sum_gex_oi")),
             "major_pos_vol": _to_float(_first(zero_payload.get("major_pos_vol"))),
             "major_neg_vol": _to_float(_first(zero_payload.get("major_neg_vol"))),
@@ -452,7 +444,6 @@ class GEXBotPoller:
             "major_neg_oi": _to_float(_first(zero_payload.get("major_neg_oi"))),
             "delta_risk_reversal": _to_float(_first(zero_payload.get("delta_risk_reversal"))),
         }
-        snapshot["net_gex_vol"] = snapshot["net_gex"]
         snapshot["major_pos"] = snapshot["major_pos_vol"]
         snapshot["major_neg"] = snapshot["major_neg_vol"]
         snapshot["ticker"] = snapshot["symbol"]
@@ -472,8 +463,6 @@ class GEXBotPoller:
         metrics = {
             "spot": snapshot.get("spot"),
             "zero_gamma": snapshot.get("zero_gamma"),
-            "net_gex": snapshot.get("net_gex"),
-            "net_gex_oi": snapshot.get("net_gex_oi"),
             "sum_gex_vol": snapshot.get("sum_gex_vol"),
             "sum_gex_oi": snapshot.get("sum_gex_oi"),
             "major_pos_vol": snapshot.get("major_pos_vol"),
@@ -557,20 +546,20 @@ class GEXBotPoller:
             return
         key = f"{SNAPSHOT_KEY_PREFIX}{symbol.upper()}"
         
-        net_gex = snapshot.get("net_gex")
+        sum_gex_vol = snapshot.get("sum_gex_vol")
         major_pos_vol = snapshot.get("major_pos_vol") or 0
         major_neg_vol = snapshot.get("major_neg_vol") or 0
 
-        if net_gex is None and major_pos_vol == 0 and major_neg_vol == 0:
+        if sum_gex_vol is None and major_pos_vol == 0 and major_neg_vol == 0:
             if self.redis:
                 try:
                     existing = self.redis.client.get(key)
                     if existing:
                         existing_data = json.loads(existing)
-                        existing_net_gex = existing_data.get("net_gex")
+                        existing_sum_gex_vol = existing_data.get("sum_gex_vol")
                         existing_pos_vol = existing_data.get("major_pos_vol") or 0
 
-                        if existing_net_gex is not None or existing_pos_vol > 0:
+                        if existing_sum_gex_vol is not None or existing_pos_vol > 0:
                             LOGGER.info(
                                 "Preserving existing snapshot for %s (has volume data)",
                                 symbol

@@ -76,7 +76,7 @@ async def test_snapshot_timestamps_increment():
             "timestamp": ts_val,
             "spot": 100.0,
             "zero_gamma": 0.1,
-            "net_gex": 50,
+            "sum_gex_vol": 50,
             "major_pos_vol": 10,
             "major_neg_vol": -5,
             "major_pos_oi": 1,
@@ -94,14 +94,14 @@ async def test_snapshot_timestamps_increment():
 
     # Collect snapshot keys and timestamps
     pairs = [(rec[0], rec[1]) for rec in ts.samples if rec[0].startswith("ts:gex:")]
-    # Filter to 'net_gex' metric as a sample per symbol
-    net_gex_pairs = [p for p in pairs if ":net_gex:" in p[0]]
-    assert len(net_gex_pairs) >= 2
+    # Filter to 'sum_gex_vol' metric as a sample per symbol
+    sum_gex_vol_pairs = [p for p in pairs if ":sum_gex_vol:" in p[0]]
+    assert len(sum_gex_vol_pairs) >= 2
     # Each symbol's timestamps must be strictly increasing (the per-symbol guarantee).
     # Global ordering across symbols is not guaranteed because symbols are fetched concurrently.
     by_symbol: dict = {}
-    for key, ts_ms in net_gex_pairs:
-        sym = key.split(":")[3]  # "ts:gex:net_gex:SPX" → "SPX"
+    for key, ts_ms in sum_gex_vol_pairs:
+        sym = key.split(":")[3]  # "ts:gex:sum_gex_vol:SPX" → "SPX"
         by_symbol.setdefault(sym, []).append(ts_ms)
     for sym, tss in by_symbol.items():
         assert all(tss[i] < tss[i + 1] for i in range(len(tss) - 1)), (
@@ -129,7 +129,7 @@ async def test_static_snapshot_timestamps_bumped():
             "timestamp": static_ts,
             "spot": 100.0,
             "zero_gamma": 0.1,
-            "net_gex": 50,
+            "sum_gex_vol": 50,
             "major_pos_vol": 10,
             "major_neg_vol": -5,
             "major_pos_oi": 1,
@@ -146,10 +146,10 @@ async def test_static_snapshot_timestamps_bumped():
 
     # Ensure duplicate timestamps are bumped so they still publish in order
     pairs = [(rec[0], rec[1]) for rec in ts.samples if rec[0].startswith("ts:gex:")]
-    net_gex_pairs = [p for p in pairs if ":net_gex:" in p[0]]
-    assert len(net_gex_pairs) >= 2
+    sum_gex_vol_pairs = [p for p in pairs if ":sum_gex_vol:" in p[0]]
+    assert len(sum_gex_vol_pairs) >= 2
     by_symbol = {}
-    for key, ts_ms in net_gex_pairs:
+    for key, ts_ms in sum_gex_vol_pairs:
         parts = key.split(":")
         sym = parts[3] if len(parts) >= 4 else "UNKNOWN"
         by_symbol.setdefault(sym, []).append(ts_ms)
@@ -175,7 +175,7 @@ async def test_snapshot_older_than_cutoff_is_persisted():
         "timestamp": stale_ts.isoformat(),
         "spot": 100.0,
         "zero_gamma": 0.1,
-        "net_gex": 50,
+        "sum_gex_vol": 50,
         "major_pos_vol": 10,
         "major_neg_vol": -5,
         "major_pos_oi": 1,
@@ -213,7 +213,7 @@ async def test_stale_snapshot_still_persists():
         "timestamp": latest_ts.isoformat(),
         "spot": 100.0,
         "zero_gamma": 0.1,
-        "net_gex": 50,
+        "sum_gex_vol": 50,
         "major_pos_vol": 10,
         "major_neg_vol": -5,
         "major_pos_oi": 1,
@@ -229,8 +229,8 @@ async def test_stale_snapshot_still_persists():
     await poller._record_timeseries(stale_snapshot)
     await poller.wait_for_pending_timeseries_writes()
 
-    net_gex_samples = [rec for rec in ts.samples if ":net_gex:" in rec[0]]
-    assert len(net_gex_samples) == 2
+    sum_gex_vol_samples = [rec for rec in ts.samples if ":sum_gex_vol:" in rec[0]]
+    assert len(sum_gex_vol_samples) == 2
     assert poller.snapshot_count == 2
     assert len(fake_writer.snapshots) == 2
 
@@ -248,8 +248,6 @@ def test_combine_payloads_normalizes_numeric_strings():
             "timestamp": 1700000000,
             "spot": "100.5",
             "zero_gamma": "101.5",
-            "net_gex": "2500000",
-            "net_gex_oi": "1250000",
             "sum_gex_vol": "2500000",
             "sum_gex_oi": "1250000",
             "major_pos_vol": "1200000",
@@ -264,7 +262,7 @@ def test_combine_payloads_normalizes_numeric_strings():
 
     assert snapshot["spot"] == 100.5
     assert snapshot["zero_gamma"] == 101.5
-    assert snapshot["net_gex"] == 2500000.0
+    assert snapshot["sum_gex_vol"] == 2500000.0
     assert snapshot["delta_risk_reversal"] == -0.75
     assert snapshot["major_pos_vol"] == 1200000.0
     assert snapshot["major_neg_vol"] == -900000.0
@@ -285,7 +283,7 @@ async def test_snapshot_cache_writes_even_if_timeseries_fails():
         "timestamp": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat(),
         "spot": 100.0,
         "zero_gamma": 0.1,
-        "net_gex": 50,
+        "sum_gex_vol": 50,
         "major_pos_vol": 10,
         "major_neg_vol": -5,
         "major_pos_oi": 1,
@@ -300,7 +298,7 @@ async def test_snapshot_cache_writes_even_if_timeseries_fails():
 
     cached = json.loads(fake_redis.get("gex:snapshot:NQ_NDX"))
     assert cached["symbol"] == "NQ_NDX"
-    assert cached["net_gex"] == 50
+    assert cached["sum_gex_vol"] == 50
     assert poller.snapshot_count == 1
     assert len(fake_writer.snapshots) == 1
     assert fake_writer.snapshots[0]["symbol"] == "NQ_NDX"
