@@ -38,12 +38,16 @@ class FakeRedisClient:
 
 @pytest.mark.asyncio
 async def test_nq_poller_ignores_dynamic_enrollment():
-    settings = GEXBotPollerSettings(api_key="apikey", symbols=["NQ_NDX"])
+    settings = GEXBotPollerSettings(
+        api_key="apikey",
+        symbols=["NQ_NDX"],
+        auto_refresh_symbols=False,
+    )
     fake_redis = FakeRedisClient()
     poller = GEXBotPoller(settings, redis_client=fake_redis, ts_client=None)
 
-    # add_symbol_for_day no longer exists
-    assert not hasattr(poller, "add_symbol_for_day")
+    # The method exists, but the fast poller should ignore dynamic enrollment.
+    assert hasattr(poller, "add_symbol_for_day")
 
     # Add dynamic key externally to simulate other process writing it
     expires_at = (
@@ -51,6 +55,10 @@ async def test_nq_poller_ignores_dynamic_enrollment():
     ).isoformat()
     dynamic_payload = [{"symbol": "META", "expires_at": expires_at}]
     fake_redis.set_cached("gexbot:symbols:dynamic", dynamic_payload, ttl_seconds=86400)
+
+    poller.add_symbol_for_day("META")
+    assert "META" not in poller._dynamic_symbols
+    assert "gexbot:symbols:dynamic" in fake_redis._store
 
     # Monkeypatch _fetch_symbol to return a snapshot if called
     async def fake_fetch_symbol(session, symbol):

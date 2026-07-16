@@ -37,7 +37,7 @@ class FakeRedisClient:
 
 
 @pytest.mark.asyncio
-async def test_dynamic_symbol_sync_fetches_snapshot_and_persists():
+async def test_dynamic_symbol_sync_loads_enrollment_from_redis():
     # Setup a poller with a fake redis; base symbols exclude 'META'
     settings = GEXBotPollerSettings(api_key="apikey", symbols=["NQ_NDX", "ES_SPX"])
     fake_redis = FakeRedisClient()
@@ -50,7 +50,19 @@ async def test_dynamic_symbol_sync_fetches_snapshot_and_persists():
     dynamic_payload = [{"symbol": "META", "expires_at": expires_at}]
     fake_redis.set_cached("gexbot:symbols:dynamic", dynamic_payload, ttl_seconds=86400)
 
-    # Monkeypatch _fetch_symbol to return a synthetic snapshot
+    # Dynamic sync should load the symbol into the in-memory dynamic set so the
+    # next poll cycle includes it.
+    await poller._sync_dynamic_symbols(None)
+    assert "META" in poller._dynamic_symbols
+    assert "META" in poller._effective_symbols()
+
+
+@pytest.mark.asyncio
+async def test_fetch_symbol_now_enrolls_symbol_for_day():
+    settings = GEXBotPollerSettings(api_key="apikey", symbols=["NQ_NDX", "ES_SPX"])
+    fake_redis = FakeRedisClient()
+    poller = GEXBotPoller(settings, redis_client=fake_redis, ts_client=None)
+
     async def fake_fetch_symbol(session, symbol):
         now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
         return {
@@ -70,8 +82,11 @@ async def test_dynamic_symbol_sync_fetches_snapshot_and_persists():
 
     poller._fetch_symbol = fake_fetch_symbol
 
-    # Dynamic sync removed: _sync_dynamic_symbols is a no-op and should not fetch META
-    await poller._sync_dynamic_symbols(None)
-    assert "META" not in poller.latest
-    snapshot_key = "gex:snapshot:META"
-    assert snapshot_key not in fake_redis._store
+    snap = await poller.fetch_symbol_now("META")
+    assert snap is not None
+    assert "META" in poller.latest
+    assert "META" in poller._dynamic_symbols
+    assert "gex:snapshot:META" in fake_redis._store
+    dynamic_payload = fake_redis._store.get("gexbot:symbols:dynamic")
+    assert isinstance(dynamic_payload, list)
+    assert dynamic_payload[0]["symbol"] == "META"

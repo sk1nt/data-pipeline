@@ -248,8 +248,18 @@ class TradeBot(commands.Bot):
                         return
 
                     try:
-                        # No dynamic enrollment; just fetch snapshot from poller if available
+                        # Enroll non-base symbols so they stay on the poller's 5-minute path,
+                        # then fetch immediately so the response is fresh.
                         if hasattr(poller, "fetch_symbol_now"):
+                            base_symbols = getattr(poller, "_base_symbols", set()) or set()
+                            if (
+                                ticker.upper() not in base_symbols
+                                and hasattr(poller, "add_symbol_for_day")
+                            ):
+                                try:
+                                    poller.add_symbol_for_day(ticker)
+                                except Exception:
+                                    pass
                             snap = await poller.fetch_symbol_now(ticker)
                             if snap:
                                 snap["_freshness"] = "current"
@@ -1487,7 +1497,8 @@ class TradeBot(commands.Bot):
                 msg += "\nAliases: " + "; ".join(alias_texts)
         return msg
 
-    # Dynamic enrollment removed from bot; no write path for gexbot:symbols:dynamic
+    # The gex command enrolls non-base symbols through the poller before the
+    # immediate refresh so they stay on the next polling cadence.
 
     async def _run_gex_feed_loop(self):
         try:

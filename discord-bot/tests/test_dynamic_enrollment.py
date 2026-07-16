@@ -100,6 +100,7 @@ async def test_dynamic_enrollment_and_cache_write(monkeypatch):
 
     # Poller should have fetched TST (no dynamic enrollment required)
     assert "TST" in fake_poller.fetched
+    assert "TST" in fake_poller.added
 
     # Redis should contain snapshot key (canonical source)
     snapshot_key = "gex:snapshot:TST"

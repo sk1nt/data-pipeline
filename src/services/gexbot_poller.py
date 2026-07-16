@@ -100,8 +100,7 @@ class GEXBotPoller:
         self.dynamic_key = dynamic_key
         self.supported_key = supported_key
         self._base_symbols: Set[str] = {s.upper() for s in settings.symbols}
-        # No dynamic symbols: always use supported symbol list (downloaded) or base symbols
-        self._dynamic_symbols: Dict[str, datetime] = {}
+        self._dynamic_symbols: Dict[str, datetime] = self._load_dynamic_symbols()
         self._supported_symbols: Set[str] = set(self._base_symbols)
         self._last_supported_refresh: Optional[date] = None
         self.snapshot_count = 0
@@ -177,6 +176,8 @@ class GEXBotPoller:
                 interval_seconds = self._current_interval_seconds()
                 if self._auto_refresh_symbols and self._needs_supported_refresh():
                     await self._refresh_supported_symbols(session)
+                self._prune_expired_dynamic_symbols()
+                await self._sync_dynamic_symbols(session)
                 # Only poll configured symbols; intersect with supported list when available.
                 effective_symbols = self._effective_symbols()
                 # For NQ poller (base symbols include NQ_NDX), prefer a very fast RTH poll of the
@@ -286,15 +287,16 @@ class GEXBotPoller:
         When base_symbols is empty and auto_refresh_symbols is enabled, poll all
         supported symbols instead of an empty list.
         """
+        dynamic = set(self._dynamic_symbols.keys()) if self._auto_refresh_symbols else set()
         if self._supported_symbols:
             # If no base symbols configured but we have a supported list,
             # poll all supported symbols (this is the main poller's mode)
             if not self._base_symbols and self._auto_refresh_symbols:
-                return sorted(self._supported_symbols)
-            filtered = sorted(self._base_symbols & self._supported_symbols)
+                return sorted(self._supported_symbols | dynamic)
+            filtered = self._base_symbols & self._supported_symbols
             if filtered:
-                return filtered
-        return sorted(self._base_symbols)
+                return sorted(filtered | dynamic)
+        return sorted(self._base_symbols | dynamic)
 
     def _current_interval_seconds(self) -> float:
         """Return the effective poll interval (seconds), clamped to >0."""
@@ -318,10 +320,26 @@ class GEXBotPoller:
         end = now.replace(hour=16, minute=0, second=0, microsecond=0)
         return start <= now <= end
 
-    # Dynamic enrollment removed — symbol set is derived from the supported symbols
+    # Dynamic enrollment is available for auto-refresh pollers via the Redis-backed
+    # enrollment set; fast pollers keep it disabled through auto_refresh_symbols=False.
+    def add_symbol_for_day(self, symbol: str) -> None:
+        """Enroll a symbol for polling for the next 24 hours."""
+
+        if not self._auto_refresh_symbols:
+            return
+        normalized = symbol.upper().strip()
+        if not normalized or normalized in self._base_symbols:
+            return
+        expires_at = datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(hours=24)
+        existing = self._dynamic_symbols.get(normalized)
+        if existing and existing > expires_at:
+            return
+        self._dynamic_symbols[normalized] = expires_at
+        LOGGER.info("Enrolled %s for GEX polling (dynamic set)", normalized)
+        self._persist_dynamic_symbols()
 
     async def fetch_symbol_now(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Fetch a symbol immediately and return the normalized snapshot."""
+        """Fetch a symbol immediately, enroll it, and return the normalized snapshot."""
         normalized = symbol.upper().strip()
         if not normalized:
             return None
@@ -333,6 +351,7 @@ class GEXBotPoller:
             snapshot = await self._fetch_symbol(session, normalized)
         if snapshot:
             self.latest[normalized] = snapshot
+            self.add_symbol_for_day(normalized)
             await self._record_timeseries(snapshot)
         return snapshot
 
@@ -574,6 +593,70 @@ class GEXBotPoller:
                 LOGGER.warning(
                     "Failed to cache GEX snapshot for %s", symbol, exc_info=True
                 )
+
+    def _load_dynamic_symbols(self) -> Dict[str, datetime]:
+        if not self.redis:
+            return {}
+        try:
+            cached = self.redis.get_cached(self.dynamic_key)
+        except Exception:
+            cached = None
+        if cached is None:
+            try:
+                raw = self.redis.client.get(self.dynamic_key)
+            except Exception:
+                raw = None
+            if raw:
+                try:
+                    cached = json.loads(raw)
+                except Exception:
+                    cached = None
+        now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        result: Dict[str, datetime] = {}
+        if isinstance(cached, list):
+            for entry in cached:
+                symbol: Optional[str] = None
+                expires_at: Optional[datetime] = None
+                if isinstance(entry, str):
+                    symbol = entry.upper()
+                    expires_at = now + timedelta(hours=24)
+                elif isinstance(entry, dict):
+                    entry_symbol = entry.get("symbol")
+                    if entry_symbol:
+                        symbol = str(entry_symbol).upper()
+                    expires_raw = entry.get("expires_at") or entry.get("expiry")
+                    expires_at = self._parse_expiry(expires_raw)
+                if not symbol:
+                    continue
+                expiry = expires_at or (now + timedelta(hours=24))
+                if expiry <= now:
+                    continue
+                result[symbol] = expiry
+        return result
+
+    def _persist_dynamic_symbols(self) -> None:
+        if not self.redis:
+            return
+        if not self._dynamic_symbols:
+            try:
+                self.redis.delete_cached(self.dynamic_key)
+            except Exception:
+                pass
+            return
+        now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        payload = [
+            {
+                "symbol": symbol,
+                "expires_at": expiry.astimezone(timezone.utc).isoformat(),
+            }
+            for symbol, expiry in sorted(self._dynamic_symbols.items())
+        ]
+        max_expiry = max(self._dynamic_symbols.values())
+        ttl = max(60, int((max_expiry - now).total_seconds()))
+        try:
+            self.redis.set_cached(self.dynamic_key, payload, ttl_seconds=ttl)
+        except Exception:
+            LOGGER.debug("Failed to persist dynamic GEX symbols", exc_info=True)
     def _parse_expiry(self, raw: Any) -> Optional[datetime]:
         if isinstance(raw, (int, float)):
             return datetime.fromtimestamp(float(raw), tz=timezone.utc)
@@ -592,19 +675,29 @@ class GEXBotPoller:
     async def _sync_dynamic_symbols(
         self, session: Optional[aiohttp.ClientSession]
     ) -> None:
-        """Detect dynamic symbols added externally and fetch snapshots for newly added ones.
-
-        This method reads the dynamic symbols list from Redis, computes any newly
-        added symbols (relative to in-memory dynamic map), and makes an immediate
-        fetch for each new symbol so a canonical snapshot is stored and timeseries
-        are recorded.
-        """
-        # Dynamic synchronization disabled — this method is intentionally a no-op.
-        return
+        """Reconcile in-memory dynamic symbols with the Redis-backed enrollment set."""
+        if not self._auto_refresh_symbols or not self.redis:
+            return
+        loaded = self._load_dynamic_symbols()
+        if loaded == self._dynamic_symbols:
+            return
+        self._dynamic_symbols = loaded
+        LOGGER.info("Loaded dynamic GEX symbols: %s", sorted(self._dynamic_symbols))
 
     def _prune_expired_dynamic_symbols(self) -> None:
-        # No dynamic enrollment; nothing to prune
-        return
+        if not self._auto_refresh_symbols:
+            return
+        if not self._dynamic_symbols:
+            return
+        now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        expired = [
+            symbol for symbol, expiry in self._dynamic_symbols.items() if expiry <= now
+        ]
+        if not expired:
+            return
+        for symbol in expired:
+            self._dynamic_symbols.pop(symbol, None)
+        self._persist_dynamic_symbols()
 
     def _seconds_until_midnight(self) -> int:
         now = datetime.utcnow()
@@ -621,7 +714,6 @@ class GEXBotPoller:
         if not self._auto_refresh_symbols:
             # Respect explicitly configured symbols without reaching the global tickers endpoint
             self._supported_symbols = set(self._base_symbols)
-            self._dynamic_symbols = {}
             self._last_supported_refresh = datetime.utcnow().date()
             LOGGER.info(
                 "Auto-refresh disabled; using configured symbols: %s",
@@ -650,8 +742,7 @@ class GEXBotPoller:
                 self._supported_symbols = {
                     s for s in self._supported_symbols if s not in excluded
                 }
-        # No dynamic symbols: clear any in-memory map (dynamic enrollment removed)
-        self._dynamic_symbols = {}
+        self._dynamic_symbols = self._load_dynamic_symbols()
         self._last_supported_refresh = datetime.utcnow().date()
         LOGGER.info(
             "Updated supported GEX symbols: %s", sorted(self._supported_symbols)
@@ -703,6 +794,7 @@ class GEXBotPoller:
             "snapshot_count": self.snapshot_count,
             "last_snapshot_ts": self.last_snapshot_ts,
             "base_symbols": sorted(self._base_symbols),
+            "dynamic_symbols": sorted(self._dynamic_symbols.keys()),
             "effective_interval_seconds": self._current_interval_seconds(),
             "last_cycle_started_ts": self._last_cycle_started_ts,
             "last_cycle_completed_ts": self._last_cycle_completed_ts,
