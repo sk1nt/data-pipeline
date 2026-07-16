@@ -431,8 +431,6 @@ class GEXBotPoller:
             "major_neg_vol": _to_float(_first(zero_payload.get("major_neg_vol"))),
             "major_pos_oi": _to_float(_first(zero_payload.get("major_pos_oi"))),
             "major_neg_oi": _to_float(_first(zero_payload.get("major_neg_oi"))),
-            "major_pos_strike": _to_float(_first(zero_payload.get("major_pos_strike"))),
-            "major_neg_strike": _to_float(_first(zero_payload.get("major_neg_strike"))),
             "delta_risk_reversal": _to_float(_first(zero_payload.get("delta_risk_reversal"))),
         }
         snapshot["net_gex_vol"] = snapshot["net_gex"]
@@ -463,6 +461,8 @@ class GEXBotPoller:
             "major_neg_vol": snapshot.get("major_neg_vol"),
             "major_pos_oi": snapshot.get("major_pos_oi"),
             "major_neg_oi": snapshot.get("major_neg_oi"),
+            "major_pos_vol_gamma": snapshot.get("major_pos_vol_gamma"),
+            "major_neg_vol_gamma": snapshot.get("major_neg_vol_gamma"),
             "delta_risk_reversal": snapshot.get("delta_risk_reversal"),
             "pos_can1_strike": snapshot.get("pos_can1_strike"),
             "pos_can1_value": snapshot.get("pos_can1_value"),

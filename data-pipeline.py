@@ -2190,7 +2190,8 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
     GEX_FIELDS = (
         "symbol", "timestamp", "spot", "zero_gamma",
         "net_gex", "net_gex_oi", "sum_gex_vol", "sum_gex_oi",
-        "major_pos_vol", "major_neg_vol", "major_pos_oi", "major_neg_oi",
+        "major_pos_vol", "major_pos_oi", "major_pos_vol_gamma",
+        "major_neg_vol", "major_neg_oi", "major_neg_vol_gamma",
         "delta_risk_reversal", "max_priors", "maxchange",
         "pos_can1_strike", "pos_can1_value", "pos_can1_pct",
         "pos_can2_strike", "pos_can2_value", "pos_can2_pct",

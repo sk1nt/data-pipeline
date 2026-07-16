@@ -75,7 +75,66 @@ def test_format_gex_small_basic(bot):
     assert "call wall" in out_small
     assert "put wall" in out_small
     assert "net gex" in out_small
-    assert "current" in out_small
+    assert "largest delta" in out_small
+
+
+def test_format_gex_small_uses_compact_wall_fields_without_strikes(bot):
+    data = mk_data(zero_gamma=7488.39, net_gex=200.0)
+    data.update(
+        {
+            "major_pos_vol": 7540.0,
+            "major_neg_vol": 7470.0,
+            "pos_can1_strike": 7545.0,
+            "pos_can1_value": 70.0,
+            "pos_can1_pct": 70.0,
+            "pos_can2_strike": 7535.0,
+            "pos_can2_value": 15.0,
+            "pos_can2_pct": 15.0,
+            "neg_can1_strike": 7485.0,
+            "neg_can1_value": -98.0,
+            "neg_can1_pct": 98.0,
+            "neg_can2_strike": 7480.0,
+            "neg_can2_value": -65.0,
+            "neg_can2_pct": 65.0,
+        }
+    )
+    data["_wall_ladders"] = bot._build_compact_wall_ladders(data)
+
+    out_small = bot.format_gex_small(data)
+
+    assert "call wall" in out_small
+    assert "7540.00" in out_small
+    assert "7545.00 70%" in out_small
+    assert "7535.00 15%" in out_small
+    assert "put wall" in out_small
+    assert "7470.00" in out_small
+    assert "7485.00 98%" in out_small
+    assert "7480.00 65%" in out_small
+
+
+def test_normalize_snapshot_payload_preserves_compact_wall_fields(bot):
+    payload = {
+        "timestamp": "2026-07-10T13:44:17+00:00",
+        "spot": 7549.16,
+        "zero_gamma": 7546.20,
+        "net_gex": 1.0,
+        "major_pos_vol": 7540.0,
+        "major_neg_vol": 7470.0,
+        "pos_can1_strike": 7545.0,
+        "pos_can1_value": 70.0,
+        "pos_can1_pct": 70.0,
+        "neg_can1_strike": 7485.0,
+        "neg_can1_value": -98.0,
+        "neg_can1_pct": 98.0,
+        "maxchange": {"current": [7546.2, 1.0]},
+    }
+
+    normalized = bot._normalize_snapshot_payload(payload, "SPX")
+
+    assert normalized["pos_can1_strike"] == 7545.0
+    assert normalized["pos_can1_value"] == 70.0
+    assert normalized["neg_can1_strike"] == 7485.0
+    assert normalized["neg_can1_pct"] == 98.0
 
 
 def test_format_gex_short_feed_variant_hides_timestamp(bot):

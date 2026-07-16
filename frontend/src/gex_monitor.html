@@ -1006,7 +1006,7 @@ function toggleCollapse(el, bodyId) {
   function fmtWallNext(ladder) {
     if (!ladder || !ladder.next || !ladder.next.length) return '';
     return ladder.next.map(function(e) {
-      var pct = typeof e.pct === 'number' ? e.pct.toFixed(0) + '%' : '';
+      var pct = typeof e.pct === 'number' ? Math.max(0, Math.min(100, e.pct)).toFixed(0) + '%' : '';
       return fmtPrice(e.strike) + ' ' + pct;
     }).join('  \u00B7  ');
   }

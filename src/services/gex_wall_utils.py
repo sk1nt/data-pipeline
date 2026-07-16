@@ -5,6 +5,23 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
+def _bounded_pct(value: Any) -> Optional[float]:
+    """Normalize an incoming wall percentage to the monitor's 0-100 range."""
+    if value is None:
+        return None
+    try:
+        return min(100.0, max(0.0, float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_gex_strikes(raw: Any) -> List[Tuple[float, float]]:
     """Normalize a strike ladder into ``[(strike, gamma), ...]`` pairs."""
     if not isinstance(raw, list):
@@ -62,6 +79,12 @@ def summarize_wall_candidates(
     if major is None:
         major = filtered[0]
 
+    # The percentage is relative to the strongest wall on this side.  The
+    # provider's major-wall strike can be stale/misaligned with the ladder;
+    # using its gamma as the denominator can therefore produce percentages
+    # above 100% in the monitor.
+    reference_gamma = max(filtered, key=lambda pair: abs(pair[1]))[1]
+
     entries: List[Dict[str, Any]] = []
     for strike, gamma in filtered:
         if abs(strike - major[0]) <= 0.51:
@@ -70,7 +93,11 @@ def summarize_wall_candidates(
             {
                 "strike": strike,
                 "value": gamma,
-                "pct": abs(gamma) / abs(major[1]) * 100 if major[1] else None,
+                "pct": _bounded_pct(
+                    abs(gamma) / abs(reference_gamma) * 100
+                    if reference_gamma
+                    else None
+                ),
             }
         )
         if len(entries) >= 2:
@@ -78,9 +105,40 @@ def summarize_wall_candidates(
     return entries
 
 
+def _major_wall_gamma_fields(
+    snapshot: Dict[str, Any], *, prefer_positive: bool
+) -> Dict[str, Any]:
+    major_key = "major_pos_vol" if prefer_positive else "major_neg_vol"
+    gamma_key = "major_pos_vol_gamma" if prefer_positive else "major_neg_vol_gamma"
+
+    strikes = parse_gex_strikes(snapshot.get("strikes"))
+    side_strikes = [
+        (strike, gamma)
+        for strike, gamma in strikes
+        if (gamma > 0 if prefer_positive else gamma < 0)
+    ]
+
+    wall_gamma = _coerce_float(snapshot.get(gamma_key))
+    wall_strike = _coerce_float(snapshot.get(major_key))
+    if wall_gamma is None and wall_strike is not None:
+        for strike, gamma in side_strikes:
+            if abs(strike - wall_strike) <= 0.51:
+                wall_gamma = gamma
+                break
+    if wall_gamma is None and side_strikes:
+        wall_gamma = max(side_strikes, key=lambda pair: abs(pair[1]))[1]
+
+    fields: Dict[str, Any] = {}
+    if wall_gamma is not None:
+        fields[gamma_key] = wall_gamma
+    return fields
+
+
 def build_compact_wall_fields(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     """Populate compact wall fields from existing values or raw strikes."""
     fields: Dict[str, Any] = {}
+    fields.update(_major_wall_gamma_fields(snapshot, prefer_positive=True))
+    fields.update(_major_wall_gamma_fields(snapshot, prefer_positive=False))
     compact_keys = (
         ("pos", 1, "strike"),
         ("pos", 1, "value"),
@@ -99,8 +157,8 @@ def build_compact_wall_fields(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         key = f"{side}_can{idx}_{field}"
         value = snapshot.get(key)
         if value is not None:
-            fields[key] = value
-    if len(fields) == len(compact_keys):
+            fields[key] = _bounded_pct(value) if field == "pct" else value
+    if len(fields) == len(compact_keys) + 2:
         return fields
 
     legacy_map = {

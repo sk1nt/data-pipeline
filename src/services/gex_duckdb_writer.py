@@ -193,8 +193,10 @@ class GEXDuckDBWriter:
                     sec_min_dte,
                     major_pos_vol,
                     major_pos_oi,
+                    major_pos_vol_gamma,
                     major_neg_vol,
                     major_neg_oi,
+                    major_neg_vol_gamma,
                     sum_gex_vol,
                     sum_gex_oi,
                     delta_risk_reversal,
@@ -211,7 +213,7 @@ class GEXDuckDBWriter:
                     neg_can2_strike,
                     neg_can2_value,
                     neg_can2_pct
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 snapshot_rows,
             )
@@ -244,8 +246,10 @@ class GEXDuckDBWriter:
             snapshot.get("sec_min_dte"),
             _to_float(snapshot.get("major_pos_vol")),
             _to_float(snapshot.get("major_pos_oi")),
+            _to_float(snapshot.get("major_pos_vol_gamma")),
             _to_float(snapshot.get("major_neg_vol")),
             _to_float(snapshot.get("major_neg_oi")),
+            _to_float(snapshot.get("major_neg_vol_gamma")),
             _to_float(snapshot.get("sum_gex_vol")),
             _to_float(snapshot.get("sum_gex_oi")),
             _to_float(snapshot.get("delta_risk_reversal")),
@@ -278,8 +282,10 @@ class GEXDuckDBWriter:
                 sec_min_dte INTEGER,
                 major_pos_vol DOUBLE,
                 major_pos_oi DOUBLE,
+                major_pos_vol_gamma DOUBLE,
                 major_neg_vol DOUBLE,
                 major_neg_oi DOUBLE,
+                major_neg_vol_gamma DOUBLE,
                 sum_gex_vol DOUBLE,
                 sum_gex_oi DOUBLE,
                 delta_risk_reversal DOUBLE,
@@ -302,6 +308,8 @@ class GEXDuckDBWriter:
         )
         for column in (
             "strikes",
+            "major_pos_vol_gamma",
+            "major_neg_vol_gamma",
             "pos_can1_strike",
             "pos_can1_value",
             "pos_can1_pct",

@@ -1643,12 +1643,7 @@ class TradeBot(commands.Bot):
                 # No message yet; small sleep to avoid tight loop
                 await asyncio.sleep(0.01)
                 continue
-            
-            # Populate wall ladders for display
-            ticker = self.ticker_aliases.get(symbol, symbol)
-            snapshot_key = f"{self.redis_snapshot_prefix}{ticker.upper()}"
-            await self._populate_wall_ladders(data, ticker, None, snapshot_key)
-            
+
             delta_map = self._build_feed_delta_map(tracker, data, now)
             # Use compact formatting for feed
             content = self.format_gex_small(data)
@@ -1904,12 +1899,6 @@ class TradeBot(commands.Bot):
         # No transient cache key: use canonical snapshot key only
         snapshot_key = f"{self.redis_snapshot_prefix}{ticker.upper()}"
 
-        async def finalize(data: dict) -> dict:
-            data.setdefault("display_symbol", display_symbol)
-            # Only use snapshot_key for enrichment; transient cache key removed
-            await self._populate_wall_ladders(data, ticker, None, snapshot_key)
-            return data
-
         # Prefer the canonical snapshot key (written by poller/pipeline)
         try:
             snapshot = await asyncio.to_thread(self.redis_client.get, snapshot_key)
@@ -1934,7 +1923,7 @@ class TradeBot(commands.Bot):
                             300,
                             json.dumps(normalized, default=str),
                         )
-                        return await finalize(normalized)
+                        return normalized
         except Exception as e:
             print(f"Redis snapshot check failed: {e}")
 
@@ -1965,7 +1954,7 @@ class TradeBot(commands.Bot):
                             300,
                             json.dumps(normalized, default=str),
                         )
-                        return await finalize(normalized)
+                        return normalized
                     if age <= 30:
                         normalized["_freshness"] = "stale"
                         normalized["_source"] = "redis-snapshot"
@@ -1980,7 +1969,7 @@ class TradeBot(commands.Bot):
                                 ticker, snapshot_key, display_symbol
                             )
                         )
-                        return await finalize(normalized)
+                        return normalized
                     normalized["_freshness"] = "incomplete"
                     normalized["_source"] = "redis-snapshot"
                     await asyncio.to_thread(
@@ -1989,7 +1978,7 @@ class TradeBot(commands.Bot):
                         300,
                         json.dumps(normalized, default=str),
                     )
-                    return await finalize(normalized)
+                    return normalized
         except Exception as e:
             print(f"Snapshot redis check failed for {snapshot_key}: {e}")
 
@@ -2002,7 +1991,13 @@ class TradeBot(commands.Bot):
                 q = f"""
                 SELECT timestamp, ticker, spot_price, zero_gamma, net_gex,
                        sum_gex_vol, delta_risk_reversal, min_dte, sec_min_dte,
-                       major_pos_vol, major_neg_vol, major_pos_oi, major_neg_oi, sum_gex_oi, max_priors
+                       major_pos_vol, major_neg_vol, major_pos_oi, major_neg_oi,
+                       sum_gex_oi, max_priors,
+                       pos_can1_strike, pos_can1_value, pos_can1_pct,
+                       pos_can2_strike, pos_can2_value, pos_can2_pct,
+                       neg_can1_strike, neg_can1_value, neg_can1_pct,
+                       neg_can2_strike, neg_can2_value, neg_can2_pct,
+                       maxchange
                 FROM gex_snapshots
                 WHERE ticker = '{ticker}'
                 ORDER BY timestamp DESC
@@ -2052,6 +2047,19 @@ class TradeBot(commands.Bot):
                     "major_neg_oi",
                     "sum_gex_oi",
                     "max_priors",
+                    "pos_can1_strike",
+                    "pos_can1_value",
+                    "pos_can1_pct",
+                    "pos_can2_strike",
+                    "pos_can2_value",
+                    "pos_can2_pct",
+                    "neg_can1_strike",
+                    "neg_can1_value",
+                    "neg_can1_pct",
+                    "neg_can2_strike",
+                    "neg_can2_value",
+                    "neg_can2_pct",
+                    "maxchange",
                 ]
                 data = dict(zip(columns, result))
                 data["display_symbol"] = display_symbol
@@ -2102,7 +2110,7 @@ class TradeBot(commands.Bot):
                     300,
                     json.dumps(data, default=str),
                 )
-                return await finalize(data)
+                return data
         except Exception as e:
             print(f"DuckDB query failed: {e}")
 
@@ -2124,7 +2132,7 @@ class TradeBot(commands.Bot):
                     )
                 except Exception:
                     pass
-                return await finalize(api_data)
+                return api_data
         except Exception as e:
             print(f"API fetch failed: {e}")
 
@@ -2185,6 +2193,7 @@ class TradeBot(commands.Bot):
             strikes = z.get("strikes")
             if strikes:
                 data["strikes"] = strikes
+            data.update(self._extract_compact_wall_fields(z))
 
         return data
 
@@ -2239,10 +2248,6 @@ class TradeBot(commands.Bot):
             normalized["_freshness"] = "stale"
         else:
             normalized["_freshness"] = "incomplete"
-        try:
-            await self._populate_wall_ladders(normalized, ticker, None, snapshot_key)
-        except Exception:
-            pass
         return normalized
 
     async def _refresh_gex_from_api(
@@ -2339,6 +2344,7 @@ class TradeBot(commands.Bot):
             else {},
             "strikes": payload.get("strikes"),
         }
+        data.update(self._extract_compact_wall_fields(payload))
         return data
 
     def _extract_max_priors(self, payload: dict) -> List[list]:
@@ -2415,6 +2421,10 @@ class TradeBot(commands.Bot):
     async def _build_wall_ladders(
         self, data: dict, ticker: str, cache_key: Optional[str], snapshot_key: str
     ) -> Optional[dict]:
+        compact_summary = self._build_compact_wall_ladders(data)
+        if compact_summary:
+            return compact_summary
+
         strikes = self._normalize_strike_entries(data.get("strikes"))
         source = "payload" if strikes else None
         if not strikes:
@@ -2442,6 +2452,50 @@ class TradeBot(commands.Bot):
             return None
         if source:
             summary["source"] = source
+        return summary
+
+    @staticmethod
+    def _build_compact_wall_ladders(data: dict) -> Optional[dict]:
+        compact = TradeBot._extract_compact_wall_fields(data)
+        if not compact:
+            return None
+
+        summary: Dict[str, dict] = {}
+        for side, prefix in (("call", "pos"), ("put", "neg")):
+            major_key = "major_pos_vol" if side == "call" else "major_neg_vol"
+            entries = []
+            for idx in (1, 2):
+                strike = compact.get(f"{prefix}_can{idx}_strike")
+                value = compact.get(f"{prefix}_can{idx}_value")
+                pct = compact.get(f"{prefix}_can{idx}_pct")
+                if strike is None and value is None and pct is None:
+                    continue
+                entries.append(
+                    {
+                        "strike": strike,
+                        "gamma": value,
+                        "pct_vs_major": pct,
+                    }
+                )
+            if entries:
+                summary[side] = {
+                    "major_strike": data.get(major_key),
+                    "major_gamma": data.get(major_key),
+                    "entries": entries,
+                }
+
+        if not summary:
+            return None
+
+        source = (
+            data.get("_wall_ladders", {}).get("source")
+            if isinstance(data.get("_wall_ladders"), dict)
+            else None
+        )
+        if source:
+            summary["source"] = source
+        else:
+            summary["source"] = "compact"
         return summary
 
     async def _load_strikes_from_cache(
@@ -2542,6 +2596,36 @@ class TradeBot(commands.Bot):
                     continue
                 normalized.append((strike, gamma))
         return normalized
+
+    @staticmethod
+    def _extract_compact_wall_fields(data: Any) -> Dict[str, Any]:
+        if not isinstance(data, dict):
+            return {}
+        legacy_map = {
+            "pos_can1_strike": ("call_wall_candidate1_strike",),
+            "pos_can1_value": ("call_wall_candidate1_value", "call_wall_candidate1_gamma"),
+            "pos_can1_pct": ("call_wall_candidate1_pct",),
+            "pos_can2_strike": ("call_wall_candidate2_strike",),
+            "pos_can2_value": ("call_wall_candidate2_value", "call_wall_candidate2_gamma"),
+            "pos_can2_pct": ("call_wall_candidate2_pct",),
+            "neg_can1_strike": ("put_wall_candidate1_strike",),
+            "neg_can1_value": ("put_wall_candidate1_value", "put_wall_candidate1_gamma"),
+            "neg_can1_pct": ("put_wall_candidate1_pct",),
+            "neg_can2_strike": ("put_wall_candidate2_strike",),
+            "neg_can2_value": ("put_wall_candidate2_value", "put_wall_candidate2_gamma"),
+            "neg_can2_pct": ("put_wall_candidate2_pct",),
+        }
+        out: Dict[str, Any] = {}
+        for key, legacy_keys in legacy_map.items():
+            value = data.get(key)
+            if value is None:
+                for legacy_key in legacy_keys:
+                    value = data.get(legacy_key)
+                    if value is not None:
+                        break
+            if value is not None:
+                out[key] = value
+        return out
 
     @staticmethod
     def _timestamp_to_epoch_ms(value: Any) -> Optional[int]:
@@ -3420,8 +3504,14 @@ class TradeBot(commands.Bot):
         default_line: Optional[str] = None,
         gap_override: Optional[str] = None,
     ) -> str:
+        summary = None
         ladders = data.get("_wall_ladders")
-        summary = ladders.get(ladder_key) if isinstance(ladders, dict) else None
+        if isinstance(ladders, dict):
+            summary = ladders.get(ladder_key)
+        if not summary or not summary.get("entries"):
+            compact = self._build_compact_wall_ladders(data)
+            if isinstance(compact, dict):
+                summary = compact.get(ladder_key)
         if not summary or not summary.get("entries"):
             fallback_value = data.get(
                 "major_pos_vol" if ladder_key == "call" else "major_neg_vol"
