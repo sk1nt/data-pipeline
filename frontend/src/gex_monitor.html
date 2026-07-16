@@ -561,11 +561,11 @@ tr:hover { background: var(--bg3); }
 
 <div class="metrics" id="metricsGrid">
   <div class="metric">
-    <span class="lbl" id="crossGexLabel">SPX Net GEX</span>
+    <span class="lbl" id="crossGexLabel">SPX Sum GEX Vol</span>
     <span class="val neutral" id="crossGex">&mdash;</span>
   </div>
   <div class="metric">
-    <span class="lbl">Net GEX</span>
+    <span class="lbl">Sum GEX Vol</span>
     <span class="val neutral" id="netGex">&mdash;</span>
     <span class="sub" id="netGexDelta"></span>
   </div>
@@ -823,7 +823,7 @@ function toggleCollapse(el, bodyId) {
   let prevMaxchangeCurrent = null;
   let prevNetGex = null;
   const GEX_DELTA_WINDOW_MS = 15000;
-  let gexHistory = []; // [{t: ms, v: net_gex}]
+  let gexHistory = []; // [{t: ms, v: sum_gex_vol}]
   let alertTotal = 0;
   let flashQueue = 0;
   let flashing = false;
@@ -1013,12 +1013,12 @@ function toggleCollapse(el, bodyId) {
 
   // --- GEX snapshot display ---
   function onSnapshot(data) {
-    // Cross-symbol net GEX (e.g. ES_SPX when viewing NQ_NDX)
+    // Cross-symbol sum GEX vol (e.g. ES_SPX when viewing NQ_NDX)
     if (data.cross_symbol) {
-      var label = data.cross_symbol.replace('_', '/') + ' Net GEX';
+      var label = data.cross_symbol.replace('_', '/') + ' Sum GEX Vol';
       crossGexLabel.textContent = label;
-      crossGex.textContent = fmtBn(data.cross_net_gex);
-      crossGex.className = 'val ' + valClass(data.cross_net_gex);
+      crossGex.textContent = fmtBn(data.cross_sum_gex_vol);
+      crossGex.className = 'val ' + valClass(data.cross_sum_gex_vol);
     } else {
       crossGexLabel.textContent = 'Spot';
       crossGex.textContent = fmtPrice(data.spot);
@@ -1029,20 +1029,24 @@ function toggleCollapse(el, bodyId) {
     callWallNext.textContent = fmtWallNext(data.call_wall_ladder);
     putWall.textContent = fmtPrice(data.major_neg_vol); putWall.className = 'val neutral';
     putWallNext.textContent = fmtWallNext(data.put_wall_ladder);
-    netGex.textContent = fmtBn(data.net_gex); netGex.className = 'val ' + valClass(data.net_gex);
+    netGex.textContent = fmtBn(data.sum_gex_vol); netGex.className = 'val ' + valClass(data.sum_gex_vol);
     netGexOI.textContent = fmtBn(data.sum_gex_oi); netGexOI.className = 'val ' + valClass(data.sum_gex_oi);
-    var drr = data.delta_risk_reversal;
+    var drr = (typeof data.delta_risk_reversal === 'number')
+      ? data.delta_risk_reversal
+      : (typeof data.deltaRiskRev === 'number' ? data.deltaRiskRev : null);
     var drrEl = $('deltaRiskRev');
     drrEl.textContent = fmtPrice(drr); drrEl.className = 'val ' + valClass(drr);
     // GEX Delta: prefer backend-provided delta, fall back to a local rolling window.
-    var curGex = data.net_gex;
+    var curGex = data.sum_gex_vol;
     if (typeof curGex === 'number') {
       var now = Date.now();
       gexHistory.push({ t: now, v: curGex });
       // Drop entries older than the window
       var cutoff = now - GEX_DELTA_WINDOW_MS;
       gexHistory = gexHistory.filter(function(e) { return e.t >= cutoff; });
-      var gexDiff = (typeof data.gex_delta === 'number') ? data.gex_delta : null;
+      var gexDiff = (typeof data.gex_delta_15s === 'number')
+        ? data.gex_delta_15s
+        : (typeof data.gex_delta === 'number' ? data.gex_delta : null);
       // Compute average of consecutive differences within the window if the backend did not supply one.
       if (gexDiff === null && gexHistory.length >= 2) {
         var diffs = [];
@@ -1069,15 +1073,17 @@ function toggleCollapse(el, bodyId) {
     lastUpdate.textContent = 'Updated: ' + (ts || 'now');
 
     // --- Directional risk assessment ---
-    // Heavy directional days: negative gamma (net_gex < 0) + large |net_gex| + DRR aligned
+    // Heavy directional days: negative gamma (sum_gex_vol < 0) + large |sum_gex_vol| + DRR aligned
     // On these days, fading is dangerous — moves tend to continue, not revert.
     updateDirRiskBanner(data);
   }
 
   function updateDirRiskBanner(data) {
     var banner = $('dirRiskBanner');
-    var netGex = data.net_gex;
-    var drr = data.delta_risk_reversal;
+    var netGex = data.sum_gex_vol;
+    var drr = (typeof data.delta_risk_reversal === 'number')
+      ? data.delta_risk_reversal
+      : (typeof data.deltaRiskRev === 'number' ? data.deltaRiskRev : null);
     var spot = data.spot;
     var zeroGamma = data.zero_gamma;
 
@@ -1087,8 +1093,8 @@ function toggleCollapse(el, bodyId) {
     }
 
     // Directional risk score:
-    // - Negative gamma (net_gex < 0) = dealers short gamma = moves amplify = directional
-    // - |net_gex| > 1B = large positioning = stronger effect
+    // - Negative gamma (sum_gex_vol < 0) = dealers short gamma = moves amplify = directional
+    // - |sum_gex_vol| > 1B = large positioning = stronger effect
     // - DRR aligned with gamma sign = confirms directional bias
     // - Spot far from zero_gamma = trend already established
     var absGex = Math.abs(netGex);

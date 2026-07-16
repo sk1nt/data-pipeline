@@ -42,6 +42,7 @@ def _create_gex_tables(db_path: Path) -> None:
             major_neg_vol_gamma DOUBLE,
             sum_gex_vol DOUBLE,
             sum_gex_oi DOUBLE,
+            gex_delta_15s DOUBLE,
             delta_risk_reversal DOUBLE,
             max_priors VARCHAR,
             pos_can1_strike DOUBLE,
@@ -98,6 +99,7 @@ def test_write_gex_tables_dedupes_duplicate_rows(tmp_path: Path) -> None:
             "major_neg_vol_gamma": -20.0,
             "sum_gex_vol": 9.0,
             "sum_gex_oi": 10.0,
+            "gex_delta_15s": 10.5,
             "delta_risk_reversal": 11.0,
             "max_priors": "first",
             "pos_can1_strike": 20010.0,
@@ -129,6 +131,7 @@ def test_write_gex_tables_dedupes_duplicate_rows(tmp_path: Path) -> None:
             "major_neg_vol_gamma": -18.0,
             "sum_gex_vol": 9.5,
             "sum_gex_oi": 10.5,
+            "gex_delta_15s": 11.5,
             "delta_risk_reversal": 11.5,
             "max_priors": "second",
             "pos_can1_strike": 20012.0,
@@ -190,7 +193,8 @@ def test_write_gex_tables_dedupes_duplicate_rows(tmp_path: Path) -> None:
             neg_can1_pct,
             neg_can2_strike,
             neg_can2_value,
-            neg_can2_pct
+            neg_can2_pct,
+            gex_delta_15s
         FROM gex_snapshots
         """
     ).fetchone()
@@ -218,6 +222,7 @@ def test_write_gex_tables_dedupes_duplicate_rows(tmp_path: Path) -> None:
         19897.0,
         -9.0,
         22.5,
+        11.5,
     )
     assert strike == (1234, "NQ_NDX", 28974.92, 3.0, 4.0, "second")
 
@@ -234,6 +239,7 @@ def test_build_snapshot_row_derives_candidate_percentages_from_strikes() -> None
         "major_neg_vol": 19900.0,
         "sum_gex_vol": 2.0,
         "sum_gex_oi": 3.0,
+        "gex_delta_15s": 0.2,
         "delta_risk_reversal": 0.1,
         "max_priors": ["x"],
         "strikes": [

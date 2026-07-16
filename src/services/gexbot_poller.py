@@ -8,9 +8,10 @@ import math
 import logging
 import os
 import socket
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 import threading
 from zoneinfo import ZoneInfo
 
@@ -66,7 +67,7 @@ def _to_float(value: Any) -> Optional[float]:
 class GEXBotPollerSettings:
     api_key: str
     symbols: List[str] = field(
-        default_factory=lambda: ["NQ_NDX", "ES_SPX", "SPY", "QQQ", "SPX", "NDX"]
+        default_factory=lambda: ["NQ_NDX", "ES_SPX", "SPY", "QQQ", "NDX"]
     )
     interval_seconds: float = 60.0
     aggregation_period: str = "zero"
@@ -75,6 +76,8 @@ class GEXBotPollerSettings:
     dynamic_schedule: bool = True
     exclude_symbols: List[str] = field(default_factory=list)
     auto_refresh_symbols: bool = True
+    rth_overlap_enabled: bool = False
+    same_timestamp_retry_seconds: float = 0.25
 
 
 class GEXBotPoller:
@@ -125,6 +128,8 @@ class GEXBotPoller:
         # Track last written timestamp per symbol (ms) to ensure monotonic writes
         self._last_snapshot_ms_by_symbol: Dict[str, int] = {}
         self._snapshot_lock = threading.Lock()
+        self._last_seen_snapshot_ms_by_symbol: Dict[str, int] = {}
+        self._gex_history_by_symbol: Dict[str, Deque[Tuple[int, float]]] = {}
         self._last_interval_setting: Optional[str] = None
         self._auto_refresh_symbols = getattr(
             self.settings, "auto_refresh_symbols", True
@@ -171,98 +176,33 @@ class GEXBotPoller:
         ) as session:
             if self._auto_refresh_symbols:
                 await self._refresh_supported_symbols(session)
+            pending_cycles: Set[asyncio.Task[None]] = set()
+            next_rth_tick: Optional[float] = None
             while not self._stop_event.is_set():
-                loop_start = asyncio.get_event_loop().time()
-                interval_seconds = self._current_interval_seconds()
-                if self._auto_refresh_symbols and self._needs_supported_refresh():
-                    await self._refresh_supported_symbols(session)
-                self._prune_expired_dynamic_symbols()
-                await self._sync_dynamic_symbols(session)
-                # Only poll configured symbols; intersect with supported list when available.
-                effective_symbols = self._effective_symbols()
-                # For NQ poller (base symbols include NQ_NDX), prefer a very fast RTH poll of the
-                # key symbols to reduce load: SPX, NQ_NDX, and VIX (in priority order) during RTH.
                 is_rth = self._is_rth_now()
-                if "NQ_NDX" in self._base_symbols:
-                    fast_list = ["SPX", "NQ_NDX", "VIX"]  # SPX first for priority ordering
-                    symbols = [s for s in fast_list if s in set(effective_symbols)] if is_rth else effective_symbols
-                    mode = "rth_fast_path" if is_rth else "configured"
-                else:
-                    symbols = effective_symbols
-                    mode = "configured"
-                self._last_cycle_started_ts = datetime.now(timezone.utc).isoformat()
-                self._last_cycle_symbols = list(symbols)
-                self._last_cycle_interval_seconds = interval_seconds
-                self._last_cycle_mode = mode
-                LOGGER.debug(
-                    "poll-loop symbols=%s interval=%.3fs", symbols, interval_seconds
-                )
-
-                async def _fetch_and_store(symbol: str) -> Dict[str, Any]:
+                interval_seconds = self._current_interval_seconds()
+                if is_rth and getattr(self.settings, "rth_overlap_enabled", False):
+                    now = asyncio.get_event_loop().time()
+                    if next_rth_tick is None:
+                        next_rth_tick = now
+                    if now >= next_rth_tick:
+                        task = asyncio.create_task(
+                            self._poll_cycle(session),
+                            name="gexbot-rth-cycle",
+                        )
+                        pending_cycles.add(task)
+                        task.add_done_callback(pending_cycles.discard)
+                        next_rth_tick = now + 1.0
+                    timeout = max(0.05, min(1.0, (next_rth_tick or now) - now))
                     try:
-                        fetch_start = asyncio.get_event_loop().time()
-                        snapshot = await self._fetch_symbol(session, symbol)
-                        if snapshot:
-                            store_start = asyncio.get_event_loop().time()
-                            self.latest[symbol.upper()] = snapshot
-                            await self._record_timeseries(snapshot)
-                            fetch_duration = store_start - fetch_start
-                            store_duration = asyncio.get_event_loop().time() - store_start
-                            LOGGER.debug(
-                                "fetched %s ts=%s in %.3fs (store=%.3fs)",
-                                symbol,
-                                snapshot.get("timestamp"),
-                                fetch_duration,
-                                store_duration,
-                            )
-                            return {
-                                "symbol": symbol.upper(),
-                                "ok": True,
-                                "fetch_seconds": fetch_duration,
-                                "store_seconds": store_duration,
-                            }
-                        else:
-                            LOGGER.debug("no snapshot returned for %s", symbol)
-                            return {
-                                "symbol": symbol.upper(),
-                                "ok": False,
-                                "fetch_seconds": None,
-                                "store_seconds": None,
-                            }
-                    except Exception:  # pragma: no cover - defensive logging
-                        LOGGER.exception("Failed to poll GEXBot for %s", symbol)
-                        return {
-                            "symbol": symbol.upper(),
-                            "ok": False,
-                            "fetch_seconds": None,
-                            "store_seconds": None,
-                        }
+                        await asyncio.wait_for(self._stop_event.wait(), timeout=timeout)
+                    except asyncio.TimeoutError:
+                        continue
+                    continue
 
-                results = await asyncio.gather(*[_fetch_and_store(sym) for sym in symbols])
-                self._last_cycle_success_count = sum(1 for item in results if item.get("ok"))
-                fetch_durations = [
-                    float(item["fetch_seconds"])
-                    for item in results
-                    if item.get("fetch_seconds") is not None
-                ]
-                store_durations = [
-                    float(item["store_seconds"])
-                    for item in results
-                    if item.get("store_seconds") is not None
-                ]
-                self._last_cycle_fetch_max_seconds = max(fetch_durations) if fetch_durations else None
-                self._last_cycle_fetch_avg_seconds = (
-                    sum(fetch_durations) / len(fetch_durations) if fetch_durations else None
-                )
-                self._last_cycle_store_max_seconds = max(store_durations) if store_durations else None
-                self._last_cycle_store_avg_seconds = (
-                    sum(store_durations) / len(store_durations) if store_durations else None
-                )
-                self._last_cycle_symbol_timings = results
-                self._last_cycle_completed_ts = datetime.now(timezone.utc).isoformat()
-                self._last_cycle_duration_seconds = (
-                    asyncio.get_event_loop().time() - loop_start
-                )
+                next_rth_tick = None
+                loop_start = asyncio.get_event_loop().time()
+                await self._poll_cycle(session)
                 interval_seconds = self._current_interval_seconds()
                 label = "RTH" if self._is_rth_now() else "off-hours"
                 if label != self._last_interval_setting:
@@ -279,7 +219,127 @@ class GEXBotPoller:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=remaining)
                 except asyncio.TimeoutError:
                     continue
+            if pending_cycles:
+                await asyncio.gather(*pending_cycles, return_exceptions=True)
         LOGGER.info("GEXBot poller stopped")
+
+    async def _poll_cycle(self, session: aiohttp.ClientSession) -> None:
+        loop_start = asyncio.get_event_loop().time()
+        interval_seconds = self._current_interval_seconds()
+        if self._auto_refresh_symbols and self._needs_supported_refresh():
+            await self._refresh_supported_symbols(session)
+        self._prune_expired_dynamic_symbols()
+        await self._sync_dynamic_symbols(session)
+        effective_symbols = self._effective_symbols()
+        is_rth = self._is_rth_now()
+        if "NQ_NDX" in self._base_symbols:
+            fast_list = ["SPX", "NQ_NDX", "VIX"]
+            symbols = [s for s in fast_list if s in set(effective_symbols)] if is_rth else effective_symbols
+            mode = "rth_fast_path" if is_rth else "configured"
+        else:
+            symbols = effective_symbols
+            mode = "configured"
+        self._last_cycle_started_ts = datetime.now(timezone.utc).isoformat()
+        self._last_cycle_symbols = list(symbols)
+        self._last_cycle_interval_seconds = interval_seconds
+        self._last_cycle_mode = mode
+        LOGGER.debug(
+            "poll-loop symbols=%s interval=%.3fs", symbols, interval_seconds
+        )
+
+        results = await asyncio.gather(
+            *[self._fetch_and_store_symbol(session, sym) for sym in symbols]
+        )
+        self._last_cycle_success_count = sum(1 for item in results if item.get("ok"))
+        fetch_durations = [
+            float(item["fetch_seconds"])
+            for item in results
+            if item.get("fetch_seconds") is not None
+        ]
+        store_durations = [
+            float(item["store_seconds"])
+            for item in results
+            if item.get("store_seconds") is not None
+        ]
+        self._last_cycle_fetch_max_seconds = max(fetch_durations) if fetch_durations else None
+        self._last_cycle_fetch_avg_seconds = (
+            sum(fetch_durations) / len(fetch_durations) if fetch_durations else None
+        )
+        self._last_cycle_store_max_seconds = max(store_durations) if store_durations else None
+        self._last_cycle_store_avg_seconds = (
+            sum(store_durations) / len(store_durations) if store_durations else None
+        )
+        self._last_cycle_symbol_timings = results
+        self._last_cycle_completed_ts = datetime.now(timezone.utc).isoformat()
+        self._last_cycle_duration_seconds = (
+            asyncio.get_event_loop().time() - loop_start
+        )
+
+    async def _fetch_and_store_symbol(
+        self, session: aiohttp.ClientSession, symbol: str
+    ) -> Dict[str, Any]:
+        symbol = symbol.upper()
+        try:
+            fetch_start = asyncio.get_event_loop().time()
+            snapshot = await self._fetch_symbol(session, symbol)
+            if snapshot:
+                snapshot = await self._maybe_retry_same_timestamp(session, symbol, snapshot)
+                store_start = asyncio.get_event_loop().time()
+                self.latest[symbol] = snapshot
+                timestamp_ms = _timestamp_ms(snapshot.get("timestamp"))
+                self._last_seen_snapshot_ms_by_symbol[symbol] = timestamp_ms
+                await self._record_timeseries(snapshot)
+                fetch_duration = store_start - fetch_start
+                store_duration = asyncio.get_event_loop().time() - store_start
+                LOGGER.debug(
+                    "fetched %s ts=%s in %.3fs (store=%.3fs)",
+                    symbol,
+                    snapshot.get("timestamp"),
+                    fetch_duration,
+                    store_duration,
+                )
+                return {
+                    "symbol": symbol,
+                    "ok": True,
+                    "fetch_seconds": fetch_duration,
+                    "store_seconds": store_duration,
+                }
+            LOGGER.debug("no snapshot returned for %s", symbol)
+            return {
+                "symbol": symbol,
+                "ok": False,
+                "fetch_seconds": None,
+                "store_seconds": None,
+            }
+        except Exception:  # pragma: no cover - defensive logging
+            LOGGER.exception("Failed to poll GEXBot for %s", symbol)
+            return {
+                "symbol": symbol,
+                "ok": False,
+                "fetch_seconds": None,
+                "store_seconds": None,
+            }
+
+    async def _maybe_retry_same_timestamp(
+        self,
+        session: aiohttp.ClientSession,
+        symbol: str,
+        snapshot: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        retry_seconds = float(getattr(self.settings, "same_timestamp_retry_seconds", 0.25))
+        if retry_seconds <= 0:
+            return snapshot
+        if not self._is_rth_now():
+            return snapshot
+        current_ts_ms = _timestamp_ms(snapshot.get("timestamp"))
+        previous_ts_ms = self._last_seen_snapshot_ms_by_symbol.get(symbol)
+        if previous_ts_ms is None or current_ts_ms != previous_ts_ms:
+            return snapshot
+        await asyncio.sleep(retry_seconds)
+        retry_snapshot = await self._fetch_symbol(session, symbol)
+        if retry_snapshot:
+            return retry_snapshot
+        return snapshot
 
     def _effective_symbols(self) -> List[str]:
         """Return the configured symbols, filtered by supported list if present.
@@ -386,6 +446,12 @@ class GEXBotPoller:
         return result
 
     async def _record_timeseries(self, snapshot: Dict[str, Any]) -> None:
+        if snapshot.get("gex_delta_15s") is None:
+            snapshot["gex_delta_15s"] = self._compute_gex_delta_15s(snapshot)
+            if snapshot.get("gex_delta_15s") is None:
+                snapshot["gex_delta_15s"] = await asyncio.to_thread(
+                    self._compute_gex_delta_15s_from_timeseries, snapshot
+                )
         redis_start = asyncio.get_event_loop().time()
         self._store_snapshot_blob(snapshot)
         self._last_cycle_redis_duration_seconds = (
@@ -409,6 +475,70 @@ class GEXBotPoller:
             snapshot.get("timestamp") or datetime.utcnow().isoformat()
         )
 
+    def _compute_gex_delta_15s(self, snapshot: Dict[str, Any]) -> Optional[float]:
+        symbol = (snapshot.get("symbol") or snapshot.get("ticker") or "").upper()
+        if not symbol:
+            return None
+        timestamp_ms = _timestamp_ms(snapshot.get("timestamp"))
+        current_value = _to_float(snapshot.get("sum_gex_vol"))
+        if current_value is None:
+            return None
+
+        history = self._gex_history_by_symbol.setdefault(symbol, deque(maxlen=240))
+        history.append((timestamp_ms, current_value))
+        cutoff = timestamp_ms - 15_000
+        window = [point for point in history if point[0] >= cutoff]
+        if len(window) < 2:
+            return None
+
+        diffs = [window[i][1] - window[i - 1][1] for i in range(1, len(window))]
+        if not diffs:
+            return None
+        return sum(diffs) / len(diffs)
+
+    def _compute_gex_delta_15s_from_timeseries(self, snapshot: Dict[str, Any]) -> Optional[float]:
+        ts_client = self.ts_client
+        if not ts_client:
+            return None
+        revrange = getattr(ts_client, "revrange", None)
+        if not callable(revrange):
+            return None
+
+        symbol = (snapshot.get("symbol") or snapshot.get("ticker") or "").upper()
+        if not symbol:
+            return None
+        timestamp_ms = _timestamp_ms(snapshot.get("timestamp"))
+        key = f"ts:gex:sum_gex_vol:{symbol}"
+
+        try:
+            rows = revrange(key, "+", "-", count=100)
+        except Exception:
+            LOGGER.debug("Failed to read GEX timeseries for %s", symbol, exc_info=True)
+            return None
+
+        points: List[tuple[int, float]] = []
+        for row in rows or []:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                continue
+            try:
+                points.append((int(row[0]), float(row[1])))
+            except (TypeError, ValueError):
+                continue
+
+        if len(points) < 2:
+            return None
+
+        points.sort(key=lambda item: item[0])
+        cutoff = timestamp_ms - 15_000
+        window = [point for point in points if point[0] >= cutoff]
+        if len(window) < 2:
+            return None
+
+        diffs = [window[i][1] - window[i - 1][1] for i in range(1, len(window))]
+        if not diffs:
+            return None
+        return sum(diffs) / len(diffs)
+
     def _combine_payloads(
         self,
         symbol: str,
@@ -431,6 +561,12 @@ class GEXBotPoller:
             zero_payload.get("sum_gex_vol"),
             zero_payload.get("sum_gex"),
         )
+        delta_risk_reversal = _first(
+            zero_payload.get("delta_risk_reversal"),
+            zero_payload.get("deltaRiskRev"),
+            zero_payload.get("drr"),
+            zero_payload.get("delta_rr"),
+        )
         snapshot = {
             "symbol": symbol.upper(),
             "timestamp": timestamp,
@@ -442,7 +578,7 @@ class GEXBotPoller:
             "major_neg_vol": _to_float(_first(zero_payload.get("major_neg_vol"))),
             "major_pos_oi": _to_float(_first(zero_payload.get("major_pos_oi"))),
             "major_neg_oi": _to_float(_first(zero_payload.get("major_neg_oi"))),
-            "delta_risk_reversal": _to_float(_first(zero_payload.get("delta_risk_reversal"))),
+            "delta_risk_reversal": _to_float(delta_risk_reversal),
         }
         snapshot["major_pos"] = snapshot["major_pos_vol"]
         snapshot["major_neg"] = snapshot["major_neg_vol"]

@@ -752,6 +752,7 @@ class RedisFlushWorker:
             "major_neg_vol_gamma": snapshot.get("major_neg_vol_gamma"),
             "sum_gex_vol": snapshot.get("sum_gex_vol"),
             "sum_gex_oi": snapshot.get("sum_gex_oi"),
+            "gex_delta_15s": snapshot.get("gex_delta_15s"),
             "delta_risk_reversal": snapshot.get("delta_risk_reversal"),
             "max_priors": max_priors_str,
             "pos_can1_strike": snapshot.get("pos_can1_strike")
@@ -877,6 +878,7 @@ class RedisFlushWorker:
                 major_neg_vol_gamma,
                 sum_gex_vol,
                 sum_gex_oi,
+                gex_delta_15s,
                 delta_risk_reversal,
                 max_priors,
                 pos_can1_strike,
@@ -909,6 +911,7 @@ class RedisFlushWorker:
                 major_neg_vol_gamma,
                 sum_gex_vol,
                 sum_gex_oi,
+                gex_delta_15s,
                 delta_risk_reversal,
                 max_priors,
                 pos_can1_strike,
@@ -965,6 +968,7 @@ class RedisFlushWorker:
             "neg_can2_pct",
             "major_pos_vol_gamma",
             "major_neg_vol_gamma",
+            "gex_delta_15s",
             "strikes",
         ):
             conn.execute(

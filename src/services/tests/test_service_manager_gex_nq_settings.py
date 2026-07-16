@@ -43,6 +43,8 @@ def test_gex_nq_poller_uses_env_rth_interval(monkeypatch):
         assert manager.gex_nq_poller is not None
         assert manager.gex_nq_poller.settings.symbols == ["NQ_NDX", "SPX", "VIX"]
         assert manager.gex_nq_poller.settings.rth_interval_seconds == 0.8
+        assert manager.gex_nq_poller.settings.rth_overlap_enabled is True
+        assert manager.gex_nq_poller.settings.same_timestamp_retry_seconds == 0.25
     finally:
         settings.gexbot_api_key = old_api_key
         settings.gex_nq_polling_enabled = old_enabled
@@ -82,10 +84,13 @@ def test_gex_poller_uses_configured_symbols_when_env_missing(monkeypatch):
             "ES_SPX",
             "SPY",
             "QQQ",
-            "SPX",
             "NDX",
         ]
-        assert manager.gex_poller.settings.exclude_symbols == ["NQ_NDX", "VIX"]
+        assert manager.gex_poller.settings.exclude_symbols == [
+            "NQ_NDX",
+            "SPX",
+            "VIX",
+        ]
     finally:
         settings.gexbot_api_key = old_api_key
         settings.gex_polling_enabled = old_enabled

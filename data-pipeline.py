@@ -511,7 +511,11 @@ class ServiceManager:
             # The poller will still refresh the supported set from GEXBot and
             # apply exclusions, but it no longer depends on that call to avoid
             # silently running with zero symbols.
-            base_symbols = settings.gex_symbol_list
+            excluded_symbols = ["NQ_NDX", "SPX", "VIX"]
+            base_symbols = [
+                symbol for symbol in settings.gex_symbol_list
+                if symbol.upper() not in {s.upper() for s in excluded_symbols}
+            ]
             self._ensure_gex_duckdb_writer()
             self.gex_poller = GEXBotPoller(
                 GEXBotPollerSettings(
@@ -523,11 +527,9 @@ class ServiceManager:
                     rth_interval_seconds=5.0,
                     off_hours_interval_seconds=settings.gex_poll_off_hours_interval_seconds,
                     dynamic_schedule=settings.gex_poll_dynamic_schedule,
-                    # Keep NQ_NDX and VIX on the dedicated fast poller, but do
-                    # not exclude SPX from the main poller. SPX is a shared
-                    # reference symbol and should still be cached even if the
-                    # NQ poller is disabled.
-                    exclude_symbols=["NQ_NDX", "VIX"],
+                    # Keep NQ_NDX, SPX, and VIX on the dedicated NQ poller.
+                    # The main poller should stay on the non-NQ universe only.
+                    exclude_symbols=excluded_symbols,
                 ),
                 redis_client=self.redis_client,
                 ts_client=self.rts,
@@ -556,6 +558,8 @@ class ServiceManager:
                     rth_interval_seconds=settings.gex_nq_poll_rth_interval_seconds,
                     off_hours_interval_seconds=settings.gex_nq_poll_off_hours_interval_seconds,
                     dynamic_schedule=settings.gex_nq_poll_dynamic_schedule,
+                    rth_overlap_enabled=True,
+                    same_timestamp_retry_seconds=0.25,
                     auto_refresh_symbols=False,
                 ),
                 redis_client=self.redis_client,
@@ -2190,6 +2194,7 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
     GEX_FIELDS = (
         "symbol", "timestamp", "spot", "zero_gamma",
         "sum_gex_vol", "sum_gex_oi",
+        "gex_delta_15s",
         "major_pos_vol", "major_pos_oi", "major_pos_vol_gamma",
         "major_neg_vol", "major_neg_oi", "major_neg_vol_gamma",
         "delta_risk_reversal", "max_priors", "maxchange",
@@ -2205,9 +2210,19 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
     def _extract(payload: Dict[str, Any]) -> Dict[str, Any]:
         out = {k: payload.get(k) for k in GEX_FIELDS}
         out["symbol"] = normalized
-        gex_delta = _get_latest_gex_delta(redis_conn, normalized)
-        if gex_delta is not None:
-            out["gex_delta"] = gex_delta
+        if out.get("gex_delta_15s") is None:
+            gex_delta = _get_latest_gex_delta(redis_conn, normalized)
+            if gex_delta is not None:
+                out["gex_delta_15s"] = gex_delta
+                out["gex_delta"] = gex_delta
+        else:
+            out["gex_delta"] = out["gex_delta_15s"]
+        if out.get("delta_risk_reversal") is None:
+            for alias in ("deltaRiskRev", "drr", "delta_rr"):
+                value = payload.get(alias)
+                if value is not None:
+                    out["delta_risk_reversal"] = value
+                    break
         call_ladder = build_wall_ladder_from_compact(payload, "call")
         put_ladder = build_wall_ladder_from_compact(payload, "put")
         if call_ladder.get("next"):
