@@ -88,7 +88,7 @@ from backend.src.api.trading import router as trading_router  # noqa: E402
 
 LOGGER = logging.getLogger("data_pipeline")
 SNAPSHOT_VIEW_KEY_PREFIX = "gex:snapshot:view:"
-GEX_NET_GEX_TS_PREFIX = "ts:gex:net_gex:"
+GEX_SUM_GEX_VOL_TS_PREFIX = "ts:gex:sum_gex_vol:"
 NOISY_STREAM_LOGGERS = [
     "tastytrade",
     "tastytrade.session",
@@ -2189,7 +2189,7 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
 
     GEX_FIELDS = (
         "symbol", "timestamp", "spot", "zero_gamma",
-        "net_gex", "net_gex_oi", "sum_gex_vol", "sum_gex_oi",
+        "sum_gex_vol", "sum_gex_oi",
         "major_pos_vol", "major_pos_oi", "major_pos_vol_gamma",
         "major_neg_vol", "major_neg_oi", "major_neg_vol_gamma",
         "delta_risk_reversal", "max_priors", "maxchange",
@@ -2199,7 +2199,7 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
         "neg_can2_strike", "neg_can2_value", "neg_can2_pct",
     )
 
-    # Map primary symbol to a secondary symbol whose net_gex we display
+    # Map primary symbol to a secondary symbol whose sum_gex_vol we display
     CROSS_GEX_MAP = {"NQ_NDX": "SPX", "SPX": "NQ_NDX"}
 
     def _extract(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2234,7 +2234,7 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
                 _cache_gex_snapshot_view(redis_conn, normalized, enriched)
             except Exception:
                 pass
-        # Cross-symbol net GEX (e.g. ES_SPX net_gex when viewing NQ_NDX)
+        # Cross-symbol sum GEX vol (e.g. ES_SPX when viewing NQ_NDX)
         cross_sym = CROSS_GEX_MAP.get(normalized)
         if cross_sym:
             try:
@@ -2243,7 +2243,7 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
                 if cross_raw:
                     cross_snap = json.loads(cross_raw if isinstance(cross_raw, str) else cross_raw.decode("utf-8"))
                     out["cross_symbol"] = cross_sym
-                    out["cross_net_gex"] = cross_snap.get("net_gex")
+                    out["cross_sum_gex_vol"] = cross_snap.get("sum_gex_vol")
             except Exception:
                 pass
         return out
@@ -2605,8 +2605,8 @@ def _get_redis_client():
 
 
 def _get_latest_gex_delta(redis_conn, symbol: str) -> Optional[float]:
-    """Return the rolling 15s average net GEX delta from RedisTimeSeries, if available."""
-    key = f"{GEX_NET_GEX_TS_PREFIX}{(symbol or '').upper()}"
+    """Return the rolling 15s average sum GEX vol delta from RedisTimeSeries, if available."""
+    key = f"{GEX_SUM_GEX_VOL_TS_PREFIX}{(symbol or '').upper()}"
     try:
         rows = redis_conn.execute_command("TS.REVRANGE", key, "+", "-", "COUNT", 100)
     except Exception:

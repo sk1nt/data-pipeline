@@ -179,10 +179,42 @@ class GEXDuckDBWriter:
             snapshot_rows.append(row)
         if not snapshot_rows:
             return
+        snapshot_columns = (
+            "timestamp",
+            "ticker",
+            "spot_price",
+            "zero_gamma",
+            "net_gex",
+            "min_dte",
+            "sec_min_dte",
+            "major_pos_vol",
+            "major_pos_oi",
+            "major_pos_vol_gamma",
+            "major_neg_vol",
+            "major_neg_oi",
+            "major_neg_vol_gamma",
+            "sum_gex_vol",
+            "sum_gex_oi",
+            "delta_risk_reversal",
+            "max_priors",
+            "pos_can1_strike",
+            "pos_can1_value",
+            "pos_can1_pct",
+            "pos_can2_strike",
+            "pos_can2_value",
+            "pos_can2_pct",
+            "neg_can1_strike",
+            "neg_can1_value",
+            "neg_can1_pct",
+            "neg_can2_strike",
+            "neg_can2_value",
+            "neg_can2_pct",
+        )
+        placeholders = ", ".join(["?"] * len(snapshot_columns))
         with duckdb.connect(str(db_path)) as conn:
             self._ensure_schema(conn)
             conn.executemany(
-                """
+                f"""
                 INSERT INTO gex_snapshots (
                     timestamp,
                     ticker,
@@ -213,7 +245,7 @@ class GEXDuckDBWriter:
                     neg_can2_strike,
                     neg_can2_value,
                     neg_can2_pct
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES ({placeholders})
                 """,
                 snapshot_rows,
             )
