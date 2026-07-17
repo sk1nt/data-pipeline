@@ -139,6 +139,30 @@ def test_normalize_snapshot_payload_preserves_compact_wall_fields(bot):
     assert normalized["neg_can1_pct"] == 98.0
 
 
+def test_zero_filled_spot_snapshot_is_not_usable(bot):
+    assert not bot._has_usable_gex_metrics(
+        {
+            "spot_price": 29030.42,
+            "zero_gamma": 0.0,
+            "major_pos_vol": 0.0,
+            "major_neg_vol": 0.0,
+            "sum_gex_vol": None,
+        }
+    )
+
+
+def test_populated_gex_snapshot_is_usable(bot):
+    assert bot._has_usable_gex_metrics(
+        {
+            "spot_price": 29030.42,
+            "zero_gamma": 28950.0,
+            "major_pos_vol": 29100.0,
+            "major_neg_vol": 28800.0,
+            "sum_gex_vol": 2500000.0,
+        }
+    )
+
+
 def test_format_gex_short_feed_variant_hides_timestamp(bot):
     data = mk_data(zero_gamma=15000, net_gex=500.0)
     data["timestamp"] = "2024-09-01T13:00:00+00:00"

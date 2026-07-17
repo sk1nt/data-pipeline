@@ -619,12 +619,12 @@ tr:hover { background: var(--bg3); }
   <div class="section-title collapsible-toggle" onclick="toggleCollapse(this, 'maxchangeBody')">Largest Delta (Max Change GEX)</div>
   <div class="collapsible-body" id="maxchangeBody">
     <div id="maxchangeRows">
-      <div class="maxchange-row"><span class="interval">current</span><span class="strike">&mdash;</span><span class="delta neutral">&mdash;</span></div>
       <div class="maxchange-row"><span class="interval">1 min</span><span class="strike">&mdash;</span><span class="delta neutral">&mdash;</span></div>
       <div class="maxchange-row"><span class="interval">5 min</span><span class="strike">&mdash;</span><span class="delta neutral">&mdash;</span></div>
       <div class="maxchange-row"><span class="interval">10 min</span><span class="strike">&mdash;</span><span class="delta neutral">&mdash;</span></div>
       <div class="maxchange-row"><span class="interval">15 min</span><span class="strike">&mdash;</span><span class="delta neutral">&mdash;</span></div>
       <div class="maxchange-row"><span class="interval">30 min</span><span class="strike">&mdash;</span><span class="delta neutral">&mdash;</span></div>
+      <div class="maxchange-row"><span class="interval">largest delta</span><span class="strike">&mdash;</span><span class="delta neutral">&mdash;</span></div>
     </div>
   </div>
 </div>
@@ -821,9 +821,6 @@ function toggleCollapse(el, bodyId) {
   let reconnectDelay = 1000;
   let marketAggReconnectDelay = 1000;
   let prevMaxchangeCurrent = null;
-  let prevNetGex = null;
-  const GEX_DELTA_WINDOW_MS = 15000;
-  let gexHistory = []; // [{t: ms, v: sum_gex_vol}]
   let alertTotal = 0;
   let flashQueue = 0;
   let flashing = false;
@@ -982,17 +979,17 @@ function toggleCollapse(el, bodyId) {
   function valClass(v) { v = toNumber(v); if (v === null) return 'neutral'; return v > 0 ? 'pos' : v < 0 ? 'neg' : 'neutral'; }
 
   // --- Maxchange ---
-  var MC_KEYS = ['current', 'one', 'five', 'ten', 'fifteen', 'thirty'];
+  var MC_KEYS = ['one', 'five', 'ten', 'fifteen', 'thirty', 'current'];
   var prevDeltas = {}; // track previous delta per row for change coloring
   function updateMaxchange(maxchange, maxPriors) {
     var rows = $('maxchangeRows').querySelectorAll('.maxchange-row');
     MC_KEYS.forEach(function(key, i) {
       if (i >= rows.length) return;
       var row = rows[i]; var strike = null, delta = null;
-      if (key === 'current' && maxchange && maxchange.current) { strike = maxchange.current[0]; delta = maxchange.current[1]; }
-      else if (key !== 'current' && maxchange && maxchange[key]) { strike = maxchange[key][0]; delta = maxchange[key][1]; }
-      else if (maxPriors && i > 0 && maxPriors[i - 1]) {
-        var entry = maxPriors[i - 1];
+      if (maxchange && maxchange[key]) { strike = maxchange[key][0]; delta = maxchange[key][1]; }
+      else if (key === 'current' && maxchange && maxchange.current) { strike = maxchange.current[0]; delta = maxchange.current[1]; }
+      else if (maxPriors && key !== 'current' && maxPriors[i]) {
+        var entry = maxPriors[i];
         if (entry.length >= 3) { strike = entry[1]; delta = entry[2]; }
         else if (entry.length >= 2) { strike = entry[0]; delta = entry[1]; }
       }
@@ -1000,14 +997,6 @@ function toggleCollapse(el, bodyId) {
       var deltaEl = row.querySelector('.delta');
       deltaEl.textContent = fmtBn(delta);
       deltaEl.className = 'delta ' + valClass(delta);
-      // Flash row green/red on delta change
-      if (typeof delta === 'number' && prevDeltas[key] !== undefined && prevDeltas[key] !== null) {
-        var diff = delta - prevDeltas[key];
-        if (diff > 0) { row.className = 'maxchange-row delta-up'; }
-        else if (diff < 0) { row.className = 'maxchange-row delta-down'; }
-        else { row.className = 'maxchange-row delta-same'; }
-        setTimeout(function(r) { r.className = 'maxchange-row delta-same'; }, 1500, row);
-      }
       if (typeof delta === 'number') prevDeltas[key] = delta;
     });
   }
@@ -1043,14 +1032,10 @@ function toggleCollapse(el, bodyId) {
     netGex.textContent = fmtBn(data.sum_gex_vol); netGex.className = 'val ' + valClass(data.sum_gex_vol);
     netGexOI.textContent = fmtBn(data.sum_gex_oi); netGexOI.className = 'val ' + valClass(data.sum_gex_oi);
     var drr = toNumber(data.delta_risk_reversal);
-    if (drr === null) drr = toNumber(data.deltaRiskRev);
-    if (drr === null) drr = toNumber(data.drr);
-    if (drr === null) drr = toNumber(data.delta_rr);
     var drrEl = $('deltaRiskRev');
     drrEl.textContent = fmtPrice(drr); drrEl.className = 'val ' + valClass(drr);
     // GEX Delta is canonical backend data; do not recalculate it in the UI.
     var gexDiff = toNumber(data.gex_delta_15s);
-    if (gexDiff === null) gexDiff = toNumber(data.gex_delta);
     if (typeof gexDiff === 'number') {
       var gexDeltaText = (gexDiff >= 0 ? '+' : '') + fmtBn(gexDiff);
       gexDeltaEl.textContent = gexDeltaText;
@@ -1078,9 +1063,6 @@ function toggleCollapse(el, bodyId) {
     var banner = $('dirRiskBanner');
     var netGex = toNumber(data.sum_gex_vol);
     var drr = toNumber(data.delta_risk_reversal);
-    if (drr === null) drr = toNumber(data.deltaRiskRev);
-    if (drr === null) drr = toNumber(data.drr);
-    if (drr === null) drr = toNumber(data.delta_rr);
     var spot = toNumber(data.spot);
     var zeroGamma = toNumber(data.zero_gamma);
 
@@ -1134,7 +1116,11 @@ function toggleCollapse(el, bodyId) {
     ws.onerror = function() { ws.close(); };
     ws.onmessage = function(evt) { try { onSnapshot(JSON.parse(evt.data)); } catch(e) { console.warn('Bad WS msg', e); } };
   }
-  function gexReconnect() { prevMaxchangeCurrent = null; prevNetGex = null; gexHistory = []; if (ws) { ws.onclose = null; ws.close(); } gexConnect(); }
+  function gexReconnect() {
+    prevMaxchangeCurrent = null;
+    if (ws) { ws.onclose = null; ws.close(); }
+    gexConnect();
+  }
 
   // --- Market Agg display ---
   function onMarketAgg(data) {

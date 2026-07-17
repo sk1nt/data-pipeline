@@ -88,7 +88,6 @@ from backend.src.api.trading import router as trading_router  # noqa: E402
 
 LOGGER = logging.getLogger("data_pipeline")
 SNAPSHOT_VIEW_KEY_PREFIX = "gex:snapshot:view:"
-GEX_SUM_GEX_VOL_TS_PREFIX = "ts:gex:sum_gex_vol:"
 NOISY_STREAM_LOGGERS = [
     "tastytrade",
     "tastytrade.session",
@@ -2208,6 +2207,24 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
     CROSS_GEX_MAP = {"NQ_NDX": "SPX", "SPX": "NQ_NDX"}
 
     def _extract(payload: Dict[str, Any]) -> Dict[str, Any]:
+        # The monitor fields below come from Redis's canonical snapshot, not
+        # from pub/sub payload aliases or derived values.
+        canonical: Dict[str, Any] = {}
+        try:
+            canonical_raw = redis_conn.get(f"{SNAPSHOT_KEY_PREFIX}{normalized}")
+            if canonical_raw:
+                loaded = json.loads(
+                    canonical_raw
+                    if isinstance(canonical_raw, str)
+                    else canonical_raw.decode("utf-8")
+                )
+                if isinstance(loaded, dict):
+                    canonical = loaded
+        except Exception:
+            pass
+        payload = dict(payload)
+        payload["gex_delta_15s"] = canonical.get("gex_delta_15s")
+        payload["delta_risk_reversal"] = canonical.get("delta_risk_reversal")
         out = {k: payload.get(k) for k in GEX_FIELDS}
         out["symbol"] = normalized
         out["spot"] = _coerce_optional_float(out.get("spot"))
@@ -2224,23 +2241,12 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
         out["major_neg_vol_gamma"] = _coerce_optional_float(
             out.get("major_neg_vol_gamma")
         )
-        gex_delta = _coerce_optional_float(out.get("gex_delta_15s"))
-        if gex_delta is None:
-            gex_delta = _get_latest_gex_delta(redis_conn, normalized)
-        if gex_delta is not None:
-            out["gex_delta_15s"] = gex_delta
-            out["gex_delta"] = gex_delta
-        else:
-            out["gex_delta_15s"] = None
-            out["gex_delta"] = None
-        drr = _coerce_optional_float(out.get("delta_risk_reversal"))
-        if drr is None:
-            for alias in ("deltaRiskRev", "drr", "delta_rr"):
-                value = payload.get(alias)
-                if value is not None:
-                    drr = _coerce_optional_float(value)
-                    break
-        out["delta_risk_reversal"] = drr
+        # The monitor is a read-only view of the canonical Redis snapshot.
+        # Do not derive a delta from sum_gex_vol here.
+        out["gex_delta_15s"] = _coerce_optional_float(out.get("gex_delta_15s"))
+        out["delta_risk_reversal"] = _coerce_optional_float(
+            out.get("delta_risk_reversal")
+        )
         call_ladder = build_wall_ladder_from_compact(payload, "call")
         put_ladder = build_wall_ladder_from_compact(payload, "put")
         if call_ladder.get("next"):
@@ -2637,36 +2643,6 @@ def _get_redis_client():
     if not wrapper:
         raise HTTPException(status_code=503, detail="Redis unavailable")
     return wrapper.client
-
-
-def _get_latest_gex_delta(redis_conn, symbol: str) -> Optional[float]:
-    """Return the rolling 15s average sum GEX vol delta from RedisTimeSeries, if available."""
-    key = f"{GEX_SUM_GEX_VOL_TS_PREFIX}{(symbol or '').upper()}"
-    try:
-        rows = redis_conn.execute_command("TS.REVRANGE", key, "+", "-", "COUNT", 100)
-    except Exception:
-        return None
-
-    points: List[tuple[int, float]] = []
-    for row in rows or []:
-        if not isinstance(row, (list, tuple)) or len(row) < 2:
-            continue
-        try:
-            points.append((int(row[0]), float(row[1])))
-        except (TypeError, ValueError):
-            continue
-
-    if len(points) < 2:
-        return None
-
-    points.sort(key=lambda item: item[0])
-    cutoff = points[-1][0] - 15_000
-    window = [point for point in points if point[0] >= cutoff]
-    if len(window) < 2:
-        return None
-
-    diffs = [window[i][1] - window[i - 1][1] for i in range(1, len(window))]
-    return sum(diffs) / len(diffs)
 
 
 def _normalize_string(value: Optional[Any]) -> str:

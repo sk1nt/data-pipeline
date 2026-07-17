@@ -441,8 +441,7 @@ class GEXBotPoller:
         return result
 
     async def _record_timeseries(self, snapshot: Dict[str, Any]) -> None:
-        # Always record the accepted sum_gex_vol first. If enough local history
-        # exists, its canonical delta supersedes any provider-supplied value.
+        # Compute the canonical rolling delta before persisting the snapshot.
         computed_delta = self._compute_gex_delta_15s(snapshot)
         if computed_delta is not None:
             snapshot["gex_delta_15s"] = computed_delta
@@ -483,8 +482,6 @@ class GEXBotPoller:
             return None
 
         history = self._gex_history_by_symbol.setdefault(symbol, {})
-        # This guard also protects callers that invoke the calculation directly:
-        # the first value observed for a timestamp remains canonical.
         history.setdefault(timestamp_ms, current_value)
         cutoff = timestamp_ms - 15_000
         stale = [point_ts for point_ts in history if point_ts < cutoff]
@@ -500,32 +497,28 @@ class GEXBotPoller:
         )
         if len(window) < 2:
             return None
-
         diffs = [window[i][1] - window[i - 1][1] for i in range(1, len(window))]
-        if not diffs:
-            return None
-        return sum(diffs) / len(diffs)
+        return sum(diffs) / len(diffs) if diffs else None
 
-    def _compute_gex_delta_15s_from_timeseries(self, snapshot: Dict[str, Any]) -> Optional[float]:
+    def _compute_gex_delta_15s_from_timeseries(
+        self, snapshot: Dict[str, Any]
+    ) -> Optional[float]:
         ts_client = self.ts_client
         if not ts_client:
             return None
         revrange = getattr(ts_client, "revrange", None)
         if not callable(revrange):
             return None
-
         symbol = (snapshot.get("symbol") or snapshot.get("ticker") or "").upper()
         if not symbol:
             return None
         timestamp_ms = _timestamp_ms(snapshot.get("timestamp"))
         key = f"ts:gex:sum_gex_vol:{symbol}"
-
         try:
             rows = revrange(key, "+", "-", count=100)
         except Exception:
             LOGGER.debug("Failed to read GEX timeseries for %s", symbol, exc_info=True)
             return None
-
         points: List[tuple[int, float]] = []
         for row in rows or []:
             if not isinstance(row, (list, tuple)) or len(row) < 2:
@@ -534,20 +527,15 @@ class GEXBotPoller:
                 points.append((int(row[0]), float(row[1])))
             except (TypeError, ValueError):
                 continue
-
         if len(points) < 2:
             return None
-
         points.sort(key=lambda item: item[0])
         cutoff = timestamp_ms - 15_000
         window = [point for point in points if point[0] >= cutoff]
         if len(window) < 2:
             return None
-
         diffs = [window[i][1] - window[i - 1][1] for i in range(1, len(window))]
-        if not diffs:
-            return None
-        return sum(diffs) / len(diffs)
+        return sum(diffs) / len(diffs) if diffs else None
 
     def _combine_payloads(
         self,
@@ -560,43 +548,76 @@ class GEXBotPoller:
                     return value
             return None
 
+        def _provider_value(*names):
+            """Read provider aliases, preferring populated values over zero placeholders.
+
+            GEXBot has returned both legacy and newer names for several fields.  Some
+            responses include the legacy field as ``0`` while the alias contains the
+            actual value, so a plain ``dict.get``/first-value lookup silently produces
+            an all-zero snapshot.
+            """
+            values = []
+            for payload in (zero_payload, zero_payload.get("data"), zero_payload.get("result")):
+                if not isinstance(payload, dict):
+                    continue
+                values.extend(payload.get(name) for name in names)
+            selected = _first(*values)
+            for value in values:
+                if value not in (None, "", [], 0, 0.0, "0", "0.0"):
+                    return value
+            return selected
+
         zero_payload = zero or {}
-        timestamp = _first(zero_payload.get("timestamp"))
+        timestamp = _provider_value("timestamp", "ts", "updated_at")
         if isinstance(timestamp, (int, float)):
             timestamp = datetime.fromtimestamp(
                 float(timestamp), tz=timezone.utc
             ).isoformat()
 
-        sum_gex_vol = _first(
-            zero_payload.get("sum_gex_vol"),
-            zero_payload.get("sum_gex"),
+        sum_gex_vol = _provider_value(
+            "sum_gex_vol", "net_gex_vol", "sum_gex", "net_gex"
         )
-        delta_risk_reversal = _first(
-            zero_payload.get("delta_risk_reversal"),
-            zero_payload.get("deltaRiskRev"),
-            zero_payload.get("drr"),
-            zero_payload.get("delta_rr"),
+        delta_risk_reversal = _provider_value(
+            "delta_risk_reversal", "deltaRiskRev", "drr", "delta_rr"
         )
+        gex_delta = _provider_value("gex_delta_15s", "gex_delta", "gexDelta")
         snapshot = {
             "symbol": symbol.upper(),
             "timestamp": timestamp,
-            "spot": _to_float(_first(zero_payload.get("spot"))),
-            "zero_gamma": _to_float(_first(zero_payload.get("zero_gamma"))),
+            "spot": _to_float(_provider_value("spot", "spot_price", "price")),
+            "zero_gamma": _to_float(
+                _provider_value("zero_gamma", "zero_gamma_vol", "zeroGamma")
+            ),
             "sum_gex_vol": _to_float(sum_gex_vol),
-            "sum_gex_oi": _to_float(zero_payload.get("sum_gex_oi")),
-            "major_pos_vol": _to_float(_first(zero_payload.get("major_pos_vol"))),
-            "major_neg_vol": _to_float(_first(zero_payload.get("major_neg_vol"))),
-            "major_pos_oi": _to_float(_first(zero_payload.get("major_pos_oi"))),
-            "major_neg_oi": _to_float(_first(zero_payload.get("major_neg_oi"))),
+            "sum_gex_oi": _to_float(
+                _provider_value("sum_gex_oi", "net_gex_oi", "sum_oi_gex")
+            ),
+            "gex_delta_15s": _to_float(gex_delta),
+            "major_pos_vol": _to_float(
+                _provider_value("major_pos_vol", "major_positive_vol", "call_wall")
+            ),
+            "major_neg_vol": _to_float(
+                _provider_value("major_neg_vol", "major_negative_vol", "put_wall")
+            ),
+            "major_pos_oi": _to_float(
+                _provider_value("major_pos_oi", "major_positive_oi")
+            ),
+            "major_neg_oi": _to_float(
+                _provider_value("major_neg_oi", "major_negative_oi")
+            ),
             "delta_risk_reversal": _to_float(delta_risk_reversal),
         }
         snapshot["major_pos"] = snapshot["major_pos_vol"]
         snapshot["major_neg"] = snapshot["major_neg_vol"]
         snapshot["ticker"] = snapshot["symbol"]
-        snapshot["min_dte"] = zero_payload.get("min_dte")
-        snapshot["sec_min_dte"] = zero_payload.get("sec_min_dte")
-        snapshot["max_priors"] = zero_payload.get("max_priors")
-        snapshot.update(build_compact_wall_fields({**snapshot, "strikes": zero_payload.get("strikes")}))
+        snapshot["min_dte"] = _provider_value("min_dte")
+        snapshot["sec_min_dte"] = _provider_value("sec_min_dte")
+        snapshot["max_priors"] = _provider_value("max_priors")
+        snapshot.update(
+            build_compact_wall_fields(
+                {**snapshot, "strikes": _provider_value("strikes")}
+            )
+        )
         return snapshot
 
     def _write_snapshot_series(self, snapshot: Dict[str, Any]) -> None:

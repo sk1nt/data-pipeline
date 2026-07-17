@@ -261,7 +261,7 @@ class TradeBot(commands.Bot):
                                 except Exception:
                                     pass
                             snap = await poller.fetch_symbol_now(ticker)
-                            if snap:
+                            if snap and self._has_usable_gex_metrics(snap):
                                 snap["_freshness"] = "current"
                                 snap["_source"] = "redis-cache"
                                 snap["display_symbol"] = display_symbol
@@ -1920,7 +1920,7 @@ class TradeBot(commands.Bot):
             snapshot = await asyncio.to_thread(self.redis_client.get, snapshot_key)
             if snapshot:
                 normalized = self._normalize_snapshot_payload(snapshot, ticker)
-                if normalized:
+                if normalized and self._has_usable_gex_metrics(normalized):
                     now = datetime.now(timezone.utc)
                     ts = normalized.get("timestamp") or now
                     if isinstance(ts, datetime):
@@ -1955,7 +1955,7 @@ class TradeBot(commands.Bot):
             snapshot = await asyncio.to_thread(self.redis_client.get, snapshot_key)
             if snapshot:
                 normalized = self._normalize_snapshot_payload(snapshot, ticker)
-                if normalized:
+                if normalized and self._has_usable_gex_metrics(normalized):
                     now = datetime.now(timezone.utc)
                     ts = normalized.get("timestamp") or now
                     if isinstance(ts, datetime):
@@ -2197,6 +2197,8 @@ class TradeBot(commands.Bot):
             "spot_price": None,
             "zero_gamma": None,
             "sum_gex_vol": None,
+            "gex_delta_15s": None,
+            "delta_risk_reversal": None,
             "major_pos_vol": None,
             "major_neg_vol": None,
             "major_pos_oi": None,
@@ -2208,23 +2210,59 @@ class TradeBot(commands.Bot):
 
         z = responses.get("zero")
         if z:
-            # common fields
-            data["spot_price"] = (
-                z.get("spot_price") or z.get("price") or data["spot_price"]
+            payloads = [z]
+            if isinstance(z.get("data"), dict):
+                payloads.append(z["data"])
+            if isinstance(z.get("result"), dict):
+                payloads.append(z["result"])
+
+            def provider_value(*names):
+                values = [payload.get(name) for payload in payloads for name in names]
+                for value in values:
+                    if value not in (None, "", [], 0, 0.0, "0", "0.0"):
+                        return value
+                return next((value for value in values if value not in (None, "", [])), None)
+
+            def provider_float(*names):
+                value = provider_value(*names)
+                try:
+                    return float(value) if value is not None else None
+                except (TypeError, ValueError):
+                    return None
+
+            data["spot_price"] = provider_float("spot", "spot_price", "price")
+            data["zero_gamma"] = provider_float(
+                "zero_gamma", "zero_gamma_vol", "zeroGamma"
             )
-            data["zero_gamma"] = (
-                z.get("zero_gamma") or z.get("zero_gamma_vol") or data["zero_gamma"]
+            data["sum_gex_vol"] = provider_float(
+                "sum_gex_vol", "net_gex_vol", "sum_gex", "net_gex"
             )
-            data["sum_gex_vol"] = z.get("sum_gex_vol") or z.get("sum_gex")
-            data["major_pos_vol"] = z.get("major_pos_vol") or data["major_pos_vol"]
-            data["major_neg_vol"] = z.get("major_neg_vol") or data["major_neg_vol"]
-            data["major_pos_oi"] = z.get("major_pos_oi") or data["major_pos_oi"]
-            data["major_neg_oi"] = z.get("major_neg_oi") or data["major_neg_oi"]
-            data["sum_gex_oi"] = z.get("sum_gex_oi") or data["sum_gex_oi"]
-            strikes = z.get("strikes")
+            data["gex_delta_15s"] = provider_float(
+                "gex_delta_15s", "gex_delta", "gexDelta"
+            )
+            data["delta_risk_reversal"] = provider_float(
+                "delta_risk_reversal", "deltaRiskRev", "drr", "delta_rr"
+            )
+            data["major_pos_vol"] = provider_float(
+                "major_pos_vol", "major_positive_vol", "call_wall"
+            )
+            data["major_neg_vol"] = provider_float(
+                "major_neg_vol", "major_negative_vol", "put_wall"
+            )
+            data["major_pos_oi"] = provider_float(
+                "major_pos_oi", "major_positive_oi"
+            )
+            data["major_neg_oi"] = provider_float(
+                "major_neg_oi", "major_negative_oi"
+            )
+            data["sum_gex_oi"] = provider_float(
+                "sum_gex_oi", "net_gex_oi", "sum_oi_gex"
+            )
+            strikes = provider_value("strikes")
             if strikes:
                 data["strikes"] = strikes
-            data.update(self._extract_compact_wall_fields(z))
+            for payload in reversed(payloads):
+                data.update(self._extract_compact_wall_fields(payload))
             wall_ladders = self._build_compact_wall_ladders(data)
             if wall_ladders:
                 data["_wall_ladders"] = wall_ladders
@@ -2372,7 +2410,12 @@ class TradeBot(commands.Bot):
             "major_pos_oi": payload.get("major_pos_oi"),
             "major_neg_oi": payload.get("major_neg_oi"),
             "sum_gex_vol": payload.get("sum_gex_vol") or payload.get("sum_gex"),
-            "gex_delta_15s": payload.get("gex_delta_15s"),
+            "gex_delta_15s": payload.get("gex_delta_15s")
+            or payload.get("gex_delta"),
+            "delta_risk_reversal": payload.get("delta_risk_reversal")
+            or payload.get("deltaRiskRev")
+            or payload.get("drr")
+            or payload.get("delta_rr"),
             "sum_gex_oi": payload.get("sum_gex_oi"),
             "max_priors": self._extract_max_priors(payload),
             "maxchange": payload.get("maxchange")
@@ -2382,6 +2425,24 @@ class TradeBot(commands.Bot):
         }
         data.update(self._extract_compact_wall_fields(payload))
         return data
+
+    @staticmethod
+    def _has_usable_gex_metrics(payload: dict) -> bool:
+        """Reject spot-only/zero-filled snapshots as valid GEX data."""
+        if not isinstance(payload, dict):
+            return False
+        zero_gamma = payload.get("zero_gamma")
+        wall_values = (
+            payload.get("major_pos_vol"),
+            payload.get("major_neg_vol"),
+        )
+        sum_gex = payload.get("sum_gex_vol")
+        return (
+            isinstance(zero_gamma, (int, float))
+            and zero_gamma != 0
+            and any(isinstance(value, (int, float)) and value != 0 for value in wall_values)
+            and isinstance(sum_gex, (int, float))
+        )
 
     def _extract_max_priors(self, payload: dict) -> List[list]:
         maxchange = payload.get("maxchange")
@@ -3817,14 +3878,13 @@ class TradeBot(commands.Bot):
             )
             return f"{label:<18}{strike:<8} {colorize(delta_color, delta_text)}"
 
-        maxchange_lines.append(fmt_delta_entry("largest delta", current_entry))
-
         max_priors = data.get("max_priors", []) or []
         intervals = [1, 5, 10, 15, 30]
         for i, interval in enumerate(intervals):
             entry = max_priors[i] if i < len(max_priors) else None
             label = f"{interval} min"
             maxchange_lines.append(fmt_delta_entry(label, entry))
+        maxchange_lines.append(fmt_delta_entry("largest delta", current_entry))
 
         body = "\n".join([header, "", *table_lines, "", *maxchange_lines])
         return f"```ansi\n{body}\n```"
@@ -4089,6 +4149,14 @@ class TradeBot(commands.Bot):
         net_value = colorize(
             net_color_code, fmt_net_gex(data.get("sum_gex_vol"))
         )
+        delta_value = data.get("gex_delta_15s")
+        delta_text = fmt_net_gex(delta_value)
+        delta_colored = colorize(ansi.get(color_for_value(delta_value)), delta_text)
+        delta_gap = " " * max(2, 12 - len(fmt_net_gex(data.get("sum_gex_vol"))))
+        net_line = (
+            f"{'sum gex vol':<{classic_label_width}}{net_value}"
+            f"{delta_gap}{delta_colored}"
+        )
 
         sum_gex_oi_value = fmt_price(data.get("sum_gex_oi"))
         sum_gex_oi_color = ansi.get(color_for_value(data.get("sum_gex_oi")))
@@ -4181,14 +4249,13 @@ class TradeBot(commands.Bot):
                 return f"{label:<18}{strike_txt:<8} {colorize(delta_color, delta_txt)}"
 
             maxchange_lines = ["", "max change gex"]
-            maxchange_lines.append(fmt_delta_entry("largest delta", current_entry))
-
             max_priors = data.get("max_priors", []) or []
             intervals = [1, 5, 10, 15, 30]
             for i, interval in enumerate(intervals):
                 entry = max_priors[i] if i < len(max_priors) else None
                 label = f"{interval} min"
                 maxchange_lines.append(fmt_delta_entry(label, entry))
+            maxchange_lines.append(fmt_delta_entry("largest delta", current_entry))
 
             lines = [
                 header,
@@ -4196,7 +4263,7 @@ class TradeBot(commands.Bot):
                 zero_gamma_line,
                 major_pos_line,
                 major_neg_line,
-                f"net gex           {net_value}",
+                net_line,
                 sum_oi_line,
                 delta_rr_line,
                 *maxchange_lines,

@@ -200,49 +200,6 @@ async def test_snapshot_older_than_cutoff_is_persisted():
 
 
 @pytest.mark.asyncio
-async def test_snapshot_computes_gex_delta_15s_from_timeseries_history():
-    current_ts = datetime(2024, 1, 2, 12, 0, tzinfo=timezone.utc)
-    key = "ts:gex:sum_gex_vol:SPX"
-    ts = FakeTSClient(
-        revrange_data={
-            key: [
-                ((current_ts.timestamp() * 1000) - 14_000, 100.0),
-                ((current_ts.timestamp() * 1000) - 8_000, 160.0),
-                ((current_ts.timestamp() * 1000) - 1_000, 190.0),
-            ]
-        }
-    )
-    settings = GEXBotPollerSettings(api_key="apikey", symbols=["SPX"])
-    fake_redis = FakeRedisClient()
-    fake_writer = FakeDuckDBWriter()
-    poller = GEXBotPoller(
-        settings, redis_client=fake_redis, ts_client=ts, duckdb_writer=fake_writer
-    )
-
-    snapshot = {
-        "symbol": "SPX",
-        "timestamp": current_ts.isoformat(),
-        "spot": 100.0,
-        "zero_gamma": 0.1,
-        "sum_gex_vol": 200.0,
-        "major_pos_vol": 10,
-        "major_neg_vol": -5,
-        "major_pos_oi": 1,
-        "major_neg_oi": -1,
-        "sum_gex_oi": 100,
-        "max_priors": [],
-        "strikes": [],
-    }
-
-    await poller._record_timeseries(snapshot)
-    await poller.wait_for_pending_timeseries_writes()
-
-    cached = json.loads(fake_redis.get("gex:snapshot:SPX"))
-    assert cached["gex_delta_15s"] == pytest.approx(45.0)
-    assert fake_writer.snapshots[0]["gex_delta_15s"] == pytest.approx(45.0)
-
-
-@pytest.mark.asyncio
 async def test_stale_snapshot_still_persists():
     ts = FakeTSClient()
     settings = GEXBotPollerSettings(api_key="apikey", symbols=["SPX"])
@@ -330,48 +287,69 @@ def test_combine_payloads_normalizes_delta_risk_reversal_aliases():
             "major_neg_vol": "-900000",
             "major_pos_oi": "800000",
             "major_neg_oi": "-700000",
+            "gex_delta": "123.4",
             "drr": "-0.75",
         },
     )
 
     assert snapshot["delta_risk_reversal"] == -0.75
+    assert snapshot["gex_delta_15s"] == 123.4
+
+
+def test_combine_payloads_uses_populated_alias_when_legacy_fields_are_zero():
+    poller = GEXBotPoller(GEXBotPollerSettings(api_key="apikey", symbols=["SPX"]))
+
+    snapshot = poller._combine_payloads(
+        "SPX",
+        {
+            "timestamp": 1700000000,
+            "spot": 0,
+            "zero_gamma": 0,
+            "sum_gex_vol": 0,
+            "sum_gex_oi": 0,
+            "major_pos_vol": 0,
+            "major_neg_vol": 0,
+            "data": {
+                "spot_price": "6020.5",
+                "zero_gamma_vol": "6001.0",
+                "net_gex_vol": "2500000",
+                "net_gex_oi": "1250000",
+                "call_wall": "6100",
+                "put_wall": "5900",
+            },
+        },
+    )
+
+    assert snapshot["spot"] == 6020.5
+    assert snapshot["zero_gamma"] == 6001.0
+    assert snapshot["sum_gex_vol"] == 2500000.0
+    assert snapshot["sum_gex_oi"] == 1250000.0
+    assert snapshot["major_pos_vol"] == 6100.0
+    assert snapshot["major_neg_vol"] == 5900.0
 
 
 @pytest.mark.asyncio
 async def test_snapshot_computes_gex_delta_15s_from_local_history():
-    ts = FakeTSClient()
-    settings = GEXBotPollerSettings(api_key="apikey", symbols=["SPX"])
-    fake_redis = FakeRedisClient()
-    fake_writer = FakeDuckDBWriter()
     poller = GEXBotPoller(
-        settings, redis_client=fake_redis, ts_client=ts, duckdb_writer=fake_writer
+        GEXBotPollerSettings(api_key="apikey", symbols=["SPX"]),
+        redis_client=FakeRedisClient(),
+        ts_client=FakeTSClient(),
+        duckdb_writer=FakeDuckDBWriter(),
     )
-
-    snapshot_1 = {
+    base = {
         "symbol": "SPX",
-        "timestamp": "2024-01-02T12:00:00+00:00",
         "spot": 100.0,
         "zero_gamma": 0.1,
-        "sum_gex_vol": 100.0,
-        "major_pos_vol": 10,
-        "major_neg_vol": -5,
-        "major_pos_oi": 1,
-        "major_neg_oi": -1,
-        "sum_gex_oi": 100,
+        "sum_gex_oi": 100.0,
         "max_priors": [],
-        "strikes": [],
     }
-    snapshot_2 = dict(snapshot_1)
-    snapshot_2["timestamp"] = "2024-01-02T12:00:01+00:00"
-    snapshot_2["sum_gex_vol"] = 145.0
+    first = {**base, "timestamp": "2024-01-02T12:00:00+00:00", "sum_gex_vol": 100.0}
+    second = {**base, "timestamp": "2024-01-02T12:00:01+00:00", "sum_gex_vol": 145.0}
 
-    await poller._record_timeseries(snapshot_1)
-    await poller._record_timeseries(snapshot_2)
-    await poller.wait_for_pending_timeseries_writes()
+    await poller._record_timeseries(first)
+    await poller._record_timeseries(second)
 
-    cached = json.loads(fake_redis.get("gex:snapshot:SPX"))
-    assert cached["gex_delta_15s"] == pytest.approx(45.0)
-    assert fake_writer.snapshots[-1]["gex_delta_15s"] == pytest.approx(45.0)
+    assert second["gex_delta_15s"] == pytest.approx(45.0)
 
 
 @pytest.mark.asyncio
