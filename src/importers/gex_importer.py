@@ -19,7 +19,6 @@ class GEXImporter:
         ticker VARCHAR,
         spot_price DOUBLE,
         zero_gamma DOUBLE,
-        net_gex DOUBLE,
         min_dte INTEGER,
         sec_min_dte INTEGER,
         major_pos_vol DOUBLE,
@@ -130,15 +129,11 @@ class GEXImporter:
                 }
                 strike_data.append(strike_dict)
 
-        # Use sum_gex_vol as net_gex, or calculate from strikes if not available
-        net_gex = snapshot_data.get("sum_gex_vol", sum(s["gamma"] for s in strike_data))
-
         return {
             "timestamp": timestamp,
             "ticker": snapshot_data["ticker"],
             "spot_price": snapshot_data["spot_price"],
             "zero_gamma": snapshot_data["zero_gamma"],
-            "net_gex": net_gex,
             "min_dte": snapshot_data.get("min_dte"),
             "sec_min_dte": snapshot_data.get("sec_min_dte"),
             "major_pos_vol": snapshot_data.get("major_pos_vol"),

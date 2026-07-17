@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional
 import duckdb
 
 from ..config import settings as config_settings
-from .gex_wall_utils import build_compact_wall_fields
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,6 +58,7 @@ class GEXDuckDBWriter:
         self._stop_event = threading.Event()
         self._schema_ready = False
         self._last_snapshot_ms_by_symbol: Dict[str, int] = {}
+        self._accepted_snapshot_keys: set[tuple[str, int]] = set()
         self._enqueued_count = 0
         self._written_snapshots = 0
         self._last_write_ts: Optional[str] = None
@@ -90,6 +90,12 @@ class GEXDuckDBWriter:
             self._thread = None
 
     def enqueue_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        symbol = (snapshot.get("symbol") or snapshot.get("ticker") or "").upper()
+        key = (symbol, _timestamp_ms(snapshot.get("timestamp")))
+        if key in self._accepted_snapshot_keys:
+            LOGGER.debug("Discarding duplicate GEX snapshot %s", key)
+            return
+        self._accepted_snapshot_keys.add(key)
         self._queue.put_nowait(snapshot)
         self._enqueued_count += 1
         self._queue_depth = self._queue.qsize()
@@ -184,7 +190,6 @@ class GEXDuckDBWriter:
             "ticker",
             "spot_price",
             "zero_gamma",
-            "net_gex",
             "min_dte",
             "sec_min_dte",
             "major_pos_vol",
@@ -221,7 +226,6 @@ class GEXDuckDBWriter:
                     ticker,
                     spot_price,
                     zero_gamma,
-                    net_gex,
                     min_dte,
                     sec_min_dte,
                     major_pos_vol,
@@ -269,13 +273,11 @@ class GEXDuckDBWriter:
                 max_priors = json.dumps(max_priors)
             except (TypeError, ValueError):
                 max_priors = None
-        compact_fields = build_compact_wall_fields(snapshot)
         return (
             epoch_ms,
             ticker,
             _to_float(snapshot.get("spot")),
             _to_float(snapshot.get("zero_gamma")),
-            _to_float(snapshot.get("net_gex")),
             snapshot.get("min_dte"),
             snapshot.get("sec_min_dte"),
             _to_float(snapshot.get("major_pos_vol")),
@@ -289,18 +291,18 @@ class GEXDuckDBWriter:
             _to_float(snapshot.get("gex_delta_15s")),
             _to_float(snapshot.get("delta_risk_reversal")),
             max_priors,
-            _to_float(compact_fields.get("pos_can1_strike")),
-            _to_float(compact_fields.get("pos_can1_value")),
-            _to_float(compact_fields.get("pos_can1_pct")),
-            _to_float(compact_fields.get("pos_can2_strike")),
-            _to_float(compact_fields.get("pos_can2_value")),
-            _to_float(compact_fields.get("pos_can2_pct")),
-            _to_float(compact_fields.get("neg_can1_strike")),
-            _to_float(compact_fields.get("neg_can1_value")),
-            _to_float(compact_fields.get("neg_can1_pct")),
-            _to_float(compact_fields.get("neg_can2_strike")),
-            _to_float(compact_fields.get("neg_can2_value")),
-            _to_float(compact_fields.get("neg_can2_pct")),
+            _to_float(snapshot.get("pos_can1_strike")),
+            _to_float(snapshot.get("pos_can1_value")),
+            _to_float(snapshot.get("pos_can1_pct")),
+            _to_float(snapshot.get("pos_can2_strike")),
+            _to_float(snapshot.get("pos_can2_value")),
+            _to_float(snapshot.get("pos_can2_pct")),
+            _to_float(snapshot.get("neg_can1_strike")),
+            _to_float(snapshot.get("neg_can1_value")),
+            _to_float(snapshot.get("neg_can1_pct")),
+            _to_float(snapshot.get("neg_can2_strike")),
+            _to_float(snapshot.get("neg_can2_value")),
+            _to_float(snapshot.get("neg_can2_pct")),
         )
 
     @staticmethod
@@ -312,7 +314,6 @@ class GEXDuckDBWriter:
                 ticker VARCHAR,
                 spot_price DOUBLE,
                 zero_gamma DOUBLE,
-                net_gex DOUBLE,
                 min_dte INTEGER,
                 sec_min_dte INTEGER,
                 major_pos_vol DOUBLE,
@@ -342,6 +343,9 @@ class GEXDuckDBWriter:
             )
             """
         )
+        # net_gex was a redundant alias for sum_gex_vol. Remove it from
+        # existing runtime databases as the snapshot contract is normalized.
+        conn.execute("ALTER TABLE gex_snapshots DROP COLUMN IF EXISTS net_gex")
         for column in (
             "strikes",
             "major_pos_vol_gamma",

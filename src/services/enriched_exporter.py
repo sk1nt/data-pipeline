@@ -4,7 +4,7 @@ Export 1-second MNQ OHLCV bars enriched with GEX fields into daily Parquet files
 The exporter:
 - resamples MNQ ticks to a dense 1-second grid for the RTH session (09:30–16:00 America/New_York),
   filling missing seconds with the prior close and flagging gaps.
-- pulls matching GEX snapshots + strike candidates for the same session (including the pre-open
+- pulls matching GEX snapshots for the same session (including the pre-open
   snapshot from the prior close), forward-filling across seconds.
 - writes one Parquet per trade day to `data/enriched/<symbol>/<YYYYMMDD>.parquet`.
 """
@@ -80,7 +80,6 @@ class EnrichedExporter:
             self._create_seconds_table(con, session_start_utc, session_end_utc)
             self._load_ticks(con, tick_file, session_start_utc, session_end_utc)
             self._load_snapshots(con, snap_window_start_utc, session_end_utc)
-            self._load_strikes(con, snap_window_start_utc, session_end_utc)
             self._join_and_write(con, output_file)
 
         finally:
@@ -218,18 +217,29 @@ class EnrichedExporter:
                 to_timestamp(timestamp/1000.0) AS snapshot_ts,
                 spot_price AS spot,
                 zero_gamma,
-                net_gex,
-                net_gex AS net_gex_vol,
-                net_gex AS sum_gex_vol,
+                sum_gex_vol,
+                sum_gex_oi,
+                gex_delta_15s,
                 major_pos_vol,
                 major_pos_oi,
                 major_neg_vol,
                 major_neg_oi,
-                sum_gex_oi AS net_gex_oi,
                 delta_risk_reversal,
                 min_dte,
                 sec_min_dte,
-                max_priors
+                max_priors,
+                pos_can1_strike,
+                pos_can1_value,
+                pos_can1_pct,
+                pos_can2_strike,
+                pos_can2_value,
+                pos_can2_pct,
+                neg_can1_strike,
+                neg_can1_value,
+                neg_can1_pct,
+                neg_can2_strike,
+                neg_can2_value,
+                neg_can2_pct
             FROM gexdb.gex_snapshots
             WHERE ticker = ?
               AND timestamp BETWEEN ? AND ?
@@ -238,78 +248,10 @@ class EnrichedExporter:
             [cfg.gex_ticker, start_ms, end_ms],
         )
 
-    def _load_strikes(
-        self,
-        con: duckdb.DuckDBPyConnection,
-        start_utc: dt.datetime,
-        end_utc: dt.datetime,
-    ) -> None:
-        cfg = self.config
-        start_ms = int(start_utc.timestamp() * 1000)
-        end_ms = int(end_utc.timestamp() * 1000)
-        con.execute(
-            """
-            CREATE OR REPLACE TEMP TABLE strikes AS
-            SELECT timestamp, strike, gamma, oi_gamma
-            FROM gexdb.gex_strikes
-            WHERE ticker = ?
-              AND timestamp BETWEEN ? AND ?
-            """,
-            [cfg.gex_ticker, start_ms, end_ms],
-        )
-        self._create_strike_candidates(con)
-
-    @staticmethod
-    def _create_strike_candidates(con: duckdb.DuckDBPyConnection) -> None:
-        """Compute top/bottom three strikes per snapshot into strike_candidates."""
-        con.execute(
-            """
-            CREATE OR REPLACE TEMP TABLE strike_candidates AS
-            WITH ranked_pos AS (
-                SELECT
-                    timestamp,
-                    strike,
-                    gamma,
-                    oi_gamma,
-                    ROW_NUMBER() OVER (PARTITION BY timestamp ORDER BY gamma DESC, oi_gamma DESC) AS rn
-                FROM strikes
-                WHERE gamma IS NOT NULL AND gamma > 0
-            ),
-            ranked_neg AS (
-                SELECT
-                    timestamp,
-                    strike,
-                    gamma,
-                    oi_gamma,
-                    ROW_NUMBER() OVER (PARTITION BY timestamp ORDER BY gamma ASC, oi_gamma ASC) AS rn
-                FROM strikes
-                WHERE gamma IS NOT NULL AND gamma < 0
-            )
-            SELECT
-                COALESCE(p.timestamp, n.timestamp) AS timestamp,
-                max(CASE WHEN p.rn = 1 THEN p.gamma/1e6 END) AS major_pos_vol,
-                max(CASE WHEN p.rn = 1 THEN p.strike END) AS major_pos_strike,
-                max(CASE WHEN p.rn = 2 THEN p.gamma/1e6 END) AS major_pos_vol_2,
-                max(CASE WHEN p.rn = 2 THEN p.strike END) AS major_pos_strike_2,
-                max(CASE WHEN p.rn = 3 THEN p.gamma/1e6 END) AS major_pos_vol_3,
-                max(CASE WHEN p.rn = 3 THEN p.strike END) AS major_pos_strike_3,
-                max(CASE WHEN n.rn = 1 THEN n.gamma/1e6 END) AS major_neg_vol,
-                max(CASE WHEN n.rn = 1 THEN n.strike END) AS major_neg_strike,
-                max(CASE WHEN n.rn = 2 THEN n.gamma/1e6 END) AS major_neg_vol_2,
-                max(CASE WHEN n.rn = 2 THEN n.strike END) AS major_neg_strike_2,
-                max(CASE WHEN n.rn = 3 THEN n.gamma/1e6 END) AS major_neg_vol_3,
-                max(CASE WHEN n.rn = 3 THEN n.strike END) AS major_neg_strike_3
-            FROM ranked_pos p
-            FULL OUTER JOIN ranked_neg n ON p.timestamp = n.timestamp
-            GROUP BY COALESCE(p.timestamp, n.timestamp)
-            """,
-            [],
-        )
-
     def _join_and_write(
         self, con: duckdb.DuckDBPyConnection, output_file: Path
     ) -> None:
-        # Combine snapshots with strike candidates and forward fill across seconds.
+        # Forward-fill canonical snapshot fields across seconds.
         con.execute(
             """
             CREATE OR REPLACE TEMP TABLE snaps_enriched AS
@@ -318,30 +260,30 @@ class EnrichedExporter:
                 s.snapshot_ts_ms,
                 s.spot,
                 s.zero_gamma,
-                s.net_gex,
-                s.net_gex_vol,
                 s.sum_gex_vol,
-                COALESCE(c.major_pos_vol, s.major_pos_vol) AS major_pos_vol,
+                s.sum_gex_oi,
+                s.gex_delta_15s,
+                s.major_pos_vol,
                 s.major_pos_oi,
-                COALESCE(c.major_neg_vol, s.major_neg_vol) AS major_neg_vol,
+                s.major_neg_vol,
                 s.major_neg_oi,
-                s.net_gex_oi,
                 s.delta_risk_reversal,
                 s.min_dte,
                 s.sec_min_dte,
                 s.max_priors,
-                COALESCE(c.major_pos_strike, s.major_pos_strike) AS major_pos_strike,
-                COALESCE(c.major_neg_strike, s.major_neg_strike) AS major_neg_strike,
-                c.major_pos_vol_2,
-                c.major_pos_strike_2,
-                c.major_pos_vol_3,
-                c.major_pos_strike_3,
-                c.major_neg_vol_2,
-                c.major_neg_strike_2,
-                c.major_neg_vol_3,
-                c.major_neg_strike_3
+                s.pos_can1_strike,
+                s.pos_can1_value,
+                s.pos_can1_pct,
+                s.pos_can2_strike,
+                s.pos_can2_value,
+                s.pos_can2_pct,
+                s.neg_can1_strike,
+                s.neg_can1_value,
+                s.neg_can1_pct,
+                s.neg_can2_strike,
+                s.neg_can2_value,
+                s.neg_can2_pct
             FROM snapshots s
-            LEFT JOIN strike_candidates c ON c.timestamp = s.snapshot_ts_ms
             ORDER BY s.snapshot_ts
             """,
             [],
@@ -363,28 +305,29 @@ class EnrichedExporter:
                     s.snapshot_ts_ms,
                     s.spot,
                     s.zero_gamma,
-                    s.net_gex,
-                    s.net_gex_vol,
                     s.sum_gex_vol,
+                    s.sum_gex_oi,
+                    s.gex_delta_15s,
                     s.major_pos_vol,
                     s.major_pos_oi,
                     s.major_neg_vol,
                     s.major_neg_oi,
-                    s.net_gex_oi,
                     s.delta_risk_reversal,
                     s.min_dte,
                     s.sec_min_dte,
                     s.max_priors,
-                    s.major_pos_strike,
-                    s.major_neg_strike,
-                    s.major_pos_vol_2,
-                    s.major_pos_strike_2,
-                    s.major_pos_vol_3,
-                    s.major_pos_strike_3,
-                    s.major_neg_vol_2,
-                    s.major_neg_strike_2,
-                    s.major_neg_vol_3,
-                    s.major_neg_strike_3
+                    s.pos_can1_strike,
+                    s.pos_can1_value,
+                    s.pos_can1_pct,
+                    s.pos_can2_strike,
+                    s.pos_can2_value,
+                    s.pos_can2_pct,
+                    s.neg_can1_strike,
+                    s.neg_can1_value,
+                    s.neg_can1_pct,
+                    s.neg_can2_strike,
+                    s.neg_can2_value,
+                    s.neg_can2_pct
                 FROM timeline t
                 LEFT JOIN snaps_enriched s ON s.snapshot_ts = t.node_ts
             ),
@@ -396,28 +339,29 @@ class EnrichedExporter:
                     arg_max(snapshot_ts_ms, node_ts) OVER w AS snapshot_ts_ms,
                     arg_max(spot, node_ts) OVER w AS spot,
                     arg_max(zero_gamma, node_ts) OVER w AS zero_gamma,
-                    arg_max(net_gex, node_ts) OVER w AS net_gex,
-                    arg_max(net_gex_vol, node_ts) OVER w AS net_gex_vol,
                     arg_max(sum_gex_vol, node_ts) OVER w AS sum_gex_vol,
+                    arg_max(sum_gex_oi, node_ts) OVER w AS sum_gex_oi,
+                    arg_max(gex_delta_15s, node_ts) OVER w AS gex_delta_15s,
                     arg_max(major_pos_vol, node_ts) OVER w AS major_pos_vol,
                     arg_max(major_pos_oi, node_ts) OVER w AS major_pos_oi,
                     arg_max(major_neg_vol, node_ts) OVER w AS major_neg_vol,
                     arg_max(major_neg_oi, node_ts) OVER w AS major_neg_oi,
-                    arg_max(net_gex_oi, node_ts) OVER w AS net_gex_oi,
                     arg_max(delta_risk_reversal, node_ts) OVER w AS delta_risk_reversal,
                     arg_max(min_dte, node_ts) OVER w AS min_dte,
                     arg_max(sec_min_dte, node_ts) OVER w AS sec_min_dte,
                     arg_max(max_priors, node_ts) OVER w AS max_priors,
-                    arg_max(major_pos_strike, node_ts) OVER w AS major_pos_strike,
-                    arg_max(major_neg_strike, node_ts) OVER w AS major_neg_strike,
-                    arg_max(major_pos_vol_2, node_ts) OVER w AS major_pos_vol_2,
-                    arg_max(major_pos_strike_2, node_ts) OVER w AS major_pos_strike_2,
-                    arg_max(major_pos_vol_3, node_ts) OVER w AS major_pos_vol_3,
-                    arg_max(major_pos_strike_3, node_ts) OVER w AS major_pos_strike_3,
-                    arg_max(major_neg_vol_2, node_ts) OVER w AS major_neg_vol_2,
-                    arg_max(major_neg_strike_2, node_ts) OVER w AS major_neg_strike_2,
-                    arg_max(major_neg_vol_3, node_ts) OVER w AS major_neg_vol_3,
-                    arg_max(major_neg_strike_3, node_ts) OVER w AS major_neg_strike_3
+                    arg_max(pos_can1_strike, node_ts) OVER w AS pos_can1_strike,
+                    arg_max(pos_can1_value, node_ts) OVER w AS pos_can1_value,
+                    arg_max(pos_can1_pct, node_ts) OVER w AS pos_can1_pct,
+                    arg_max(pos_can2_strike, node_ts) OVER w AS pos_can2_strike,
+                    arg_max(pos_can2_value, node_ts) OVER w AS pos_can2_value,
+                    arg_max(pos_can2_pct, node_ts) OVER w AS pos_can2_pct,
+                    arg_max(neg_can1_strike, node_ts) OVER w AS neg_can1_strike,
+                    arg_max(neg_can1_value, node_ts) OVER w AS neg_can1_value,
+                    arg_max(neg_can1_pct, node_ts) OVER w AS neg_can1_pct,
+                    arg_max(neg_can2_strike, node_ts) OVER w AS neg_can2_strike,
+                    arg_max(neg_can2_value, node_ts) OVER w AS neg_can2_value,
+                    arg_max(neg_can2_pct, node_ts) OVER w AS neg_can2_pct
                 FROM ordered
                 WINDOW w AS (ORDER BY node_ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
             )
@@ -427,28 +371,29 @@ class EnrichedExporter:
                 snapshot_ts_ms,
                 spot,
                 zero_gamma,
-                net_gex,
-                net_gex_vol,
                 sum_gex_vol,
+                sum_gex_oi,
+                gex_delta_15s,
                 major_pos_vol,
                 major_pos_oi,
                 major_neg_vol,
                 major_neg_oi,
-                net_gex_oi,
                 delta_risk_reversal,
                 min_dte,
                 sec_min_dte,
                 max_priors,
-                major_pos_strike,
-                major_neg_strike,
-                major_pos_vol_2,
-                major_pos_strike_2,
-                major_pos_vol_3,
-                major_pos_strike_3,
-                major_neg_vol_2,
-                major_neg_strike_2,
-                major_neg_vol_3,
-                major_neg_strike_3
+                pos_can1_strike,
+                pos_can1_value,
+                pos_can1_pct,
+                pos_can2_strike,
+                pos_can2_value,
+                pos_can2_pct,
+                neg_can1_strike,
+                neg_can1_value,
+                neg_can1_pct,
+                neg_can2_strike,
+                neg_can2_value,
+                neg_can2_pct
             FROM filled
             WHERE kind = 'second'
             """,
@@ -468,24 +413,25 @@ class EnrichedExporter:
                 g.snapshot_ts_ms AS source_snapshot_ts,
                 g.spot,
                 g.zero_gamma,
-                g.net_gex,
-                g.net_gex_vol,
                 g.sum_gex_vol,
-                g.net_gex_oi,
+                g.sum_gex_oi,
+                g.gex_delta_15s,
                 g.major_pos_vol,
                 g.major_pos_oi,
                 g.major_neg_vol,
                 g.major_neg_oi,
-                g.major_pos_strike,
-                g.major_neg_strike,
-                g.major_pos_vol_2,
-                g.major_pos_strike_2,
-                g.major_pos_vol_3,
-                g.major_pos_strike_3,
-                g.major_neg_vol_2,
-                g.major_neg_strike_2,
-                g.major_neg_vol_3,
-                g.major_neg_strike_3,
+                g.pos_can1_strike,
+                g.pos_can1_value,
+                g.pos_can1_pct,
+                g.pos_can2_strike,
+                g.pos_can2_value,
+                g.pos_can2_pct,
+                g.neg_can1_strike,
+                g.neg_can1_value,
+                g.neg_can1_pct,
+                g.neg_can2_strike,
+                g.neg_can2_value,
+                g.neg_can2_pct,
                 g.delta_risk_reversal,
                 g.min_dte,
                 g.sec_min_dte,

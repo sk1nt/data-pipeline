@@ -8,10 +8,9 @@ import math
 import logging
 import os
 import socket
-from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone, timedelta
-from typing import Any, Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 import threading
 from zoneinfo import ZoneInfo
 
@@ -125,11 +124,14 @@ class GEXBotPoller:
         self._last_cycle_store_avg_seconds: Optional[float] = None
         self._last_cycle_symbol_timings: List[Dict[str, Any]] = []
         self._pending_ts_tasks: Set[asyncio.Task[None]] = set()
-        # Track last written timestamp per symbol (ms) to ensure monotonic writes
+        # Track last written timestamp per symbol (ms) for time-series ordering.
         self._last_snapshot_ms_by_symbol: Dict[str, int] = {}
         self._snapshot_lock = threading.Lock()
-        self._last_seen_snapshot_ms_by_symbol: Dict[str, int] = {}
-        self._gex_history_by_symbol: Dict[str, Deque[Tuple[int, float]]] = {}
+        # Snapshot identity is (symbol, source timestamp). The first observation
+        # wins; later observations for the same key must not enter any sink or
+        # derived history.
+        self._accepted_snapshot_timestamps_by_symbol: Dict[str, Set[int]] = {}
+        self._gex_history_by_symbol: Dict[str, Dict[int, float]] = {}
         self._last_interval_setting: Optional[str] = None
         self._auto_refresh_symbols = getattr(
             self.settings, "auto_refresh_symbols", True
@@ -283,11 +285,25 @@ class GEXBotPoller:
             fetch_start = asyncio.get_event_loop().time()
             snapshot = await self._fetch_symbol(session, symbol)
             if snapshot:
-                snapshot = await self._maybe_retry_same_timestamp(session, symbol, snapshot)
+                source_timestamp_ms = _timestamp_ms(snapshot.get("timestamp"))
+                accepted_timestamps = self._accepted_snapshot_timestamps_by_symbol.setdefault(
+                    symbol, set()
+                )
+                if source_timestamp_ms in accepted_timestamps:
+                    LOGGER.debug(
+                        "discarding duplicate %s source timestamp: %s",
+                        symbol,
+                        snapshot.get("timestamp"),
+                    )
+                    return {
+                        "symbol": symbol,
+                        "ok": False,
+                        "fetch_seconds": asyncio.get_event_loop().time() - fetch_start,
+                        "store_seconds": None,
+                    }
                 store_start = asyncio.get_event_loop().time()
                 self.latest[symbol] = snapshot
-                timestamp_ms = _timestamp_ms(snapshot.get("timestamp"))
-                self._last_seen_snapshot_ms_by_symbol[symbol] = timestamp_ms
+                accepted_timestamps.add(source_timestamp_ms)
                 await self._record_timeseries(snapshot)
                 fetch_duration = store_start - fetch_start
                 store_duration = asyncio.get_event_loop().time() - store_start
@@ -319,27 +335,6 @@ class GEXBotPoller:
                 "fetch_seconds": None,
                 "store_seconds": None,
             }
-
-    async def _maybe_retry_same_timestamp(
-        self,
-        session: aiohttp.ClientSession,
-        symbol: str,
-        snapshot: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        retry_seconds = float(getattr(self.settings, "same_timestamp_retry_seconds", 0.25))
-        if retry_seconds <= 0:
-            return snapshot
-        if not self._is_rth_now():
-            return snapshot
-        current_ts_ms = _timestamp_ms(snapshot.get("timestamp"))
-        previous_ts_ms = self._last_seen_snapshot_ms_by_symbol.get(symbol)
-        if previous_ts_ms is None or current_ts_ms != previous_ts_ms:
-            return snapshot
-        await asyncio.sleep(retry_seconds)
-        retry_snapshot = await self._fetch_symbol(session, symbol)
-        if retry_snapshot:
-            return retry_snapshot
-        return snapshot
 
     def _effective_symbols(self) -> List[str]:
         """Return the configured symbols, filtered by supported list if present.
@@ -446,12 +441,15 @@ class GEXBotPoller:
         return result
 
     async def _record_timeseries(self, snapshot: Dict[str, Any]) -> None:
-        if snapshot.get("gex_delta_15s") is None:
-            snapshot["gex_delta_15s"] = self._compute_gex_delta_15s(snapshot)
-            if snapshot.get("gex_delta_15s") is None:
-                snapshot["gex_delta_15s"] = await asyncio.to_thread(
-                    self._compute_gex_delta_15s_from_timeseries, snapshot
-                )
+        # Always record the accepted sum_gex_vol first. If enough local history
+        # exists, its canonical delta supersedes any provider-supplied value.
+        computed_delta = self._compute_gex_delta_15s(snapshot)
+        if computed_delta is not None:
+            snapshot["gex_delta_15s"] = computed_delta
+        elif snapshot.get("gex_delta_15s") is None:
+            snapshot["gex_delta_15s"] = await asyncio.to_thread(
+                self._compute_gex_delta_15s_from_timeseries, snapshot
+            )
         redis_start = asyncio.get_event_loop().time()
         self._store_snapshot_blob(snapshot)
         self._last_cycle_redis_duration_seconds = (
@@ -484,10 +482,22 @@ class GEXBotPoller:
         if current_value is None:
             return None
 
-        history = self._gex_history_by_symbol.setdefault(symbol, deque(maxlen=240))
-        history.append((timestamp_ms, current_value))
+        history = self._gex_history_by_symbol.setdefault(symbol, {})
+        # This guard also protects callers that invoke the calculation directly:
+        # the first value observed for a timestamp remains canonical.
+        history.setdefault(timestamp_ms, current_value)
         cutoff = timestamp_ms - 15_000
-        window = [point for point in history if point[0] >= cutoff]
+        stale = [point_ts for point_ts in history if point_ts < cutoff]
+        for point_ts in stale:
+            del history[point_ts]
+        if len(history) > 240:
+            for point_ts in sorted(history)[:-240]:
+                del history[point_ts]
+        window = sorted(
+            (point_ts, value)
+            for point_ts, value in history.items()
+            if point_ts >= cutoff
+        )
         if len(window) < 2:
             return None
 

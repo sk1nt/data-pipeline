@@ -12,7 +12,6 @@ class GEXSnapshot:
     ticker: str
     spot_price: float
     zero_gamma: float
-    net_gex: float
     min_dte: Optional[int] = None
     sec_min_dte: Optional[int] = None
     major_pos_vol: Optional[float] = None
@@ -58,7 +57,6 @@ class GEXSnapshot:
             'ticker': self.ticker,
             'spot_price': self.spot_price,
             'zero_gamma': self.zero_gamma,
-            'net_gex': self.net_gex,
             'min_dte': self.min_dte,
             'sec_min_dte': self.sec_min_dte,
             'major_pos_vol': self.major_pos_vol,
@@ -88,7 +86,6 @@ class GEXSnapshot:
             ticker=data['ticker'],
             spot_price=data['spot_price'],
             zero_gamma=data['zero_gamma'],
-            net_gex=data['net_gex'],
             min_dte=data.get('min_dte'),
             sec_min_dte=data.get('sec_min_dte'),
             major_pos_vol=data.get('major_pos_vol'),

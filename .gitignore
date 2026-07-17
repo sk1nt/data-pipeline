@@ -120,6 +120,10 @@ logs/
 redis/dump.rdb
 redis/*.log
 data/
+# Explicitly protect browser profiles, cookies, local storage, and auth state.
+data/runtime/playwright/
+.playwright/
+playwright-report/
 
 # Legal (private, never sync)
 legal/

@@ -73,7 +73,7 @@ async def test_nq_fast_poller_symbol_selection():
 
 
 @pytest.mark.asyncio
-async def test_nq_fast_poller_retries_same_timestamp_during_rth():
+async def test_nq_fast_poller_accepts_distinct_timestamps_within_same_second():
     settings = GEXBotPollerSettings(
         api_key="apikey",
         symbols=["NQ_NDX"],
@@ -86,7 +86,7 @@ async def test_nq_fast_poller_retries_same_timestamp_during_rth():
     calls = {"count": 0}
     ts_values = [
         "2026-07-16T13:00:00+00:00",
-        "2026-07-16T13:00:01+00:00",
+        "2026-07-16T13:00:00.500000+00:00",
     ]
 
     async def fake_fetch_symbol(session, symbol):
@@ -115,6 +115,10 @@ async def test_nq_fast_poller_retries_same_timestamp_during_rth():
     result = await poller._fetch_and_store_symbol(object(), "NQ_NDX")
 
     assert result["ok"] is True
+    assert calls["count"] == 1
+
+    second_result = await poller._fetch_and_store_symbol(object(), "NQ_NDX")
+    assert second_result["ok"] is True
     assert calls["count"] == 2
 
 

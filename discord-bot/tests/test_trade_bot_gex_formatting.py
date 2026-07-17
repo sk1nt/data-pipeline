@@ -31,6 +31,7 @@ def mk_data(zero_gamma=12345, net_gex=879.22222):
         "major_neg_oi": -5,
         "sum_gex_oi": 15,
         "sum_gex_vol": 500,
+        "gex_delta_15s": 22.3206,
         "delta_risk_reversal": 0.05,
     }
 
@@ -76,6 +77,7 @@ def test_format_gex_small_basic(bot):
     assert "put wall" in out_small
     assert "net gex" in out_small
     assert "largest delta" in out_small
+    assert "0.0223Bn" in out_small
 
 
 def test_format_gex_small_uses_compact_wall_fields_without_strikes(bot):

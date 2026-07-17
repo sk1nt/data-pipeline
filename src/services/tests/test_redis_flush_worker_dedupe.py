@@ -227,7 +227,7 @@ def test_write_gex_tables_dedupes_duplicate_rows(tmp_path: Path) -> None:
     assert strike == (1234, "NQ_NDX", 28974.92, 3.0, 4.0, "second")
 
 
-def test_build_snapshot_row_derives_candidate_percentages_from_strikes() -> None:
+def test_build_snapshot_row_projects_snapshot_candidate_values() -> None:
     worker = RedisFlushWorker(_FakeRedisClient(), object())
     snapshot = {
         "symbol": "NQ_NDX",
@@ -242,6 +242,18 @@ def test_build_snapshot_row_derives_candidate_percentages_from_strikes() -> None
         "gex_delta_15s": 0.2,
         "delta_risk_reversal": 0.1,
         "max_priors": ["x"],
+        "pos_can1_strike": 20011.0,
+        "pos_can1_value": 5.0,
+        "pos_can1_pct": 50.0,
+        "pos_can2_strike": 20012.0,
+        "pos_can2_value": 2.5,
+        "pos_can2_pct": 25.0,
+        "neg_can1_strike": 19899.0,
+        "neg_can1_value": -10.0,
+        "neg_can1_pct": 50.0,
+        "neg_can2_strike": 19898.0,
+        "neg_can2_value": -5.0,
+        "neg_can2_pct": 25.0,
         "strikes": [
             [20010.0, 10.0],
             [20011.0, 5.0],

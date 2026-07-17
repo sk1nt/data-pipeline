@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
@@ -10,14 +11,16 @@ def _bounded_pct(value: Any) -> Optional[float]:
     if value is None:
         return None
     try:
-        return min(100.0, max(0.0, float(value)))
+        numeric = float(value)
+        return min(100.0, max(0.0, numeric)) if math.isfinite(numeric) else None
     except (TypeError, ValueError):
         return None
 
 
 def _coerce_float(value: Any) -> Optional[float]:
     try:
-        return float(value)
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) else None
     except (TypeError, ValueError):
         return None
 
@@ -32,16 +35,21 @@ def parse_gex_strikes(raw: Any) -> List[Tuple[float, float]]:
             try:
                 strike = float(entry[0])
                 gamma = float(entry[1])
-                if gamma == 0.0 and len(entry) >= 3:
-                    gamma = float(entry[2])
-                strikes.append((strike, gamma))
+                if math.isfinite(strike) and math.isfinite(gamma) and gamma != 0.0:
+                    strikes.append((strike, gamma))
             except (TypeError, ValueError):
                 continue
         elif isinstance(entry, dict):
             try:
                 strike = float(entry.get("strike"))
-                gamma = float(entry.get("gamma"))
-                strikes.append((strike, gamma))
+                # Dict payloads may name the volume field explicitly. Never
+                # fall back to oi_gamma for volume-based wall candidates.
+                volume_gamma = entry.get(
+                    "volume_gamma", entry.get("gamma")
+                )
+                gamma = float(volume_gamma)
+                if math.isfinite(strike) and math.isfinite(gamma) and gamma != 0.0:
+                    strikes.append((strike, gamma))
             except (TypeError, ValueError):
                 continue
     return strikes
@@ -61,6 +69,8 @@ def summarize_wall_candidates(
     """
     filtered: List[Tuple[float, float]] = []
     for strike, gamma in strikes:
+        if not math.isfinite(gamma):
+            continue
         if prefer_positive and gamma <= 0:
             continue
         if not prefer_positive and gamma >= 0:
@@ -139,6 +149,37 @@ def build_compact_wall_fields(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     fields: Dict[str, Any] = {}
     fields.update(_major_wall_gamma_fields(snapshot, prefer_positive=True))
     fields.update(_major_wall_gamma_fields(snapshot, prefer_positive=False))
+    raw_strikes = snapshot.get("strikes")
+    parsed_strikes = parse_gex_strikes(raw_strikes)
+
+    # When a raw ladder is present it is authoritative. Recompute candidates
+    # from volume gamma so provider-supplied/OI-derived compact fields cannot
+    # leak into any symbol's pos_can*/neg_can* values.
+    if isinstance(raw_strikes, list) and raw_strikes:
+        for prefix, entries in (
+            (
+                "pos",
+                summarize_wall_candidates(
+                    snapshot.get("major_pos_vol"),
+                    parsed_strikes,
+                    prefer_positive=True,
+                ),
+            ),
+            (
+                "neg",
+                summarize_wall_candidates(
+                    snapshot.get("major_neg_vol"),
+                    parsed_strikes,
+                    prefer_positive=False,
+                ),
+            ),
+        ):
+            for idx in (1, 2):
+                entry = entries[idx - 1] if idx - 1 < len(entries) else {}
+                for field in ("strike", "value", "pct"):
+                    fields[f"{prefix}_can{idx}_{field}"] = entry.get(field)
+        return fields
+
     compact_keys = (
         ("pos", 1, "strike"),
         ("pos", 1, "value"),
@@ -187,12 +228,11 @@ def build_compact_wall_fields(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if len(fields) == len(compact_keys):
         return fields
 
-    strikes = parse_gex_strikes(snapshot.get("strikes"))
     pos_entries = summarize_wall_candidates(
-        snapshot.get("major_pos_vol"), strikes, prefer_positive=True
+        snapshot.get("major_pos_vol"), parsed_strikes, prefer_positive=True
     )
     neg_entries = summarize_wall_candidates(
-        snapshot.get("major_neg_vol"), strikes, prefer_positive=False
+        snapshot.get("major_neg_vol"), parsed_strikes, prefer_positive=False
     )
     for prefix, entries in (("pos", pos_entries), ("neg", neg_entries)):
         for idx in (1, 2):
@@ -208,7 +248,15 @@ def build_compact_wall_fields(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 def build_wall_ladder_from_compact(snapshot: Dict[str, Any], side: str) -> Dict[str, Any]:
     """Build the gex-monitor ladder payload from compact wall fields."""
     normalized_side = "pos" if side.lower() in {"call", "pos", "positive"} else "neg"
-    compact_fields = build_compact_wall_fields(snapshot)
+    # This is a presentation adapter. Candidate values must already have been
+    # calculated on snapshot creation; downstream consumers only read them.
+    compact_fields = {
+        f"{normalized_side}_can{idx}_{field}": snapshot.get(
+            f"{normalized_side}_can{idx}_{field}"
+        )
+        for idx in (1, 2)
+        for field in ("strike", "value", "pct")
+    }
     major_key = "major_pos_vol" if normalized_side == "pos" else "major_neg_vol"
     ladder = {"major": snapshot.get(major_key), "next": []}
     for idx in (1, 2):

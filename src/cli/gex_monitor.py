@@ -42,7 +42,7 @@ def _age_str(ts: str | None) -> str:
 def _fmt_snapshot(snap: dict, symbol: str) -> str:
     spot = snap.get("spot")
     zero = snap.get("zero_gamma")
-    net = snap.get("net_gex") or snap.get("sum_gex_vol")
+    net = snap.get("sum_gex_vol")
     ts = snap.get("timestamp")
     age = _age_str(ts)
 
@@ -52,7 +52,7 @@ def _fmt_snapshot(snap: dict, symbol: str) -> str:
 
     return (
         f"{symbol:<10}  spot={spot_str:<12}  zero={zero_str:<12}  "
-        f"net_gex={net_str:<14}  [{age}]"
+        f"sum_gex_vol={net_str:<14}  [{age}]"
     )
 
 

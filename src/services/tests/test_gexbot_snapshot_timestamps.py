@@ -117,7 +117,7 @@ async def test_snapshot_timestamps_increment():
 
 
 @pytest.mark.asyncio
-async def test_static_snapshot_timestamps_bumped():
+async def test_static_source_seconds_are_discarded():
     ts = FakeTSClient()
     settings = GEXBotPollerSettings(api_key="apikey", symbols=["SPX", "NQ_NDX"])
     fake_redis = FakeRedisClient()
@@ -151,19 +151,16 @@ async def test_static_snapshot_timestamps_bumped():
     await poller._run()
     await poller.wait_for_pending_timeseries_writes()
 
-    # Ensure duplicate timestamps are bumped so they still publish in order
+    # Only the first message for a source second is retained.
     pairs = [(rec[0], rec[1]) for rec in ts.samples if rec[0].startswith("ts:gex:")]
     sum_gex_vol_pairs = [p for p in pairs if ":sum_gex_vol:" in p[0]]
-    assert len(sum_gex_vol_pairs) >= 2
+    assert len(sum_gex_vol_pairs) == 2
     by_symbol = {}
     for key, ts_ms in sum_gex_vol_pairs:
         parts = key.split(":")
         sym = parts[3] if len(parts) >= 4 else "UNKNOWN"
         by_symbol.setdefault(sym, []).append(ts_ms)
-    for sym, tss in by_symbol.items():
-        assert all(tss[i] < tss[i + 1] for i in range(len(tss) - 1)), (
-            f"timestamps not increasing for {sym}"
-        )
+    assert all(len(tss) == 1 for tss in by_symbol.values())
 
 
 @pytest.mark.asyncio

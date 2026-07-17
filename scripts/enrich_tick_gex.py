@@ -30,6 +30,8 @@ import json
 import argparse
 from functools import lru_cache
 
+from src.services.gex_wall_utils import build_compact_wall_fields
+
 # Sierra Chart epoch offset: microseconds since 1899-12-30 -> Unix ms
 SC_EPOCH_MS = 25569 * 86400 * 1000
 
@@ -121,160 +123,20 @@ def _process_gex_record(target_record: dict) -> dict:
         "max_30m_gamma": -400.528,
     }
 
-    strikes = target_record.get("strikes", [])
-    major_pos_vol = target_record.get("major_pos_vol", 0)
-    major_neg_vol = target_record.get("major_neg_vol", 0)
-
-    # Get all positive gamma strikes (calls) - use max gamma for duplicate strikes
-    call_strike_gamma_map = {}
-    # Get all negative gamma strikes (puts) - use min gamma (most negative) for duplicate strikes
-    put_strike_gamma_map = {}
-
-    if isinstance(strikes, list):
-        for strike_info in strikes:
-            if (
-                isinstance(strike_info, dict)
-                and "strike" in strike_info
-                and "gamma" in strike_info
-            ):
-                strike = strike_info["strike"]
-                gamma = strike_info["gamma"]
-                if gamma > 0:
-                    # Calls: keep the highest gamma for each unique strike
-                    if (
-                        strike not in call_strike_gamma_map
-                        or gamma > call_strike_gamma_map[strike]
-                    ):
-                        call_strike_gamma_map[strike] = gamma
-                elif gamma < 0:
-                    # Puts: keep the lowest (most negative) gamma for each unique strike
-                    if (
-                        strike not in put_strike_gamma_map
-                        or gamma < put_strike_gamma_map[strike]
-                    ):
-                        put_strike_gamma_map[strike] = gamma
-            elif isinstance(strike_info, list) and len(strike_info) >= 2:
-                strike, gamma = strike_info[0], strike_info[1]
-                if gamma > 0:
-                    if (
-                        strike not in call_strike_gamma_map
-                        or gamma > call_strike_gamma_map[strike]
-                    ):
-                        call_strike_gamma_map[strike] = gamma
-                elif gamma < 0:
-                    if (
-                        strike not in put_strike_gamma_map
-                        or gamma < put_strike_gamma_map[strike]
-                    ):
-                        put_strike_gamma_map[strike] = gamma
-
-    # Process CALL strikes (positive gamma)
-    call_strikes = [(strike, gamma) for strike, gamma in call_strike_gamma_map.items()]
-    if call_strikes:
-        # Sort by gamma descending, but put major_pos_vol strike first (treat as highest gamma)
-        major_pos_strike = None
-        other_call_strikes = []
-
-        for strike, gamma in call_strikes:
-            if (
-                abs(strike - major_pos_vol) < 0.01
-            ):  # Close enough to be considered the same strike
-                major_pos_strike = (strike, gamma)
-            else:
-                other_call_strikes.append((strike, gamma))
-
-        # Sort other strikes by gamma descending
-        other_call_strikes.sort(key=lambda x: x[1], reverse=True)
-
-        # Create final sorted list: major_pos_vol first, then by gamma descending
-        sorted_call_by_gamma = []
-        if major_pos_strike:
-            sorted_call_by_gamma.append(major_pos_strike)
-        sorted_call_by_gamma.extend(other_call_strikes)
-
-        # Call1 = next highest gamma strike (index 1)
-        # Call2 = next highest gamma strike after Call1 (index 2), must be different from Call1
-        call1_strike, call1_gamma = None, None
-        call2_strike, call2_gamma = None, None
-
-        if len(sorted_call_by_gamma) >= 2:
-            call1_strike, call1_gamma = sorted_call_by_gamma[1]
-
-        if len(sorted_call_by_gamma) >= 3:
-            call2_strike, call2_gamma = sorted_call_by_gamma[2]
-
-        gex_record["major_pos_call1_strike"] = (
-            float(call1_strike) if call1_strike is not None else None
-        )
-        gex_record["major_pos_call1_vol"] = (
-            float(call1_gamma) if call1_gamma is not None else None
-        )
-        gex_record["major_pos_call2_strike"] = (
-            float(call2_strike) if call2_strike is not None else None
-        )
-        gex_record["major_pos_call2_vol"] = (
-            float(call2_gamma) if call2_gamma is not None else None
-        )
-    else:
-        gex_record["major_pos_call1_strike"] = None
-        gex_record["major_pos_call1_vol"] = None
-        gex_record["major_pos_call2_strike"] = None
-        gex_record["major_pos_call2_vol"] = None
-
-    # Process PUT strikes (negative gamma)
-    put_strikes = [(strike, gamma) for strike, gamma in put_strike_gamma_map.items()]
-    if put_strikes:
-        # Sort by gamma ascending (most negative first), but put major_neg_vol strike first (treat as most negative)
-        major_neg_strike = None
-        other_put_strikes = []
-
-        for strike, gamma in put_strikes:
-            if (
-                abs(strike - major_neg_vol) < 0.01
-            ):  # Close enough to be considered the same strike
-                major_neg_strike = (strike, gamma)
-            else:
-                other_put_strikes.append((strike, gamma))
-
-        # Sort other strikes by gamma ascending (most negative first)
-        other_put_strikes.sort(key=lambda x: x[1])  # ascending = most negative first
-
-        # Create final sorted list: major_neg_vol first, then by gamma ascending (most negative first)
-        sorted_put_by_gamma = []
-        if major_neg_strike:
-            sorted_put_by_gamma.append(major_neg_strike)
-        sorted_put_by_gamma.extend(other_put_strikes)
-
-        # Put1 = next most negative gamma strike (index 1)
-        # Put2 = next most negative gamma strike after Put1 (index 2), must be different from Put1
-        put1_strike, put1_gamma = None, None
-        put2_strike, put2_gamma = None, None
-
-        if len(sorted_put_by_gamma) >= 2:
-            put1_strike, put1_gamma = sorted_put_by_gamma[1]
-
-        if len(sorted_put_by_gamma) >= 3:
-            put2_strike, put2_gamma = sorted_put_by_gamma[2]
-
-        gex_record["major_neg_put1_strike"] = (
-            float(put1_strike) if put1_strike is not None else None
-        )
-        gex_record["major_neg_put1_vol"] = (
-            float(put1_gamma) if put1_gamma is not None else None
-        )
-        gex_record["major_neg_put2_strike"] = (
-            float(put2_strike) if put2_strike is not None else None
-        )
-        gex_record["major_neg_put2_vol"] = (
-            float(put2_gamma) if put2_gamma is not None else None
-        )
-    else:
-        gex_record["major_neg_put1_strike"] = None
-        gex_record["major_neg_put1_vol"] = None
-        gex_record["major_neg_put2_strike"] = None
-        gex_record["major_neg_put2_vol"] = None
-
+    # Candidate selection is owned by the canonical snapshot builder. This
+    # legacy export only projects those snapshot values into its old column
+    # names; it must not rank the raw strike ladder independently.
+    compact = build_compact_wall_fields(target_record)
+    for side, legacy_prefix in (("pos", "major_pos_call"), ("neg", "major_neg_put")):
+        for idx in (1, 2):
+            gex_record[f"{legacy_prefix}{idx}_strike"] = compact.get(
+                f"{side}_can{idx}_strike"
+            )
+            gex_record[f"{legacy_prefix}{idx}_vol"] = compact.get(
+                f"{side}_can{idx}_value"
+            )
     return gex_record
+
 
 
 @lru_cache(maxsize=8)

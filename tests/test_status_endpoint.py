@@ -118,6 +118,13 @@ def test_get_latest_gex_delta_handles_missing_history():
     assert module._get_latest_gex_delta(_FakeRedis(), "NQ_NDX") is None
 
 
+def test_coerce_optional_float_handles_numeric_strings():
+    assert module._coerce_optional_float("12.5") == 12.5
+    assert module._coerce_optional_float(3) == 3.0
+    assert module._coerce_optional_float("bad") is None
+    assert module._coerce_optional_float(None) is None
+
+
 class _FakePipeline:
     def __init__(self, recorder):
         self.recorder = recorder

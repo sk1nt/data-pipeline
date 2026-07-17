@@ -114,6 +114,7 @@ def import_to_duckdb_and_parquet(
     ]
     batch_count = 0
     total_processed = 0
+    accepted_keys: set[tuple[str, int]] = set()
 
     # Use ijson for streaming JSON parsing
     with open(file_path, "rb") as f:
@@ -132,6 +133,13 @@ def import_to_duckdb_and_parquet(
             record["timestamp"] = ts_epoch
             record["timestamp_ms"] = ts_epoch * 1000 + int(ts_dt.microsecond / 1000)
             record["timestamp_iso"] = ts_dt.isoformat()
+
+            # Preserve live semantics: the first observation for
+            # (ticker, timestamp) is canonical; later duplicates are ignored.
+            key = (str(record.get("ticker") or "").upper(), record["timestamp_ms"])
+            if key in accepted_keys:
+                continue
+            accepted_keys.add(key)
 
             # Convert complex types to JSON strings
             if "strikes" in record:

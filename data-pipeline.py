@@ -2210,19 +2210,37 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
     def _extract(payload: Dict[str, Any]) -> Dict[str, Any]:
         out = {k: payload.get(k) for k in GEX_FIELDS}
         out["symbol"] = normalized
-        if out.get("gex_delta_15s") is None:
+        out["spot"] = _coerce_optional_float(out.get("spot"))
+        out["zero_gamma"] = _coerce_optional_float(out.get("zero_gamma"))
+        out["sum_gex_vol"] = _coerce_optional_float(out.get("sum_gex_vol"))
+        out["sum_gex_oi"] = _coerce_optional_float(out.get("sum_gex_oi"))
+        out["major_pos_vol"] = _coerce_optional_float(out.get("major_pos_vol"))
+        out["major_pos_oi"] = _coerce_optional_float(out.get("major_pos_oi"))
+        out["major_pos_vol_gamma"] = _coerce_optional_float(
+            out.get("major_pos_vol_gamma")
+        )
+        out["major_neg_vol"] = _coerce_optional_float(out.get("major_neg_vol"))
+        out["major_neg_oi"] = _coerce_optional_float(out.get("major_neg_oi"))
+        out["major_neg_vol_gamma"] = _coerce_optional_float(
+            out.get("major_neg_vol_gamma")
+        )
+        gex_delta = _coerce_optional_float(out.get("gex_delta_15s"))
+        if gex_delta is None:
             gex_delta = _get_latest_gex_delta(redis_conn, normalized)
-            if gex_delta is not None:
-                out["gex_delta_15s"] = gex_delta
-                out["gex_delta"] = gex_delta
+        if gex_delta is not None:
+            out["gex_delta_15s"] = gex_delta
+            out["gex_delta"] = gex_delta
         else:
-            out["gex_delta"] = out["gex_delta_15s"]
-        if out.get("delta_risk_reversal") is None:
+            out["gex_delta_15s"] = None
+            out["gex_delta"] = None
+        drr = _coerce_optional_float(out.get("delta_risk_reversal"))
+        if drr is None:
             for alias in ("deltaRiskRev", "drr", "delta_rr"):
                 value = payload.get(alias)
                 if value is not None:
-                    out["delta_risk_reversal"] = value
+                    drr = _coerce_optional_float(value)
                     break
+        out["delta_risk_reversal"] = drr
         call_ladder = build_wall_ladder_from_compact(payload, "call")
         put_ladder = build_wall_ladder_from_compact(payload, "put")
         if call_ladder.get("next"):
@@ -2258,7 +2276,9 @@ async def gex_monitor_websocket(websocket: WebSocket, symbol: str = "NQ_NDX") ->
                 if cross_raw:
                     cross_snap = json.loads(cross_raw if isinstance(cross_raw, str) else cross_raw.decode("utf-8"))
                     out["cross_symbol"] = cross_sym
-                    out["cross_sum_gex_vol"] = cross_snap.get("sum_gex_vol")
+                    out["cross_sum_gex_vol"] = _coerce_optional_float(
+                        cross_snap.get("sum_gex_vol")
+                    )
             except Exception:
                 pass
         return out
@@ -2656,6 +2676,16 @@ def _normalize_string(value: Optional[Any]) -> str:
     if isinstance(value, str):
         return value.strip()
     return str(value).strip()
+
+
+def _coerce_optional_float(value: Any) -> Optional[float]:
+    """Best-effort float coercion for websocket payload fields."""
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 

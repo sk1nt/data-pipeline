@@ -26,9 +26,7 @@ Default symbol: `MNQ`.
 | `source_snapshot_ts` | BIGINT | Snapshot timestamp in epoch ms that supplied GEX fields |
 | `spot` | DOUBLE | GEX spot price |
 | `zero_gamma` | DOUBLE | Zero gamma level |
-| `net_gex` | DOUBLE | Net gamma (also used for `net_gex_vol` and `sum_gex_vol`) |
-| `net_gex_vol` | DOUBLE | Mirror of `net_gex` (per user requirement) |
-| `sum_gex_vol` | DOUBLE | Mirror of `net_gex` (per user requirement) |
+| `sum_gex_vol` | DOUBLE | Volume-based net gamma exposure |
 | `net_gex_oi` | DOUBLE | Sum of GEX open interest |
 | `major_pos_vol` | DOUBLE | Primary positive strike gamma (millions proxy) |
 | `major_pos_oi` | DOUBLE | OI at primary positive strike |
@@ -67,7 +65,7 @@ Arguments:
 ## Consumer Example (DuckDB)
 
 ```sql
-SELECT timestamp, open, close, spot, net_gex, major_pos_vol, major_neg_vol
+SELECT timestamp, open, close, spot, sum_gex_vol, major_pos_vol, major_neg_vol
 FROM read_parquet('data/enriched/MNQ/20251020.parquet')
 LIMIT 5;
 ```

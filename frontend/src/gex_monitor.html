@@ -955,10 +955,19 @@ function toggleCollapse(el, bodyId) {
   }
 
   // --- Formatting ---
-  function fmtPrice(v) { return typeof v === 'number' ? v.toFixed(2) : '\u2014'; }
-  function fmtBn(v) { if (typeof v !== 'number') return '\u2014'; return (Math.abs(v) / 1000).toFixed(4) + 'Bn'; }
+  function toNumber(v) {
+    if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+    if (typeof v === 'string' && v.trim() !== '') {
+      var parsed = Number(v);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+  }
+  function fmtPrice(v) { v = toNumber(v); return v !== null ? v.toFixed(2) : '\u2014'; }
+  function fmtBn(v) { v = toNumber(v); if (v === null) return '\u2014'; return (Math.abs(v) / 1000).toFixed(4) + 'Bn'; }
   function fmtCompact(v) {
-    if (typeof v !== 'number') return '\u2014';
+    v = toNumber(v);
+    if (v === null) return '\u2014';
     return Math.abs(v) >= 1000000
       ? (v / 1000000).toFixed(2) + 'M'
       : Math.abs(v) >= 1000
@@ -966,10 +975,11 @@ function toggleCollapse(el, bodyId) {
         : v.toLocaleString('en-US');
   }
   function fmtSignedCompact(v) {
-    if (typeof v !== 'number') return '\u2014';
+    v = toNumber(v);
+    if (v === null) return '\u2014';
     return (v >= 0 ? '+' : '-') + fmtCompact(Math.abs(v));
   }
-  function valClass(v) { if (typeof v !== 'number') return 'neutral'; return v > 0 ? 'pos' : v < 0 ? 'neg' : 'neutral'; }
+  function valClass(v) { v = toNumber(v); if (v === null) return 'neutral'; return v > 0 ? 'pos' : v < 0 ? 'neg' : 'neutral'; }
 
   // --- Maxchange ---
   var MC_KEYS = ['current', 'one', 'five', 'ten', 'fifteen', 'thirty'];
@@ -1013,6 +1023,7 @@ function toggleCollapse(el, bodyId) {
 
   // --- GEX snapshot display ---
   function onSnapshot(data) {
+    data = data || {};
     // Cross-symbol sum GEX vol (e.g. ES_SPX when viewing NQ_NDX)
     if (data.cross_symbol) {
       var label = data.cross_symbol.replace('_', '/') + ' Sum GEX Vol';
@@ -1031,40 +1042,25 @@ function toggleCollapse(el, bodyId) {
     putWallNext.textContent = fmtWallNext(data.put_wall_ladder);
     netGex.textContent = fmtBn(data.sum_gex_vol); netGex.className = 'val ' + valClass(data.sum_gex_vol);
     netGexOI.textContent = fmtBn(data.sum_gex_oi); netGexOI.className = 'val ' + valClass(data.sum_gex_oi);
-    var drr = (typeof data.delta_risk_reversal === 'number')
-      ? data.delta_risk_reversal
-      : (typeof data.deltaRiskRev === 'number' ? data.deltaRiskRev : null);
+    var drr = toNumber(data.delta_risk_reversal);
+    if (drr === null) drr = toNumber(data.deltaRiskRev);
+    if (drr === null) drr = toNumber(data.drr);
+    if (drr === null) drr = toNumber(data.delta_rr);
     var drrEl = $('deltaRiskRev');
     drrEl.textContent = fmtPrice(drr); drrEl.className = 'val ' + valClass(drr);
-    // GEX Delta: prefer backend-provided delta, fall back to a local rolling window.
-    var curGex = data.sum_gex_vol;
-    if (typeof curGex === 'number') {
-      var now = Date.now();
-      gexHistory.push({ t: now, v: curGex });
-      // Drop entries older than the window
-      var cutoff = now - GEX_DELTA_WINDOW_MS;
-      gexHistory = gexHistory.filter(function(e) { return e.t >= cutoff; });
-      var gexDiff = (typeof data.gex_delta_15s === 'number')
-        ? data.gex_delta_15s
-        : (typeof data.gex_delta === 'number' ? data.gex_delta : null);
-      // Compute average of consecutive differences within the window if the backend did not supply one.
-      if (gexDiff === null && gexHistory.length >= 2) {
-        var diffs = [];
-        for (var i = 1; i < gexHistory.length; i++) {
-          diffs.push(gexHistory[i].v - gexHistory[i - 1].v);
-        }
-        gexDiff = diffs.reduce(function(a, b) { return a + b; }, 0) / diffs.length;
-      }
-      if (typeof gexDiff === 'number') {
-        gexDeltaEl.textContent = (gexDiff >= 0 ? '+' : '') + fmtBn(gexDiff);
-        gexDeltaEl.className = 'val ' + valClass(gexDiff);
-        if (Math.abs(gexDiff) >= cfg.threshold) triggerAlert(gexDiff, 'gex_delta');
-      } else {
-        gexDeltaEl.textContent = '\u2014'; gexDeltaEl.className = 'val neutral';
-      }
-      prevNetGex = curGex;
+    // GEX Delta is canonical backend data; do not recalculate it in the UI.
+    var gexDiff = toNumber(data.gex_delta_15s);
+    if (gexDiff === null) gexDiff = toNumber(data.gex_delta);
+    if (typeof gexDiff === 'number') {
+      var gexDeltaText = (gexDiff >= 0 ? '+' : '') + fmtBn(gexDiff);
+      gexDeltaEl.textContent = gexDeltaText;
+      gexDeltaEl.className = 'val ' + valClass(gexDiff);
+      netGexDelta.textContent = gexDeltaText;
+      netGexDelta.className = 'sub ' + valClass(gexDiff);
+      if (Math.abs(gexDiff) >= cfg.threshold) triggerAlert(gexDiff, 'gex_delta');
     } else {
       gexDeltaEl.textContent = '\u2014'; gexDeltaEl.className = 'val neutral';
+      netGexDelta.textContent = 'Δ15s \u2014'; netGexDelta.className = 'sub';
     }
     updateMaxchange(data.maxchange, data.max_priors);
     var ts = data.timestamp;
@@ -1080,14 +1076,15 @@ function toggleCollapse(el, bodyId) {
 
   function updateDirRiskBanner(data) {
     var banner = $('dirRiskBanner');
-    var netGex = data.sum_gex_vol;
-    var drr = (typeof data.delta_risk_reversal === 'number')
-      ? data.delta_risk_reversal
-      : (typeof data.deltaRiskRev === 'number' ? data.deltaRiskRev : null);
-    var spot = data.spot;
-    var zeroGamma = data.zero_gamma;
+    var netGex = toNumber(data.sum_gex_vol);
+    var drr = toNumber(data.delta_risk_reversal);
+    if (drr === null) drr = toNumber(data.deltaRiskRev);
+    if (drr === null) drr = toNumber(data.drr);
+    if (drr === null) drr = toNumber(data.delta_rr);
+    var spot = toNumber(data.spot);
+    var zeroGamma = toNumber(data.zero_gamma);
 
-    if (typeof netGex !== 'number') {
+    if (netGex === null) {
       banner.className = 'dir-risk-banner';
       return;
     }

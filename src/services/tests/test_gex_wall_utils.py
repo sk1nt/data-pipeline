@@ -42,3 +42,39 @@ def test_major_wall_strike_fields_are_populated_from_strikes() -> None:
 
     assert fields["major_pos_vol_gamma"] == 97995.36
     assert fields["major_neg_vol_gamma"] == -5044.25
+
+
+def test_oi_gamma_is_not_a_volume_candidate_fallback() -> None:
+    fields = build_compact_wall_fields(
+        {
+            "major_pos_vol": 100,
+            "major_neg_vol": 200,
+            "strikes": [
+                [100, 0, 9999],
+                [101, 10, 1],
+                [200, 0, -9999],
+                [201, -20, -1],
+            ],
+        }
+    )
+
+    assert fields["pos_can1_strike"] is None
+    assert fields["neg_can1_strike"] is None
+
+
+def test_zero_missing_and_nonfinite_volume_gamma_are_ineligible() -> None:
+    fields = build_compact_wall_fields(
+        {
+            "major_pos_vol": 100,
+            "strikes": [
+                [100, 0, 5000],
+                [101, "nan", 6000],
+                [102, None, 7000],
+                [103, 10, 1],
+                [104, 5, 2],
+            ],
+        }
+    )
+
+    assert fields["pos_can1_strike"] == 104.0
+    assert fields["pos_can1_value"] == 5.0

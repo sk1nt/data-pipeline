@@ -2018,7 +2018,7 @@ class TradeBot(commands.Bot):
 
                 q = f"""
                 SELECT timestamp, ticker, spot_price, zero_gamma,
-                       sum_gex_vol, delta_risk_reversal, min_dte, sec_min_dte,
+                       sum_gex_vol, gex_delta_15s, delta_risk_reversal, min_dte, sec_min_dte,
                        major_pos_vol, major_neg_vol, major_pos_oi, major_neg_oi,
                        sum_gex_oi, max_priors,
                        pos_can1_strike, pos_can1_value, pos_can1_pct,
@@ -2065,6 +2065,7 @@ class TradeBot(commands.Bot):
                     "spot_price",
                     "zero_gamma",
                     "sum_gex_vol",
+                    "gex_delta_15s",
                     "delta_risk_reversal",
                     "min_dte",
                     "sec_min_dte",
@@ -2371,6 +2372,7 @@ class TradeBot(commands.Bot):
             "major_pos_oi": payload.get("major_pos_oi"),
             "major_neg_oi": payload.get("major_neg_oi"),
             "sum_gex_vol": payload.get("sum_gex_vol") or payload.get("sum_gex"),
+            "gex_delta_15s": payload.get("gex_delta_15s"),
             "sum_gex_oi": payload.get("sum_gex_oi"),
             "max_priors": self._extract_max_priors(payload),
             "maxchange": payload.get("maxchange")
@@ -3765,6 +3767,16 @@ class TradeBot(commands.Bot):
             ),
         )
 
+        sum_volume = fmt_net_gex(data.get("sum_gex_vol"))
+        sum_delta = fmt_net_gex(data.get("gex_delta_15s"))
+        sum_oi = fmt_net_gex(data.get("sum_gex_oi"))
+        sum_line = (
+            f"{'sum gex vol':<{label_width}}"
+            f"{colorize(ansi.get(color_for_value(data.get('sum_gex_vol'))), sum_volume):<{volume_width}}"
+            f"{colorize(ansi.get(color_for_value(data.get('gex_delta_15s'))), sum_delta):<12}"
+            f"{colorize(ansi.get(color_for_value(data.get('sum_gex_oi'))), sum_oi)}"
+        )
+
         table_lines = [
             "volume                                   oi",
             fmt_pair(
@@ -3775,14 +3787,7 @@ class TradeBot(commands.Bot):
             ),
             call_wall_line,
             put_wall_line,
-            fmt_pair(
-                "sum gex vol",
-                data.get("sum_gex_vol"),
-                data.get("sum_gex_oi"),
-                volume_color=color_for_value(data.get("sum_gex_vol")),
-                oi_color=color_for_value(data.get("sum_gex_oi")),
-                formatter=fmt_net_gex,
-            ),
+            sum_line,
         ]
 
         maxchange_lines = ["", "max change gex"]
@@ -3931,7 +3936,17 @@ class TradeBot(commands.Bot):
         net_value = colorize(
             net_color_code, fmt_net_gex(data.get("sum_gex_vol"))
         )
-        net_line = f"{'sum gex vol':<{classic_label_width}}{net_value}"
+        delta_value = data.get("gex_delta_15s")
+        delta_text = fmt_net_gex(delta_value)
+        delta_colored = colorize(ansi.get(color_for_value(delta_value)), delta_text)
+        # Keep the delta value in the same visual column as the value in the
+        # largest-delta row below; ANSI escape sequences are excluded from the
+        # padding calculation.
+        delta_gap = " " * max(2, 12 - len(fmt_net_gex(data.get("sum_gex_vol"))))
+        net_line = (
+            f"{'sum gex vol':<{classic_label_width}}{net_value}"
+            f"{delta_gap}{delta_colored}"
+        )
 
         current_entry = self._extract_current_maxchange_entry(data)
 

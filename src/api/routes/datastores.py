@@ -93,7 +93,6 @@ async def read_gex_snapshots(
             ticker,
             spot_price,
             zero_gamma,
-            net_gex,
             min_dte,
             sec_min_dte,
             major_pos_vol,

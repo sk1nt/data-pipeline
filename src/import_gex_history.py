@@ -149,7 +149,8 @@ class GEXHistoryImporter:
             conn.execute(
                 f"""
                 CREATE TABLE {table_name} AS
-                SELECT * FROM read_json_auto('{file_path}', maximum_depth=4)
+                SELECT *, row_number() OVER () AS _source_order
+                FROM read_json_auto('{file_path}', maximum_depth=4)
                 """
             )
 
@@ -201,7 +202,7 @@ class GEXHistoryImporter:
             conn.execute(
                 f"""
                 INSERT INTO gex_snapshots (
-                    timestamp, ticker, spot_price, zero_gamma, net_gex,
+                    timestamp, ticker, spot_price, zero_gamma,
                     min_dte, sec_min_dte, major_pos_vol, major_pos_oi,
                     major_neg_vol, major_neg_oi, sum_gex_vol, sum_gex_oi,
                     delta_risk_reversal, max_priors,
@@ -214,7 +215,6 @@ class GEXHistoryImporter:
                     UPPER(COALESCE(ticker, '{ticker_sql}')) AS ticker,
                     spot AS spot_price,
                     zero_gamma,
-                    COALESCE(sum_gex_vol, 0) AS net_gex,
                     CAST(min_dte AS INTEGER) AS min_dte,
                     CAST(sec_min_dte AS INTEGER) AS sec_min_dte,
                     major_pos_vol,
@@ -231,9 +231,26 @@ class GEXHistoryImporter:
                     CASE WHEN put_wall_candidate2_pct IS NULL THEN NULL ELSE CAST(put_wall_candidate2_pct AS DOUBLE) END AS put_wall_candidate2_pct,
                     CASE WHEN strikes IS NULL THEN NULL ELSE to_json(strikes) END AS strikes
                 FROM {table_name}
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY UPPER(COALESCE(ticker, '{ticker_sql}')),
+                                 CAST(timestamp * 1000 AS BIGINT)
+                    ORDER BY _source_order
+                ) = 1
                 """
             )
-            inserted = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+            inserted = conn.execute(
+                f"""
+                SELECT COUNT(*) FROM (
+                    SELECT 1
+                    FROM {table_name}
+                    QUALIFY ROW_NUMBER() OVER (
+                        PARTITION BY UPPER(COALESCE(ticker, '{ticker_sql}')),
+                                     CAST(timestamp * 1000 AS BIGINT)
+                        ORDER BY _source_order
+                    ) = 1
+                )
+                """
+            ).fetchone()[0]
         return inserted
 
     def _insert_strikes_from_staging(
@@ -264,7 +281,14 @@ class GEXHistoryImporter:
                     TRY_CAST(strike[2] AS DOUBLE) AS gamma,
                     TRY_CAST(strike[3] AS DOUBLE) AS oi_gamma,
                     CASE WHEN array_length(strike) >= 4 THEN strike[4] ELSE NULL END AS priors
-                FROM {table_name} AS t,
+                FROM (
+                    SELECT * FROM {table_name}
+                    QUALIFY ROW_NUMBER() OVER (
+                        PARTITION BY UPPER(COALESCE(ticker, '{ticker_sql}')),
+                                     CAST(timestamp * 1000 AS BIGINT)
+                        ORDER BY _source_order
+                    ) = 1
+                ) AS t,
                      UNNEST(t.strikes) AS strike_entry(strike)
                 WHERE t.strikes IS NOT NULL
                 """

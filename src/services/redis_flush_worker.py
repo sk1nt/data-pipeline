@@ -17,7 +17,6 @@ import redis
 
 from ..config import settings as config_settings
 from lib.redis_client import RedisClient
-from .gex_wall_utils import build_compact_wall_fields, parse_gex_strikes, summarize_wall_candidates
 from .redis_timeseries import RedisTimeSeriesClient
 
 LOGGER = logging.getLogger(__name__)
@@ -286,41 +285,14 @@ class RedisFlushWorker:
 
     @staticmethod
     def _gex_candidate_fields(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        # Candidate values are calculated at snapshot creation time. Downstream
+        # persistence only projects the canonical snapshot fields.
         fields: Dict[str, Any] = {}
-        compact = build_compact_wall_fields(snapshot)
         for prefix in ("pos", "neg"):
             for idx in (1, 2):
                 for name in ("strike", "value", "pct"):
                     field = f"{prefix}_can{idx}_{name}"
-                    fields[field] = compact.get(field, snapshot.get(field))
-        if any(value is not None for value in fields.values()):
-            return fields
-
-        strikes = parse_gex_strikes(snapshot.get("strikes"))
-        fields.update(
-            {
-                f"pos_can{idx}_{name}": value
-                for idx, entry in enumerate(
-                    summarize_wall_candidates(
-                        snapshot.get("major_pos_vol"), strikes, prefer_positive=True
-                    ),
-                    start=1,
-                )
-                for name, value in entry.items()
-            }
-        )
-        fields.update(
-            {
-                f"neg_can{idx}_{name}": value
-                for idx, entry in enumerate(
-                    summarize_wall_candidates(
-                        snapshot.get("major_neg_vol"), strikes, prefer_positive=False
-                    ),
-                    start=1,
-                )
-                for name, value in entry.items()
-            }
-        )
+                    fields[field] = snapshot.get(field)
         return fields
 
     def _seconds_until_daily_run(self) -> float:
@@ -741,7 +713,6 @@ class RedisFlushWorker:
             "ticker": ticker,
             "spot_price": snapshot.get("spot"),
             "zero_gamma": snapshot.get("zero_gamma"),
-            "net_gex": snapshot.get("net_gex"),
             "min_dte": snapshot.get("min_dte"),
             "sec_min_dte": snapshot.get("sec_min_dte"),
             "major_pos_vol": snapshot.get("major_pos_vol"),
@@ -867,7 +838,6 @@ class RedisFlushWorker:
                 ticker,
                 spot_price,
                 zero_gamma,
-                net_gex,
                 min_dte,
                 sec_min_dte,
                 major_pos_vol,
@@ -900,7 +870,6 @@ class RedisFlushWorker:
                 ticker,
                 spot_price,
                 zero_gamma,
-                net_gex,
                 min_dte,
                 sec_min_dte,
                 major_pos_vol,
@@ -984,7 +953,9 @@ class RedisFlushWorker:
         deduped: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
         for row in rows:
             key = tuple(row.get(field) for field in key_fields)
-            deduped[key] = row
+            # Snapshot identity is (symbol, timestamp); first observation wins.
+            if key not in deduped:
+                deduped[key] = row
         return list(deduped.values())
 
     def status(self) -> Dict[str, Any]:
